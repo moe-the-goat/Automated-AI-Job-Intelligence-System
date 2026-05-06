@@ -1,0 +1,24 @@
+{
+  "searches": [
+    {
+      "site_name": ["linkedin", "indeed", "glassdoor"],
+      "search_term": "software engineer",
+      "location": "San Francisco, CA",
+      "distance": 50,
+      "job_type": "fulltime",
+      "is_remote": false,
+      "results_wanted": 20,
+      "hours_old": 24,
+      "country_indeed": "USA"
+    }
+  ],
+  "output": {
+    "use_email": true,
+    "use_github_issue": true
+  },
+  "email_settings": {
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 465,
+    "receiver_emails": ["your_email@example.com"]
+  }
+}

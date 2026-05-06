@@ -1,0 +1,162 @@
+import json
+import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from jobspy import scrape_jobs
+import pandas as pd
+import requests
+from datetime import datetime
+def load_config(config_path="config.json"):
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+def format_email_html(all_jobs_df):
+    if all_jobs_df.empty:
+        return "<p>No new jobs found matching your criteria.</p>"
+    
+    html = "<h2>New Job Postings</h2>"
+    html += "<table border='1' style='border-collapse: collapse; width: 100%;'>"
+    html += "<tr><th>Title</th><th>Company</th><th>Location</th><th>Link</th></tr>"
+    
+    for _, row in all_jobs_df.iterrows():
+        title = row.get("title", "N/A")
+        company = row.get("company", "N/A")
+        
+        # Safely handle location fields
+        city = row.get("city", "") if pd.notna(row.get("city")) else ""
+        state = row.get("state", "") if pd.notna(row.get("state")) else ""
+        location = f"{city}, {state}".strip(", ")
+        if not location:
+            location = "N/A"
+            
+        job_url = row.get("job_url", "#")
+        
+        html += f"<tr><td>{title}</td><td>{company}</td><td>{location}</td><td><a href='{job_url}'>Apply</a></td></tr>"
+    
+    html += "</table>"
+    return html
+
+def send_email(subject, html_content, email_settings):
+    sender_email = os.environ.get("SENDER_EMAIL")
+    app_password = os.environ.get("EMAIL_APP_PASSWORD")
+    
+    if not sender_email or not app_password:
+        print("Error: SENDER_EMAIL or EMAIL_APP_PASSWORD environment variables are not set.")
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = sender_email
+    msg["To"] = ", ".join(email_settings["receiver_emails"])
+
+    msg.attach(MIMEText(html_content, "html"))
+
+    try:
+        # Connect to SMTP server (using SSL for port 465)
+        with smtplib.SMTP_SSL(email_settings["smtp_server"], email_settings["smtp_port"]) as server:
+            server.login(sender_email, app_password)
+            server.send_message(msg)
+        print("Email sent successfully!")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+
+def format_github_markdown(all_jobs_df):
+    if all_jobs_df.empty:
+        return "No new jobs found matching your criteria."
+    
+    md = "## New Job Postings\n\n"
+    md += "| Title | Company | Location | Link |\n"
+    md += "|---|---|---|---|\n"
+    
+    for _, row in all_jobs_df.iterrows():
+        title = row.get("title", "N/A")
+        company = row.get("company", "N/A")
+        
+        city = row.get("city", "") if pd.notna(row.get("city")) else ""
+        state = row.get("state", "") if pd.notna(row.get("state")) else ""
+        location = f"{city}, {state}".strip(", ")
+        if not location:
+            location = "N/A"
+            
+        job_url = row.get("job_url", "#")
+        
+        md += f"| {title} | {company} | {location} | [Apply]({job_url}) |\n"
+    
+    return md
+
+def create_github_issue(title, body):
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    
+    if not token or not repo:
+        print("Error: GITHUB_TOKEN or GITHUB_REPOSITORY environment variables are not set.")
+        return
+        
+    url = f"https://api.github.com/repos/{repo}/issues"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    data = {
+        "title": title,
+        "body": body
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        print(f"GitHub Issue created successfully: {response.json().get('html_url')}")
+    except Exception as e:
+        print(f"Failed to create GitHub Issue: {e}")
+
+def main():
+    config = load_config()
+    all_jobs_dfs = []
+    
+    print("Starting job scrape...")
+    for search in config.get("searches", []):
+        print(f"Scraping for: {search.get('search_term')} in {search.get('location')}...")
+        try:
+            jobs = scrape_jobs(
+                site_name=search.get("site_name", ["linkedin", "indeed", "glassdoor"]),
+                search_term=search.get("search_term"),
+                location=search.get("location"),
+                distance=search.get("distance", 50),
+                job_type=search.get("job_type"),
+                is_remote=search.get("is_remote", False),
+                results_wanted=search.get("results_wanted", 20),
+                hours_old=search.get("hours_old", 24),
+                country_indeed=search.get("country_indeed", "USA")
+            )
+            print(f"Found {len(jobs)} jobs for this search.")
+            all_jobs_dfs.append(jobs)
+        except Exception as e:
+            print(f"Error scraping for {search.get('search_term')}: {e}")
+            
+    if all_jobs_dfs:
+        combined_jobs = pd.concat(all_jobs_dfs, ignore_index=True)
+        # Drop duplicates based on job URL
+        if "job_url" in combined_jobs.columns:
+            combined_jobs = combined_jobs.drop_duplicates(subset=["job_url"])
+            
+        print(f"Total unique jobs found: {len(combined_jobs)}")
+        
+        if not combined_jobs.empty:
+            output_config = config.get("output", {"use_email": True, "use_github_issue": False})
+            
+            if output_config.get("use_email"):
+                html_content = format_email_html(combined_jobs)
+                send_email("Your Automated Job Alerts", html_content, config.get("email_settings", {}))
+                
+            if output_config.get("use_github_issue"):
+                md_content = format_github_markdown(combined_jobs)
+                today = datetime.now().strftime("%Y-%m-%d")
+                create_github_issue(f"Automated Job Alerts - {today}", md_content)
+        else:
+            print("No new jobs found.")
+    else:
+        print("No job data collected.")
+
+if __name__ == "__main__":
+    main()
