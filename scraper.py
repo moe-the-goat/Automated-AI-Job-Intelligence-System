@@ -217,12 +217,16 @@ def main():
         except Exception as e:
             print(f"Error scraping for {search.get('search_term')}: {e}")
             
+    # Determine the maximum hours_old from config to use for APIs
+    max_hours = 24
+    if config.get("searches"):
+        max_hours = max([s.get("hours_old", 24) for s in config.get("searches", [])])
+
     # Fetch from secondary APIs
     print("Fetching from Remotive API...")
     remotive_df = fetch_remotive_jobs()
     if not remotive_df.empty:
-        # Default to 24 hours if config isn't specific
-        remotive_df = filter_api_jobs(remotive_df, hours_old=24)
+        remotive_df = filter_api_jobs(remotive_df, hours_old=max_hours)
         print(f"Found {len(remotive_df)} relevant jobs from Remotive.")
         if not remotive_df.empty:
             all_jobs_dfs.append(remotive_df)
@@ -230,7 +234,7 @@ def main():
     print("Fetching from Arbeitnow API...")
     arbeitnow_df = fetch_arbeitnow_jobs()
     if not arbeitnow_df.empty:
-        arbeitnow_df = filter_api_jobs(arbeitnow_df, hours_old=24)
+        arbeitnow_df = filter_api_jobs(arbeitnow_df, hours_old=max_hours)
         print(f"Found {len(arbeitnow_df)} relevant jobs from Arbeitnow.")
         if not arbeitnow_df.empty:
             all_jobs_dfs.append(arbeitnow_df)
