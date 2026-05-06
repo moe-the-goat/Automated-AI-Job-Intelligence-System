@@ -24,11 +24,18 @@ def format_email_html(all_jobs_df):
         company = row.get("company", "N/A")
         
         # Safely handle location fields
-        city = row.get("city", "") if pd.notna(row.get("city")) else ""
-        state = row.get("state", "") if pd.notna(row.get("state")) else ""
-        location = f"{city}, {state}".strip(", ")
+        loc = row.get("location", "")
+        if pd.notna(loc) and loc:
+            location = str(loc)
+        else:
+            city = row.get("city", "") if pd.notna(row.get("city")) else ""
+            state = row.get("state", "") if pd.notna(row.get("state")) else ""
+            country = row.get("country", "") if pd.notna(row.get("country")) else ""
+            parts = [p for p in [city, state, country] if p]
+            location = ", ".join(parts)
+            
         if not location:
-            location = "N/A"
+            location = "Remote/Unspecified"
             
         job_url = row.get("job_url", "#")
         
@@ -73,11 +80,19 @@ def format_github_markdown(all_jobs_df):
         title = row.get("title", "N/A")
         company = row.get("company", "N/A")
         
-        city = row.get("city", "") if pd.notna(row.get("city")) else ""
-        state = row.get("state", "") if pd.notna(row.get("state")) else ""
-        location = f"{city}, {state}".strip(", ")
+        # Safely handle location fields
+        loc = row.get("location", "")
+        if pd.notna(loc) and loc:
+            location = str(loc)
+        else:
+            city = row.get("city", "") if pd.notna(row.get("city")) else ""
+            state = row.get("state", "") if pd.notna(row.get("state")) else ""
+            country = row.get("country", "") if pd.notna(row.get("country")) else ""
+            parts = [p for p in [city, state, country] if p]
+            location = ", ".join(parts)
+            
         if not location:
-            location = "N/A"
+            location = "Remote/Unspecified"
             
         job_url = row.get("job_url", "#")
         
@@ -139,6 +154,12 @@ def main():
         # Drop duplicates based on job URL
         if "job_url" in combined_jobs.columns:
             combined_jobs = combined_jobs.drop_duplicates(subset=["job_url"])
+            
+        # Filter out senior/lead roles
+        exclude_words = ['senior', 'sr', 'sr.', 'lead', 'principal', 'manager', 'director', 'staff', 'head']
+        if "title" in combined_jobs.columns:
+            pattern = '|'.join([rf'\b{w}\b' for w in exclude_words])
+            combined_jobs = combined_jobs[~combined_jobs['title'].str.lower().str.contains(pattern, na=False)]
             
         print(f"Total unique jobs found: {len(combined_jobs)}")
         

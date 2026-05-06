@@ -7,7 +7,7 @@
       "job_type": "fulltime",
       "is_remote": true,
       "results_wanted": 100,
-      "hours_old": 336,
+      "hours_old": 24,
       "country_indeed": "USA"
     },
     {
@@ -17,7 +17,7 @@
       "job_type": "internship",
       "is_remote": true,
       "results_wanted": 100,
-      "hours_old": 336,
+      "hours_old": 24,
       "country_indeed": "USA"
     },
     {
@@ -26,7 +26,7 @@
       "location": "Palestine",
       "is_remote": false,
       "results_wanted": 50,
-      "hours_old": 336
+      "hours_old": 24
     }
   ],
   "output": {
