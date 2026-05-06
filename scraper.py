@@ -44,6 +44,74 @@ def format_email_html(all_jobs_df):
     html += "</table>"
     return html
 
+def fetch_remotive_jobs():
+    try:
+        url = "https://remotive.com/api/remote-jobs?category=software-dev"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        jobs = response.json().get("jobs", [])
+        
+        parsed_jobs = []
+        for j in jobs:
+            parsed_jobs.append({
+                "title": j.get("title", ""),
+                "company": j.get("company_name", ""),
+                "location": j.get("candidate_required_location", "Remote"),
+                "job_url": j.get("url", ""),
+                "date_posted": j.get("publication_date", "")
+            })
+        return pd.DataFrame(parsed_jobs)
+    except Exception as e:
+        print(f"Failed to fetch Remotive jobs: {e}")
+        return pd.DataFrame()
+
+def fetch_arbeitnow_jobs():
+    try:
+        url = "https://www.arbeitnow.com/api/job-board-api"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        jobs = response.json().get("data", [])
+        
+        parsed_jobs = []
+        for j in jobs:
+            if j.get("remote"):
+                parsed_jobs.append({
+                    "title": j.get("title", ""),
+                    "company": j.get("company_name", ""),
+                    "location": "Remote",
+                    "job_url": j.get("url", ""),
+                    "date_posted": str(j.get("created_at", ""))
+                })
+        return pd.DataFrame(parsed_jobs)
+    except Exception as e:
+        print(f"Failed to fetch Arbeitnow jobs: {e}")
+        return pd.DataFrame()
+
+def filter_api_jobs(df, hours_old):
+    if df.empty:
+        return df
+    
+    # 1. Filter by role and experience keywords
+    role_keywords = ['software', 'developer', 'engineer', 'ai', 'data', 'machine learning', 'backend', 'frontend', 'fullstack']
+    exp_keywords = ['junior', 'jr', 'entry', 'intern', 'internship', 'graduate', 'grad']
+    
+    title_lower = df['title'].str.lower()
+    has_role = title_lower.str.contains('|'.join(role_keywords), na=False)
+    has_exp = title_lower.str.contains('|'.join([rf'\b{w}\b' for w in exp_keywords]), na=False)
+    df = df[has_role & has_exp].copy()
+    
+    # 2. Filter by recency (hours_old)
+    try:
+        df['date_posted_dt'] = pd.to_datetime(df['date_posted'], utc=True, errors='coerce')
+        now = pd.Timestamp.utcnow()
+        cutoff = now - pd.Timedelta(hours=hours_old)
+        df = df[df['date_posted_dt'].isna() | (df['date_posted_dt'] >= cutoff)]
+        df = df.drop(columns=['date_posted_dt'])
+    except Exception as e:
+        print(f"Date filtering error: {e}")
+        
+    return df
+
 def send_email(subject, html_content, email_settings):
     sender_email = os.environ.get("SENDER_EMAIL")
     app_password = os.environ.get("EMAIL_APP_PASSWORD")
@@ -149,14 +217,37 @@ def main():
         except Exception as e:
             print(f"Error scraping for {search.get('search_term')}: {e}")
             
+    # Fetch from secondary APIs
+    print("Fetching from Remotive API...")
+    remotive_df = fetch_remotive_jobs()
+    if not remotive_df.empty:
+        # Default to 24 hours if config isn't specific
+        remotive_df = filter_api_jobs(remotive_df, hours_old=24)
+        print(f"Found {len(remotive_df)} relevant jobs from Remotive.")
+        if not remotive_df.empty:
+            all_jobs_dfs.append(remotive_df)
+            
+    print("Fetching from Arbeitnow API...")
+    arbeitnow_df = fetch_arbeitnow_jobs()
+    if not arbeitnow_df.empty:
+        arbeitnow_df = filter_api_jobs(arbeitnow_df, hours_old=24)
+        print(f"Found {len(arbeitnow_df)} relevant jobs from Arbeitnow.")
+        if not arbeitnow_df.empty:
+            all_jobs_dfs.append(arbeitnow_df)
+            
     if all_jobs_dfs:
         combined_jobs = pd.concat(all_jobs_dfs, ignore_index=True)
-        # Drop duplicates based on job URL
+        
+        # Drop duplicates by URL
         if "job_url" in combined_jobs.columns:
             combined_jobs = combined_jobs.drop_duplicates(subset=["job_url"])
             
+        # Drop duplicates by exact Title + Company
+        if "title" in combined_jobs.columns and "company" in combined_jobs.columns:
+            combined_jobs = combined_jobs.drop_duplicates(subset=["title", "company"])
+            
         # Filter out senior/lead roles
-        exclude_words = ['senior', 'sr', 'sr.', 'lead', 'principal', 'manager', 'director', 'staff', 'head']
+        exclude_words = ['senior', 'sr', 'sr.', 'lead', 'principal', 'manager', 'director', 'staff', 'head', 'vp', 'president']
         if "title" in combined_jobs.columns:
             pattern = '|'.join([rf'\b{w}\b' for w in exclude_words])
             combined_jobs = combined_jobs[~combined_jobs['title'].str.lower().str.contains(pattern, na=False)]
