@@ -22,8 +22,8 @@
     },
     {
       "site_name": ["linkedin"],
-      "search_term": "software engineer OR AI OR junior",
-      "location": "Palestine",
+      "search_term": "software engineer OR AI OR data",
+      "location": "State of Palestine",
       "is_remote": false,
       "results_wanted": 50,
       "hours_old": 24

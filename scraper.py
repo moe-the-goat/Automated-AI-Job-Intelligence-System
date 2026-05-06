@@ -256,6 +256,12 @@ def main():
             pattern = '|'.join([rf'\b{w}\b' for w in exclude_words])
             combined_jobs = combined_jobs[~combined_jobs['title'].str.lower().str.contains(pattern, na=False)]
             
+        # Ensure job title is highly relevant (must contain at least one tech keyword)
+        role_keywords = ['software', 'developer', 'engineer', 'ai', 'data', 'machine learning', 'backend', 'frontend', 'fullstack', 'web', 'python', 'java', 'c\\+\\+', 'c#', 'programmer']
+        if "title" in combined_jobs.columns:
+            pattern = '|'.join([rf'{w}' for w in role_keywords])
+            combined_jobs = combined_jobs[combined_jobs['title'].str.lower().str.contains(pattern, na=False)]
+            
         print(f"Total unique jobs found: {len(combined_jobs)}")
         
         if not combined_jobs.empty:
