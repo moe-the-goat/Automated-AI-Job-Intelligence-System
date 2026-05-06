@@ -2,8 +2,8 @@ name: Automated Job Alert Scraper
 
 on:
   schedule:
-    # Runs at 08:00 UTC every day
-    - cron: '0 8 * * *'
+    # Runs at 06:00 UTC (9:00 AM Jerusalem Time during Daylight Saving)
+    - cron: '0 6 * * *'
   workflow_dispatch: # Allows manual triggering
 
 jobs:
