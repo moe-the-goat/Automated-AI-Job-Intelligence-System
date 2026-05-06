@@ -1,15 +1,32 @@
 {
   "searches": [
     {
-      "site_name": ["linkedin", "indeed", "glassdoor"],
-      "search_term": "software engineer",
-      "location": "San Francisco, CA",
-      "distance": 50,
+      "site_name": ["linkedin", "glassdoor"],
+      "search_term": "(software engineer OR software developer OR AI OR machine learning) AND (junior OR entry OR graduate)",
+      "location": "Worldwide",
       "job_type": "fulltime",
-      "is_remote": false,
-      "results_wanted": 20,
-      "hours_old": 24,
+      "is_remote": true,
+      "results_wanted": 100,
+      "hours_old": 336,
       "country_indeed": "USA"
+    },
+    {
+      "site_name": ["linkedin", "glassdoor"],
+      "search_term": "software engineer OR AI OR machine learning",
+      "location": "Worldwide",
+      "job_type": "internship",
+      "is_remote": true,
+      "results_wanted": 100,
+      "hours_old": 336,
+      "country_indeed": "USA"
+    },
+    {
+      "site_name": ["linkedin"],
+      "search_term": "software engineer OR AI OR junior",
+      "location": "Palestine",
+      "is_remote": false,
+      "results_wanted": 50,
+      "hours_old": 336
     }
   ],
   "output": {
@@ -19,6 +36,6 @@
   "email_settings": {
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 465,
-    "receiver_emails": ["your_email@example.com"]
+    "receiver_emails": ["noahabuhijleh9@gmail.com"]
   }
 }
