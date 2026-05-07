@@ -2,8 +2,8 @@ name: Automated Job Alert Scraper
 
 on:
   schedule:
-    # Runs at 06:15 UTC (9:15 AM Jerusalem Time) to avoid GitHub's 9:00 AM server congestion
-    - cron: '15 6 * * *'
+    # Runs at 06:55 UTC (9:55 AM Jerusalem Time)
+    - cron: '55 6 * * *'
   workflow_dispatch: # Allows manual triggering
 
 jobs:
