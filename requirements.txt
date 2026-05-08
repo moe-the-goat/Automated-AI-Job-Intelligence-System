@@ -1,3 +1,5 @@
 python-jobspy
 pandas
 requests
+google-generativeai
+beautifulsoup4
