@@ -253,7 +253,8 @@ Reply ONLY with valid JSON in this exact format, with no markdown formatting:
 {{"is_valid": true/false, "verdict": "A 1-sentence reason for your decision"}}
 """
     try:
-        time.sleep(2)
+        # Sleep for 4 seconds to strictly stay under the 15 Requests Per Minute free tier limit
+        time.sleep(4)
         response = model.generate_content(prompt)
         text = response.text.strip()
         if text.startswith('```json'):
