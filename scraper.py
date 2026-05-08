@@ -225,7 +225,7 @@ def evaluate_job_with_ai(row, cv_text, api_key):
         return "No API Key provided", True
         
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    model = genai.GenerativeModel('gemini-flash-latest')
     
     title = str(row.get("title", ""))
     job_type = str(row.get("job_type", "")).lower()
