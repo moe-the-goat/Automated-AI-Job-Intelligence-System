@@ -220,67 +220,56 @@ def get_full_job_description(url):
         pass
     return ""
 
-def evaluate_jobs_in_batch(jobs_df, cv_text, api_key):
+def evaluate_job_with_ai(row, cv_text, api_key):
     if not api_key:
-        return ["No API Key provided"] * len(jobs_df), [True] * len(jobs_df)
+        return "No API Key provided", True
         
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-flash-latest')
+    # Using Gemini 3.1 Flash Lite which has 500 RPD and 15 RPM limits
+    model = genai.GenerativeModel('gemini-3.1-flash-lite')
     
-    verdicts = []
-    valid_mask = []
-    
-    chunk_size = 10
-    for i in range(0, len(jobs_df), chunk_size):
-        chunk = jobs_df.iloc[i:i+chunk_size]
+    title = str(row.get("title", ""))
+    job_type = str(row.get("job_type", "")).lower()
+    description = str(row.get("description", ""))
+    if pd.isna(description) or len(description) < 100:
+        description = get_full_job_description(str(row.get("job_url", "")))
         
-        prompt = f"""You are an expert technical recruiter. Candidate CV Summary:
+    is_internship = 'intern' in title.lower() or 'internship' in job_type
+    
+    prompt = f"""You are an expert technical recruiter. 
+Candidate's CV Summary:
 {cv_text[:3000]}
 
-Evaluate the following {len(chunk)} jobs. STRICT RULES:
-1. REMOTE CHECK: Fail if restricted to a specific country (e.g. US Only) instead of Worldwide/EMEA/Palestine.
-2. INTERNSHIP: Fail if not AI, ML, Data, or SWE.
-3. FULL-TIME: Pass if candidate CV is a reasonable match for Junior/Entry role, allowing leniency for general ML/Python/FastAPI skills.
+Job Title: {title}
+Is this an Internship?: {is_internship}
+Job Description:
+{description[:5000]}
 
-Jobs to evaluate:
+Evaluate based on these STRICT rules:
+1. REMOTE CHECK: If the job says it is remote, verify if it explicitly restricts it to a specific country (e.g. "Remote in USA only"). If it restricts to a specific country other than Palestine/Worldwide/EMEA, it FAILS.
+2. If this is an Internship, it MUST be strictly related to Software Engineering, Machine Learning, Data, or AI. If it is an HR, Marketing, or random internship, it FAILS.
+3. If this is a Full-Time job, evaluate if the candidate's CV matches for an Entry-level/Junior role. Allow leniency if they have strong general ML/Python/FastAPI background.
+
+Reply ONLY with valid JSON in this exact format, with no markdown formatting:
+{{"is_valid": true/false, "verdict": "A 1-sentence reason for your decision"}}
 """
-        job_data = []
-        for idx, row in chunk.iterrows():
-            title = str(row.get("title", ""))
-            job_type = str(row.get("job_type", "")).lower()
-            desc = str(row.get("description", ""))
-            if pd.isna(desc) or len(desc) < 100:
-                desc = get_full_job_description(str(row.get("job_url", "")))
-            is_intern = 'intern' in title.lower() or 'internship' in job_type
-            job_data.append({"index": len(job_data), "title": title, "is_internship": is_intern, "description": desc[:1500]})
-            
+    try:
+        # Sleep for 4 seconds to strictly stay under the 15 Requests Per Minute free tier limit
+        time.sleep(4)
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        if text.startswith('```json'):
+            text = text[7:]
+        if text.endswith('```'):
+            text = text[:-3]
+        text = text.strip()
         import json
-        prompt += json.dumps(job_data) + "\n\nReply ONLY with a JSON ARRAY of objects: [{\"index\": 0, \"is_valid\": true/false, \"verdict\": \"1-sentence reason\"}, ...]"
-        
-        try:
-            time.sleep(15)
-            response = model.generate_content(prompt)
-            text = response.text.strip()
-            if text.startswith('```json'): text = text[7:]
-            if text.endswith('```'): text = text[:-3]
-            results = json.loads(text.strip())
-            
-            for j in range(len(chunk)):
-                v = "AI evaluation missing"
-                valid = True
-                for r in results:
-                    if r.get("index") == j:
-                        v = r.get("verdict", "")
-                        valid = r.get("is_valid", True)
-                verdicts.append(v)
-                valid_mask.append(valid)
-        except Exception as e:
-            error_msg = str(e).replace('"', "'")
-            for j in range(len(chunk)):
-                verdicts.append(f"AI Batch Error: {error_msg[:100]}...")
-                valid_mask.append(True)
-                
-    return verdicts, valid_mask
+        result = json.loads(text)
+        return result.get("verdict", "AI Approved"), result.get("is_valid", True)
+    except Exception as e:
+        print(f"AI evaluation failed for {title}: {str(e)}")
+        error_msg = str(e).replace('"', "'")
+        return f"AI Error: {error_msg[:100]}...", True
 
 def main():
     config = load_config()
@@ -362,8 +351,13 @@ def main():
             except:
                 cv_text = "Computer Engineering student, strong in Python, PyTorch, FastAPI, RAG, ML, and Backend Development."
             
-            print("Running AI Job Validation in batches (this may take a while)...")
-            verdicts, valid_mask = evaluate_jobs_in_batch(combined_jobs, cv_text, gemini_key)
+            print("Running AI Job Validation 1-by-1 (this may take a while)...")
+            verdicts = []
+            valid_mask = []
+            for idx, row in combined_jobs.iterrows():
+                verdict, is_valid = evaluate_job_with_ai(row, cv_text, gemini_key)
+                verdicts.append(verdict)
+                valid_mask.append(is_valid)
             
             combined_jobs['ai_verdict'] = verdicts
             combined_jobs = combined_jobs[valid_mask]
