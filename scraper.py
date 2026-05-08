@@ -225,7 +225,7 @@ def evaluate_job_with_ai(row, cv_text, api_key):
         return "No API Key provided", True
         
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
     title = str(row.get("title", ""))
     job_type = str(row.get("job_type", "")).lower()
@@ -265,8 +265,9 @@ Reply ONLY with valid JSON in this exact format, with no markdown formatting:
         result = json.loads(text)
         return result.get("verdict", "AI Approved"), result.get("is_valid", True)
     except Exception as e:
-        print(f"AI evaluation failed for {title}: {e}")
-        return "AI evaluation failed, passed by default", True
+        print(f"AI evaluation failed for {title}: {str(e)}")
+        error_msg = str(e).replace('"', "'")
+        return f"AI Error: {error_msg[:100]}...", True
 
 def main():
     config = load_config()
