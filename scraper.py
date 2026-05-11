@@ -246,7 +246,10 @@ Job Description:
 {description[:5000]}
 
 Evaluate based on these STRICT rules:
-1. REMOTE CHECK: If the job says it is remote, verify if it explicitly restricts it to a specific country (e.g. "Remote in USA only"). If it restricts to a specific country other than Palestine/Worldwide/EMEA, it FAILS.
+1. REMOTE LOCATION CHECK: Deeply analyze the remote policy. 
+   - If it explicitly restricts remote work to specific regions/countries (e.g. "Remote in US/UK/EU", "Selected countries only", "Must be resident of...") and does NOT include Palestine, EMEA, or Middle East, it FAILS.
+   - If it mentions "Eligible countries" or "Remote in..." without mentioning Palestine, EMEA, or Worldwide, it FAILS.
+   - If it explicitly says "Worldwide", "Global", "EMEA", or simply "Remote" with absolutely no geographic restrictions mentioned, it PASSES.
 2. If this is an Internship, it MUST be strictly related to Software Engineering, Machine Learning, Data, or AI. If it is an HR, Marketing, or random internship, it FAILS.
 3. If this is a Full-Time job, evaluate if the candidate's CV matches for an Entry-level/Junior role. Allow leniency if they have strong general ML/Python/FastAPI background.
 
