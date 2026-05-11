@@ -24,14 +24,16 @@ def format_email_html(internships_df, jobs_df):
         html += "<p>No relevant internships found today.</p>"
     else:
         html += "<table border='1' style='border-collapse: collapse; width: 100%;'>"
-        html += "<tr><th>Title</th><th>Company</th><th>Location</th><th>AI Verdict</th><th>Link</th></tr>"
+        html += "<tr><th>Title</th><th>Company</th><th>Location</th><th>AI Verdict</th><th>Match %</th><th>Link</th></tr>"
         for _, row in internships_df.iterrows():
             title = row.get("title", "N/A")
             company = row.get("company", "N/A")
             location = row.get("location", "Remote/Unspecified")
             verdict = row.get("ai_verdict", "")
+            match_pct = row.get("match_percentage", "N/A")
+            if match_pct != "N/A": match_pct = f"{match_pct}%"
             job_url = row.get("job_url", "#")
-            html += f"<tr><td>{title}</td><td>{company}</td><td>{location}</td><td>{verdict}</td><td><a href='{job_url}'>Apply</a></td></tr>"
+            html += f"<tr><td>{title}</td><td>{company}</td><td>{location}</td><td>{verdict}</td><td>{match_pct}</td><td><a href='{job_url}'>Apply</a></td></tr>"
         html += "</table><br>"
         
     # --- Full-Time Jobs Table ---
@@ -40,14 +42,16 @@ def format_email_html(internships_df, jobs_df):
         html += "<p>No relevant full-time jobs found today.</p>"
     else:
         html += "<table border='1' style='border-collapse: collapse; width: 100%;'>"
-        html += "<tr><th>Title</th><th>Company</th><th>Location</th><th>AI Verdict</th><th>Link</th></tr>"
+        html += "<tr><th>Title</th><th>Company</th><th>Location</th><th>AI Verdict</th><th>Match %</th><th>Link</th></tr>"
         for _, row in jobs_df.iterrows():
             title = row.get("title", "N/A")
             company = row.get("company", "N/A")
             location = row.get("location", "Remote/Unspecified")
             verdict = row.get("ai_verdict", "")
+            match_pct = row.get("match_percentage", "N/A")
+            if match_pct != "N/A": match_pct = f"{match_pct}%"
             job_url = row.get("job_url", "#")
-            html += f"<tr><td>{title}</td><td>{company}</td><td>{location}</td><td>{verdict}</td><td><a href='{job_url}'>Apply</a></td></tr>"
+            html += f"<tr><td>{title}</td><td>{company}</td><td>{location}</td><td>{verdict}</td><td>{match_pct}</td><td><a href='{job_url}'>Apply</a></td></tr>"
         html += "</table>"
         
     return html
@@ -152,15 +156,17 @@ def format_github_markdown(internships_df, jobs_df):
     if internships_df.empty:
         md += "No relevant internships found today.\n\n"
     else:
-        md += "| Title | Company | Location | AI Verdict | Link |\n"
-        md += "|---|---|---|---|---|\n"
+        md += "| Title | Company | Location | AI Verdict | Match % | Link |\n"
+        md += "|---|---|---|---|---|---|\n"
         for _, row in internships_df.iterrows():
             title = row.get("title", "N/A")
             company = row.get("company", "N/A")
             location = row.get("location", "Remote/Unspecified")
             verdict = row.get("ai_verdict", "")
+            match_pct = row.get("match_percentage", "N/A")
+            if match_pct != "N/A": match_pct = f"{match_pct}%"
             job_url = row.get("job_url", "#")
-            md += f"| {title} | {company} | {location} | {verdict} | [Apply]({job_url}) |\n"
+            md += f"| {title} | {company} | {location} | {verdict} | {match_pct} | [Apply]({job_url}) |\n"
         md += "\n"
         
     # --- Full-Time Jobs Table ---
@@ -168,15 +174,17 @@ def format_github_markdown(internships_df, jobs_df):
     if jobs_df.empty:
         md += "No relevant full-time jobs found today.\n\n"
     else:
-        md += "| Title | Company | Location | AI Verdict | Link |\n"
-        md += "|---|---|---|---|---|\n"
+        md += "| Title | Company | Location | AI Verdict | Match % | Link |\n"
+        md += "|---|---|---|---|---|---|\n"
         for _, row in jobs_df.iterrows():
             title = row.get("title", "N/A")
             company = row.get("company", "N/A")
             location = row.get("location", "Remote/Unspecified")
             verdict = row.get("ai_verdict", "")
+            match_pct = row.get("match_percentage", "N/A")
+            if match_pct != "N/A": match_pct = f"{match_pct}%"
             job_url = row.get("job_url", "#")
-            md += f"| {title} | {company} | {location} | {verdict} | [Apply]({job_url}) |\n"
+            md += f"| {title} | {company} | {location} | {verdict} | {match_pct} | [Apply]({job_url}) |\n"
             
     return md
 
@@ -233,7 +241,7 @@ def search_company_remote_policy(company_name):
 
 def evaluate_job_with_ai(row, cv_text, api_key):
     if not api_key:
-        return "No API Key provided", True
+        return "No API Key provided", True, "N/A"
         
     genai.configure(api_key=api_key)
     # Using Gemini 3.1 Flash Lite which has 500 RPD and 15 RPM limits
@@ -271,9 +279,10 @@ Evaluate based on these STRICT rules:
    - If it is ambiguous but there is NO evidence excluding Palestine/Middle East, assume it is PASSABLE but note the ambiguity in the verdict.
 2. If this is an Internship, it MUST be strictly related to Software Engineering, Machine Learning, Data, or AI. If it is an HR, Marketing, or random internship, it FAILS.
 3. If this is a Full-Time job, evaluate if the candidate's CV matches for an Entry-level/Junior role. Allow leniency if they have strong general ML/Python/FastAPI background.
+4. MATCH PERCENTAGE: Mathematically calculate a realistic match percentage (0-100) based strictly on how the candidate's skills and experience in the CV align with the job description's requirements. Deduct points proportionally for missing core requirements. Output as a clean integer (e.g. 88, not 88.23).
 
 Reply ONLY with valid JSON in this exact format, with no markdown formatting:
-{{"is_valid": true/false, "verdict": "A 1-sentence reason for your decision"}}
+{{"is_valid": true/false, "verdict": "A 1-sentence reason for your decision", "match_percentage": 85}}
 """
     try:
         # Sleep for 4 seconds to strictly stay under the 15 Requests Per Minute free tier limit
@@ -287,11 +296,11 @@ Reply ONLY with valid JSON in this exact format, with no markdown formatting:
         text = text.strip()
         import json
         result = json.loads(text)
-        return result.get("verdict", "AI Approved"), result.get("is_valid", True)
+        return result.get("verdict", "AI Approved"), result.get("is_valid", True), result.get("match_percentage", "N/A")
     except Exception as e:
         print(f"AI evaluation failed for {title}: {str(e)}")
         error_msg = str(e).replace('"', "'")
-        return f"AI Error: {error_msg[:100]}...", True
+        return f"AI Error: {error_msg[:100]}...", True, "N/A"
 
 def main():
     config = load_config()
@@ -376,12 +385,15 @@ def main():
             print("Running AI Job Validation 1-by-1 (this may take a while)...")
             verdicts = []
             valid_mask = []
+            match_pcts = []
             for idx, row in combined_jobs.iterrows():
-                verdict, is_valid = evaluate_job_with_ai(row, cv_text, gemini_key)
+                verdict, is_valid, match_pct = evaluate_job_with_ai(row, cv_text, gemini_key)
                 verdicts.append(verdict)
                 valid_mask.append(is_valid)
+                match_pcts.append(match_pct)
             
             combined_jobs['ai_verdict'] = verdicts
+            combined_jobs['match_percentage'] = match_pcts
             combined_jobs = combined_jobs[valid_mask]
             print(f"Total jobs remaining after AI validation: {len(combined_jobs)}")
             
