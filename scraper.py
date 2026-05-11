@@ -10,6 +10,7 @@ from datetime import datetime
 import google.generativeai as genai
 from bs4 import BeautifulSoup
 import time
+from duckduckgo_search import DDGS
 def load_config(config_path="config.json"):
     with open(config_path, "r") as f:
         return json.load(f)
@@ -220,6 +221,16 @@ def get_full_job_description(url):
         pass
     return ""
 
+def search_company_remote_policy(company_name):
+    print(f"Deep web search triggered for {company_name}'s remote policy...")
+    try:
+        results = DDGS().text(f"{company_name} eligible remote countries global careers", max_results=3)
+        snippets = [r.get('body', '') for r in results]
+        return " ".join(snippets)
+    except Exception as e:
+        print(f"Web search failed: {e}")
+        return ""
+
 def evaluate_job_with_ai(row, cv_text, api_key):
     if not api_key:
         return "No API Key provided", True
@@ -229,6 +240,7 @@ def evaluate_job_with_ai(row, cv_text, api_key):
     model = genai.GenerativeModel('gemini-3.1-flash-lite')
     
     title = str(row.get("title", ""))
+    company = str(row.get("company", ""))
     job_type = str(row.get("job_type", "")).lower()
     description = str(row.get("description", ""))
     if pd.isna(description) or len(description) < 100:
@@ -236,6 +248,12 @@ def evaluate_job_with_ai(row, cv_text, api_key):
         
     is_internship = 'intern' in title.lower() or 'internship' in job_type
     
+    web_search_context = ""
+    if "selected countries" in description.lower() or "eligible countries" in description.lower() or "certain countries" in description.lower():
+        search_data = search_company_remote_policy(company)
+        if search_data:
+            web_search_context = f"\n\n[LIVE WEB SEARCH RESULTS FOR '{company}' REMOTE POLICY]:\n{search_data}\n\nUse this live web data to determine if Palestine/Middle East is explicitly excluded from their remote eligible countries."
+            
     prompt = f"""You are an expert technical recruiter. 
 Candidate's CV Summary:
 {cv_text[:3000]}
@@ -246,10 +264,11 @@ Job Description:
 {description[:5000]}
 
 Evaluate based on these STRICT rules:
-1. REMOTE LOCATION CHECK: Deeply analyze the remote policy. 
-   - If it explicitly restricts remote work to specific regions/countries (e.g. "Remote in US/UK/EU", "Selected countries only", "Must be resident of...") and does NOT include Palestine, EMEA, or Middle East, it FAILS.
-   - If it mentions "Eligible countries" or "Remote in..." without mentioning Palestine, EMEA, or Worldwide, it FAILS.
-   - If it explicitly says "Worldwide", "Global", "EMEA", or simply "Remote" with absolutely no geographic restrictions mentioned, it PASSES.
+1. REMOTE LOCATION CHECK: Deeply analyze the remote policy. {web_search_context}
+   - If the description or web search explicitly restricts remote work to specific regions/countries (e.g. "Remote in US/UK/EU", "Must be resident of...") and does NOT include Palestine, EMEA, or Middle East, it FAILS.
+   - If the description says "Eligible countries" but the web search data reveals Palestine/Middle East is NOT eligible, it FAILS.
+   - If it explicitly says "Worldwide", "Global", "EMEA", or simply "Remote" with absolutely no geographic restrictions found, it PASSES.
+   - If it is ambiguous but there is NO evidence excluding Palestine/Middle East, assume it is PASSABLE but note the ambiguity in the verdict.
 2. If this is an Internship, it MUST be strictly related to Software Engineering, Machine Learning, Data, or AI. If it is an HR, Marketing, or random internship, it FAILS.
 3. If this is a Full-Time job, evaluate if the candidate's CV matches for an Entry-level/Junior role. Allow leniency if they have strong general ML/Python/FastAPI background.
 
