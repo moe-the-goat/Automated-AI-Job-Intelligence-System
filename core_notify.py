@@ -169,3 +169,38 @@ def create_github_issue(title, body):
         print(f"GitHub Issue created successfully: {response.json().get('html_url')}")
     except Exception as e:
         print(f"Failed to create GitHub Issue: {e}")
+
+def cleanup_old_github_issues(days_old=5):
+    """Closes 'Automated AI Job Alerts' issues that are older than `days_old` days to keep the repo clean."""
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    
+    if not token or not repo:
+        return
+        
+    url = f"https://api.github.com/repos/{repo}/issues?state=open&per_page=100"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        issues = response.json()
+        
+        now = datetime.utcnow()
+        for issue in issues:
+            if "Automated AI Job Alerts" in issue.get("title", ""):
+                created_at_str = issue.get("created_at")
+                if created_at_str:
+                    created_at = datetime.strptime(created_at_str, "%Y-%m-%dT%H:%M:%SZ")
+                    age_days = (now - created_at).days
+                    if age_days >= days_old:
+                        issue_num = issue.get("number")
+                        print(f"Closing old issue #{issue_num} (Age: {age_days} days)")
+                        patch_url = f"https://api.github.com/repos/{repo}/issues/{issue_num}"
+                        requests.patch(patch_url, headers=headers, json={"state": "closed"})
+                        
+    except Exception as e:
+        print(f"Failed to cleanup old GitHub issues: {e}")

@@ -12,7 +12,7 @@ from core_search import (
 )
 from core_filter import filter_api_jobs, apply_pipeline_filters, JobTracker
 from core_ai import evaluate_job_with_ai
-from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue
+from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
 """
 MAIN SCRAPER EXECUTOR
@@ -154,6 +154,10 @@ def main():
                 md_content = format_github_markdown(internships_df, jobs_df, stats)
                 today = datetime.now().strftime("%Y-%m-%d")
                 create_github_issue(f"Automated AI Job Alerts - {today}", md_content)
+                
+                # Clean up old issues to keep the repo clean
+                print("Running GitHub Issue cleanup...")
+                cleanup_old_github_issues(days_old=5)
         else:
             print("No new jobs survived the filters today.")
     else:
