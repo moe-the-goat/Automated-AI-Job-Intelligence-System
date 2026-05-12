@@ -4,3 +4,4 @@ requests
 google-generativeai
 beautifulsoup4
 duckduckgo-search
+openpyxl
