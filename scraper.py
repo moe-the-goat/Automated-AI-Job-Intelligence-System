@@ -229,15 +229,24 @@ def get_full_job_description(url):
         pass
     return ""
 
-def search_company_remote_policy(company_name):
-    print(f"Deep web search triggered for {company_name}'s remote policy...")
+def search_company_remote_policy(company_name, job_title):
+    print(f"Deep web search triggered for {company_name} ({job_title}) remote policy...")
+    snippets = []
     try:
-        results = DDGS().text(f"{company_name} eligible remote countries global careers", max_results=3)
-        snippets = [r.get('body', '') for r in results]
+        # Query 1: Position specific remote rules
+        q1 = f"{company_name} \"{job_title}\" remote eligible countries"
+        res1 = DDGS().text(q1, max_results=2)
+        snippets.extend([r.get('body', '') for r in res1])
+        
+        # Query 2: General company hiring in Middle East / Palestine
+        q2 = f"{company_name} hire remote Middle East Palestine EMEA"
+        res2 = DDGS().text(q2, max_results=2)
+        snippets.extend([r.get('body', '') for r in res2])
+        
         return " ".join(snippets)
     except Exception as e:
         print(f"Web search failed: {e}")
-        return ""
+        return " ".join(snippets)
 
 def evaluate_job_with_ai(row, cv_text, api_key):
     if not api_key:
@@ -258,7 +267,7 @@ def evaluate_job_with_ai(row, cv_text, api_key):
     
     web_search_context = ""
     if "selected countries" in description.lower() or "eligible countries" in description.lower() or "certain countries" in description.lower():
-        search_data = search_company_remote_policy(company)
+        search_data = search_company_remote_policy(company, title)
         if search_data:
             web_search_context = f"\n\n[LIVE WEB SEARCH RESULTS FOR '{company}' REMOTE POLICY]:\n{search_data}\n\nUse this live web data to determine if Palestine/Middle East is explicitly excluded from their remote eligible countries."
             
