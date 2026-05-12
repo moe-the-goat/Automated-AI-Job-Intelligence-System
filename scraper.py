@@ -99,18 +99,63 @@ def fetch_arbeitnow_jobs():
         print(f"Failed to fetch Arbeitnow jobs: {e}")
         return pd.DataFrame()
 
+def fetch_jobicy_jobs():
+    try:
+        url = "https://jobicy.com/api/v2/remote-jobs?jobCategory=programming"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        jobs = response.json().get("jobs", [])
+        
+        parsed_jobs = []
+        for j in jobs:
+            parsed_jobs.append({
+                "title": j.get("jobTitle", ""),
+                "company": j.get("companyName", ""),
+                "location": j.get("jobGeo", "Remote"),
+                "job_url": j.get("url", ""),
+                "description": j.get("jobDescription", ""),
+                "date_posted": j.get("pubDate", "")
+            })
+        return pd.DataFrame(parsed_jobs)
+    except Exception as e:
+        print(f"Failed to fetch Jobicy jobs: {e}")
+        return pd.DataFrame()
+
+def fetch_remoteok_jobs():
+    try:
+        url = "https://remoteok.com/api"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        jobs = response.json()
+        
+        parsed_jobs = []
+        for j in jobs:
+            if "legal" in j:
+                continue
+            parsed_jobs.append({
+                "title": j.get("position", ""),
+                "company": j.get("company", ""),
+                "location": j.get("location", "Remote"),
+                "job_url": j.get("url", ""),
+                "description": j.get("description", ""),
+                "date_posted": j.get("date", "")
+            })
+        return pd.DataFrame(parsed_jobs)
+    except Exception as e:
+        print(f"Failed to fetch RemoteOK jobs: {e}")
+        return pd.DataFrame()
+
 def filter_api_jobs(df, hours_old):
     if df.empty:
         return df
     
-    # 1. Filter by role and experience keywords
-    role_keywords = ['software', 'developer', 'engineer', 'ai', 'data', 'machine learning', 'backend', 'frontend', 'fullstack']
-    exp_keywords = ['junior', 'jr', 'entry', 'intern', 'internship', 'graduate', 'grad']
+    role_keywords = ['software', 'developer', 'engineer', 'ai', 'data', 'machine learning', 'backend', 'frontend', 'fullstack', 'python', 'java']
     
     title_lower = df['title'].str.lower()
     has_role = title_lower.str.contains('|'.join(role_keywords), na=False)
-    has_exp = title_lower.str.contains('|'.join([rf'\b{w}\b' for w in exp_keywords]), na=False)
-    df = df[has_role & has_exp].copy()
+    # Removed the 'has_exp' double filter here as recommended in Tier 1. Let AI decide seniority.
+    df = df[has_role].copy()
     
     # 2. Filter by recency (hours_old)
     try:
@@ -356,6 +401,22 @@ def main():
         print(f"Found {len(arbeitnow_df)} relevant jobs from Arbeitnow.")
         if not arbeitnow_df.empty:
             all_jobs_dfs.append(arbeitnow_df)
+            
+    print("Fetching from Jobicy API...")
+    jobicy_df = fetch_jobicy_jobs()
+    if not jobicy_df.empty:
+        jobicy_df = filter_api_jobs(jobicy_df, hours_old=max_hours)
+        print(f"Found {len(jobicy_df)} relevant jobs from Jobicy.")
+        if not jobicy_df.empty:
+            all_jobs_dfs.append(jobicy_df)
+
+    print("Fetching from RemoteOK API...")
+    remoteok_df = fetch_remoteok_jobs()
+    if not remoteok_df.empty:
+        remoteok_df = filter_api_jobs(remoteok_df, hours_old=max_hours)
+        print(f"Found {len(remoteok_df)} relevant jobs from RemoteOK.")
+        if not remoteok_df.empty:
+            all_jobs_dfs.append(remoteok_df)
             
     if all_jobs_dfs:
         combined_jobs = pd.concat(all_jobs_dfs, ignore_index=True)

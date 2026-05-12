@@ -1,32 +1,82 @@
 {
   "searches": [
     {
-      "site_name": ["linkedin", "glassdoor"],
-      "search_term": "(software engineer OR software developer OR AI OR machine learning) AND (junior OR entry OR graduate)",
+      "site_name": ["linkedin", "glassdoor", "indeed"],
+      "search_term": "junior software engineer",
       "location": "Worldwide",
       "job_type": "fulltime",
       "is_remote": true,
-      "results_wanted": 100,
+      "results_wanted": 30,
       "hours_old": 24,
       "country_indeed": "USA"
     },
     {
-      "site_name": ["linkedin", "glassdoor"],
-      "search_term": "software engineer OR AI OR machine learning",
+      "site_name": ["linkedin", "glassdoor", "indeed"],
+      "search_term": "python developer entry level",
+      "location": "Worldwide",
+      "job_type": "fulltime",
+      "is_remote": true,
+      "results_wanted": 30,
+      "hours_old": 24,
+      "country_indeed": "USA"
+    },
+    {
+      "site_name": ["linkedin", "glassdoor", "indeed"],
+      "search_term": "backend developer junior",
+      "location": "Worldwide",
+      "job_type": "fulltime",
+      "is_remote": true,
+      "results_wanted": 30,
+      "hours_old": 24,
+      "country_indeed": "USA"
+    },
+    {
+      "site_name": ["linkedin", "glassdoor", "indeed"],
+      "search_term": "machine learning junior",
+      "location": "Worldwide",
+      "job_type": "fulltime",
+      "is_remote": true,
+      "results_wanted": 30,
+      "hours_old": 24,
+      "country_indeed": "USA"
+    },
+    {
+      "site_name": ["linkedin", "glassdoor", "indeed"],
+      "search_term": "software engineer intern",
       "location": "Worldwide",
       "job_type": "internship",
       "is_remote": true,
-      "results_wanted": 100,
+      "results_wanted": 40,
       "hours_old": 24,
       "country_indeed": "USA"
     },
     {
-      "site_name": ["linkedin"],
-      "search_term": "software engineer OR AI OR data",
+      "site_name": ["linkedin", "glassdoor", "indeed"],
+      "search_term": "AI intern",
+      "location": "Worldwide",
+      "job_type": "internship",
+      "is_remote": true,
+      "results_wanted": 40,
+      "hours_old": 24,
+      "country_indeed": "USA"
+    },
+    {
+      "site_name": ["linkedin", "indeed"],
+      "search_term": "software engineer",
       "location": "State of Palestine",
       "is_remote": false,
-      "results_wanted": 50,
-      "hours_old": 24
+      "results_wanted": 30,
+      "hours_old": 24,
+      "country_indeed": "USA"
+    },
+    {
+      "site_name": ["linkedin", "indeed"],
+      "search_term": "AI engineer",
+      "location": "State of Palestine",
+      "is_remote": false,
+      "results_wanted": 20,
+      "hours_old": 24,
+      "country_indeed": "USA"
     }
   ],
   "output": {
