@@ -35,34 +35,35 @@ def ddg_search_for_jobs(company_name, domain):
     jobs_found = []
     ddgs = DDGS()
     
+    # Relax company name to the first highly identifiable word (e.g., "ASAL Technologies" -> "ASAL")
+    # This helps catch posts by "asaltech" or those that just say "ASAL is hiring"
+    short_name = company_name.split()[0] if len(company_name.split()) > 0 else company_name
+    
     # 1. Search LinkedIn Posts
     try:
-        q1 = f'site:linkedin.com/posts "{company_name}" (hiring OR vacancy OR "looking for" OR job)'
-        print(f"Searching LinkedIn Posts for: {company_name}...")
+        q1 = f'site:linkedin.com/posts {short_name} (hiring OR vacancy OR "looking for" OR job)'
+        print(f"Searching LinkedIn Posts for: {company_name} (using '{short_name}')...")
         res1 = ddgs.text(q1, max_results=3, timelimit="w") # past week
         for r in res1:
             title = r.get('title', '')
             body = r.get('body', '')
             link = r.get('href', '')
             
-            # Simple heuristic to check if it's a tech job
-            tech_keywords = ['software', 'developer', 'engineer', 'ai', 'data', 'backend', 'frontend']
-            if any(k in title.lower() or k in body.lower() for k in tech_keywords):
-                jobs_found.append({
-                    "title": "LinkedIn Post: " + title[:50] + "...",
-                    "company": company_name,
-                    "location": "Local/Remote",
-                    "job_url": link,
-                    "description": body,
-                    "job_type": "fulltime"
-                })
+            jobs_found.append({
+                "title": "LinkedIn Post: " + title[:50] + "...",
+                "company": company_name,
+                "location": "Local/Remote",
+                "job_url": link,
+                "description": body,
+                "job_type": "fulltime"
+            })
     except Exception as e:
         print(f"DDG LinkedIn search failed for {company_name}: {e}")
 
     # 2. Search Company Website
     if domain:
         try:
-            q2 = f'site:{domain} (hiring OR careers OR jobs) (software OR developer OR engineer OR ai OR data)'
+            q2 = f'site:{domain} (hiring OR careers OR jobs OR vacancy)'
             print(f"Searching Website ({domain}) for: {company_name}...")
             res2 = ddgs.text(q2, max_results=3, timelimit="w") # past week
             for r in res2:
