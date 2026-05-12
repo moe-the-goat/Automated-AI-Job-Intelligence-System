@@ -260,9 +260,11 @@ def create_github_issue(title, body):
 
 def get_full_job_description(url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64 AppleWebKit/537.36)'}
         res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
+            if "authwall" in res.url.lower() or "sign in to linkedin" in res.text.lower():
+                return "[DESCRIPTION TRUNCATED BY LINKEDIN LOGIN WALL]"
             soup = BeautifulSoup(res.text, 'html.parser')
             for script in soup(["script", "style"]):
                 script.extract()
@@ -307,11 +309,18 @@ def evaluate_job_with_ai(row, cv_text, api_key):
     description = str(row.get("description", ""))
     if pd.isna(description) or len(description) < 100:
         description = get_full_job_description(str(row.get("job_url", "")))
+        if not description:
+            description = "[NO DESCRIPTION AVAILABLE - SCRAPING BLOCKED]"
         
     is_internship = 'intern' in title.lower() or 'internship' in job_type
     
     web_search_context = ""
-    if "selected countries" in description.lower() or "eligible countries" in description.lower() or "certain countries" in description.lower():
+    web_search_triggers = [
+        "eligible countries", "selected countries", "certain countries", "based in", 
+        "residents of", "remote in", "must be located", "work authorization", 
+        "within the united states", "us only", "us-based", "uk only", "eu only"
+    ]
+    if any(trigger in description.lower() for trigger in web_search_triggers):
         search_data = search_company_remote_policy(company, title)
         if search_data:
             web_search_context = f"\n\n[LIVE WEB SEARCH RESULTS FOR '{company}' REMOTE POLICY]:\n{search_data}\n\nUse this live web data to determine if Palestine/Middle East is explicitly excluded from their remote eligible countries."
@@ -334,6 +343,7 @@ Evaluate based on these STRICT rules:
 2. If this is an Internship, it MUST be strictly related to Software Engineering, Machine Learning, Data, or AI. If it is an HR, Marketing, or random internship, it FAILS.
 3. If this is a Full-Time job, evaluate if the candidate's CV matches for an Entry-level/Junior role. Allow leniency if they have strong general ML/Python/FastAPI background.
 4. MATCH PERCENTAGE: Mathematically calculate a realistic match percentage (0-100) based strictly on how the candidate's skills and experience in the CV align with the job description's requirements. Deduct points proportionally for missing core requirements. Output as a clean integer (e.g. 88, not 88.23).
+5. LIMITED INFO PROTOCOL: If the description says [DESCRIPTION TRUNCATED...] or [NO DESCRIPTION AVAILABLE...], rely solely on the job title, company, and web search results to make your decision, and note the missing description in your verdict.
 
 Reply ONLY with valid JSON in this exact format, with no markdown formatting:
 {{"is_valid": true/false, "verdict": "A 1-sentence reason for your decision", "match_percentage": 85}}
@@ -354,7 +364,7 @@ Reply ONLY with valid JSON in this exact format, with no markdown formatting:
     except Exception as e:
         print(f"AI evaluation failed for {title}: {str(e)}")
         error_msg = str(e).replace('"', "'")
-        return f"AI Error: {error_msg[:100]}...", True, "N/A"
+        return f"AI Error: {error_msg[:100]}...", False, "N/A"
 
 def main():
     config = load_config()
@@ -425,9 +435,26 @@ def main():
         if "job_url" in combined_jobs.columns:
             combined_jobs = combined_jobs.drop_duplicates(subset=["job_url"])
             
-        # Drop duplicates by exact Title + Company
+        # Smarter deduplication: Drop duplicates by normalized Title + Company
         if "title" in combined_jobs.columns and "company" in combined_jobs.columns:
-            combined_jobs = combined_jobs.drop_duplicates(subset=["title", "company"])
+            combined_jobs['norm_title'] = combined_jobs['title'].astype(str).str.replace(r'\s*\(.*?\)', '', regex=True).str.strip().str.lower()
+            combined_jobs['norm_company'] = combined_jobs['company'].astype(str).str.strip().str.lower()
+            combined_jobs = combined_jobs.drop_duplicates(subset=["norm_title", "norm_company"])
+            combined_jobs = combined_jobs.drop(columns=['norm_title', 'norm_company'])
+            
+        # Language Pre-filter: Reject Chinese/Korean/Japanese titles
+        import re
+        if "title" in combined_jobs.columns:
+            combined_jobs = combined_jobs[~combined_jobs['title'].astype(str).str.contains(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]', na=False)]
+            
+        # Location Pre-filter: Drop clearly location-locked jobs that don't say remote
+        if "location" in combined_jobs.columns:
+            explicit_non_remote = ['shanghai', 'beijing', 'mumbai', 'bangalore', 'moscow', 'tx', 'ca', 'ny', 'california', 'texas', 'new york', 'india', 'china', 'russia']
+            pattern = '|'.join([rf'\b{loc}\b' for loc in explicit_non_remote])
+            remote_in_loc = combined_jobs['location'].astype(str).str.lower().str.contains('remote')
+            remote_in_title = combined_jobs['title'].astype(str).str.lower().str.contains('remote')
+            bad_loc = combined_jobs['location'].astype(str).str.lower().str.contains(pattern, na=False)
+            combined_jobs = combined_jobs[~(bad_loc & ~remote_in_loc & ~remote_in_title)]
             
         # Filter out senior/lead roles
         exclude_words = ['senior', 'sr', 'sr.', 'lead', 'principal', 'manager', 'director', 'staff', 'head', 'vp', 'president']
