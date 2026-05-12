@@ -2,8 +2,8 @@ name: Local Companies Job Scraper
 
 on:
   schedule:
-    # Runs at 08:50 UTC (11:50 AM Jerusalem Time) every 2 days
-    - cron: '50 8 */2 * *'
+    # Runs at 08:50 UTC (11:50 AM Jerusalem Time) every day
+    - cron: '50 8 * * *'
   workflow_dispatch: # Allows manual triggering
 
 jobs:

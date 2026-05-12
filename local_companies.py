@@ -134,7 +134,7 @@ def main():
                 location="State of Palestine",
                 distance=100,
                 results_wanted=5,
-                hours_old=120 # 5 days
+                hours_old=144 # 6 days
             )
             for _, j_row in jobspy_res.iterrows():
                 # Make sure the company name roughly matches to avoid generic search results
