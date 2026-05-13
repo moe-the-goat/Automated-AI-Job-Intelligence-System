@@ -205,7 +205,9 @@ def cleanup_old_github_issues(days_old=5):
             if not created_at_str:
                 continue
             created_at = datetime.strptime(created_at_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-            age_days = (now - created_at).days
+            # Compare CALENDAR days, not 24-hour periods. An issue from May 8 should
+            # count as 5 days old on May 13 regardless of clock time.
+            age_days = (now.date() - created_at.date()).days
             if age_days >= days_old:
                 issue_num = issue.get("number")
                 print(f"Closing old issue #{issue_num} '{title}' (Age: {age_days} days)")

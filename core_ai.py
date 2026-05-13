@@ -119,27 +119,43 @@ Evaluate based on these STRICT rules:
 Reply ONLY with valid JSON in this exact format, with no markdown formatting:
 {{"is_valid": true/false, "verdict": "A 1-sentence reason for your decision", "match_percentage": 85}}
 """
-    try:
-        time.sleep(4)
-        response = client.models.generate_content(
-            model='gemini-3.1-flash-lite',
-            contents=prompt
-        )
-        text = response.text.strip()
-        if text.startswith('```json'):
-            text = text[7:]
-        if text.endswith('```'):
-            text = text[:-3]
-        text = text.strip()
-        result = json.loads(text)
-        verdict = result.get("verdict", "AI Approved")
-        is_valid = result.get("is_valid", True)
-        match_pct = result.get("match_percentage", "N/A")
-        print(f"  [AI] {title[:55]:<55} -> valid={is_valid}, match={match_pct}%")
-        return verdict, is_valid, match_pct, True
-    except Exception as e:
-        # Print the full error so quota / auth / model problems are obvious in CI logs
-        print(f"  [AI ERROR] {title[:55]}: {str(e)[:300]}")
-        error_msg = str(e).replace('"', "'")
-        # Flip to False to prevent garbage jobs from passing on AI errors
-        return f"AI Error: {error_msg[:100]}...", False, "N/A", False
+    # Retry up to 3 times on transient 5xx errors (Gemini gets demand spikes).
+    # Non-retryable errors (quota, auth, parse) break out immediately.
+    last_exception = None
+    for attempt in range(3):
+        try:
+            if attempt == 0:
+                time.sleep(4)  # standard throttle to stay under 15 RPM
+            else:
+                backoff = 10 * (2 ** (attempt - 1))  # 10s, 20s
+                print(f"  [AI RETRY {attempt}/2] backing off {backoff}s for {title[:55]}")
+                time.sleep(backoff)
+
+            response = client.models.generate_content(
+                model='gemini-3.1-flash-lite',
+                contents=prompt
+            )
+            text = response.text.strip()
+            if text.startswith('```json'):
+                text = text[7:]
+            if text.endswith('```'):
+                text = text[:-3]
+            text = text.strip()
+            result = json.loads(text)
+            verdict = result.get("verdict", "AI Approved")
+            is_valid = result.get("is_valid", True)
+            match_pct = result.get("match_percentage", "N/A")
+            print(f"  [AI] {title[:55]:<55} -> valid={is_valid}, match={match_pct}%")
+            return verdict, is_valid, match_pct, True
+        except Exception as e:
+            last_exception = e
+            msg = str(e)
+            # Only retry transient server-side errors. Quota/auth/parse failures retry won't help.
+            if not any(t in msg for t in ("503", "500", "UNAVAILABLE", "INTERNAL")):
+                break
+
+    # All attempts exhausted (or non-retryable error). Log full message for debugging.
+    print(f"  [AI ERROR] {title[:55]}: {str(last_exception)[:300]}")
+    error_msg = str(last_exception).replace('"', "'")
+    # Flip to False to prevent garbage jobs from passing on AI errors.
+    return f"AI Error: {error_msg[:100]}...", False, "N/A", False
