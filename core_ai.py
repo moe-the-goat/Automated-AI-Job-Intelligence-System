@@ -58,11 +58,16 @@ def search_company_remote_policy(company_name, job_title):
 
 def evaluate_job_with_ai(row, cv_text, api_key):
     """
-    Sends the job description and candidate CV to Gemini 3.1 Flash Lite to 
+    Sends the job description and candidate CV to Gemini 3.1 Flash Lite to
     determine geographic eligibility and calculate a mathematical Match %.
+
+    Returns a 4-tuple: (verdict, is_valid, match_pct, evaluated).
+    `evaluated` is True only when the AI returned a real verdict — so the caller
+    can safely mark the URL as "seen". Errors (quota, timeout, parse fail) return
+    evaluated=False so the job gets another chance on the next run.
     """
     if not api_key:
-        return "No API Key provided", False, "N/A"
+        return "No API Key provided", False, "N/A", False
 
     client = genai.Client(api_key=api_key)
     
@@ -127,9 +132,14 @@ Reply ONLY with valid JSON in this exact format, with no markdown formatting:
             text = text[:-3]
         text = text.strip()
         result = json.loads(text)
-        return result.get("verdict", "AI Approved"), result.get("is_valid", True), result.get("match_percentage", "N/A")
+        verdict = result.get("verdict", "AI Approved")
+        is_valid = result.get("is_valid", True)
+        match_pct = result.get("match_percentage", "N/A")
+        print(f"  [AI] {title[:55]:<55} -> valid={is_valid}, match={match_pct}%")
+        return verdict, is_valid, match_pct, True
     except Exception as e:
-        print(f"AI evaluation failed for {title}: {str(e)}")
+        # Print the full error so quota / auth / model problems are obvious in CI logs
+        print(f"  [AI ERROR] {title[:55]}: {str(e)[:300]}")
         error_msg = str(e).replace('"', "'")
         # Flip to False to prevent garbage jobs from passing on AI errors
-        return f"AI Error: {error_msg[:100]}...", False, "N/A"
+        return f"AI Error: {error_msg[:100]}...", False, "N/A", False

@@ -66,13 +66,22 @@ def filter_api_jobs(df, hours_old):
         
     return df
 
-def apply_pipeline_filters(combined_jobs):
+def apply_pipeline_filters(combined_jobs, tracker=None):
     """
-    The main gauntlet. Runs all the Tier 2 and Tier 3 deterministic filters 
+    The main gauntlet. Runs all the Tier 2 and Tier 3 deterministic filters
     to protect the AI from evaluating garbage data.
+
+    If a JobTracker is passed in, previously-evaluated URLs are dropped first
+    so we don't burn API quota re-evaluating them.
     """
     if combined_jobs.empty:
         return combined_jobs
+
+    # 0. Drop URLs we've already evaluated on prior runs (cheapest filter -> runs first)
+    if tracker is not None and "job_url" in combined_jobs.columns:
+        before = len(combined_jobs)
+        combined_jobs = combined_jobs[~combined_jobs['job_url'].astype(str).apply(tracker.is_seen)]
+        print(f"Seen-jobs filter: dropped {before - len(combined_jobs)} previously-evaluated jobs.")
 
     # 1. URL Deduplication
     if "job_url" in combined_jobs.columns:

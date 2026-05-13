@@ -3,3 +3,5 @@ __pycache__/
 *$py.class
 *.csv
 .env
+# Tracker state is persisted via GitHub Actions cache, not via git.
+seen_jobs.json

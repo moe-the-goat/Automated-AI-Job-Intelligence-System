@@ -7,7 +7,7 @@ from ddgs import DDGS
 from urllib.parse import urlparse
 from jobspy import scrape_jobs
 
-from core_filter import apply_pipeline_filters
+from core_filter import apply_pipeline_filters, JobTracker
 from core_ai import evaluate_job_with_ai
 from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
@@ -101,6 +101,16 @@ def load_local_companies():
     return pd.DataFrame()
 
 def main():
+    tracker = JobTracker()
+    try:
+        run_local_pipeline(tracker)
+    finally:
+        # Always persist tracker + sweep stale issues, even if the pipeline crashed.
+        tracker.save()
+        print("Running GitHub Issue cleanup...")
+        cleanup_old_github_issues(days_old=5)
+
+def run_local_pipeline(tracker):
     print("Starting Local Companies Scrape...")
     companies_df = load_local_companies()
     if companies_df.empty:
@@ -146,16 +156,14 @@ def main():
             
     if not all_raw_jobs:
         print("No jobs found at all. Shutting down quietly.")
-        # Cleanup old issues just in case
-        cleanup_old_github_issues(days_old=5)
         return
         
     combined_jobs = pd.DataFrame(all_raw_jobs)
     stats['scraped'] = len(combined_jobs)
     print(f"Total raw jobs found: {stats['scraped']}")
     
-    # 2. Filter Jobs
-    combined_jobs = apply_pipeline_filters(combined_jobs)
+    # 2. Filter Jobs (tracker drops previously-seen URLs first)
+    combined_jobs = apply_pipeline_filters(combined_jobs, tracker=tracker)
     stats['filtered'] = len(combined_jobs)
     print(f"Total jobs surviving pre-filters: {stats['filtered']}")
     
@@ -174,10 +182,13 @@ def main():
     if not combined_jobs.empty:
         print("Running AI Job Validation...")
         for idx, row in combined_jobs.iterrows():
-            verdict, is_valid, match_pct = evaluate_job_with_ai(row, cv_text, gemini_key)
+            verdict, is_valid, match_pct, evaluated = evaluate_job_with_ai(row, cv_text, gemini_key)
             verdicts.append(verdict)
             valid_mask.append(is_valid)
             match_pcts.append(match_pct)
+            # Only mark seen on real verdicts; errors get retried next run.
+            if evaluated:
+                tracker.mark_seen(str(row.get("job_url", "")))
             
         combined_jobs['ai_verdict'] = verdicts
         combined_jobs['match_percentage'] = match_pcts
@@ -215,10 +226,6 @@ def main():
         title = f"Local Companies Scan - {today} (0 Passed)"
         body = f"## Local Companies Job Scan\n\n**Pipeline Stats:** Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: 0\n\nNo jobs passed the AI validation today. Did not send an email."
         create_github_issue(title, body)
-        
-    # Finally, clean up old issues
-    print("Running GitHub Issue cleanup...")
-    cleanup_old_github_issues(days_old=5)
 
 if __name__ == "__main__":
     main()

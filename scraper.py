@@ -10,7 +10,7 @@ from core_search import (
     fetch_jobicy_jobs,
     fetch_remoteok_jobs
 )
-from core_filter import filter_api_jobs, apply_pipeline_filters
+from core_filter import filter_api_jobs, apply_pipeline_filters, JobTracker
 from core_ai import evaluate_job_with_ai
 from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
@@ -30,8 +30,18 @@ def load_config(config_path="config.json"):
 
 def main():
     config = load_config()
+    tracker = JobTracker()
+    try:
+        run_pipeline(config, tracker)
+    finally:
+        # Always persist tracker + sweep stale issues, even if the pipeline crashed.
+        tracker.save()
+        print("Running GitHub Issue cleanup...")
+        cleanup_old_github_issues(days_old=5)
+
+def run_pipeline(config, tracker):
     all_jobs_dfs = []
-    
+
     print("Starting job scrape...")
     
     # Track statistics for the daily email header (Tier 3 Item 14)
@@ -92,8 +102,8 @@ def main():
         combined_jobs = pd.concat(all_jobs_dfs, ignore_index=True)
         stats['scraped'] = len(combined_jobs)
         
-        # Apply the gauntlet of deterministic filters
-        combined_jobs = apply_pipeline_filters(combined_jobs)
+        # Apply the gauntlet of deterministic filters (tracker drops seen URLs first)
+        combined_jobs = apply_pipeline_filters(combined_jobs, tracker=tracker)
         stats['filtered'] = len(combined_jobs)
         print(f"Total unique, unseen jobs surviving the pre-filters: {stats['filtered']}")
         
@@ -112,10 +122,14 @@ def main():
             match_pcts = []
             
             for idx, row in combined_jobs.iterrows():
-                verdict, is_valid, match_pct = evaluate_job_with_ai(row, cv_text, gemini_key)
+                verdict, is_valid, match_pct, evaluated = evaluate_job_with_ai(row, cv_text, gemini_key)
                 verdicts.append(verdict)
                 valid_mask.append(is_valid)
                 match_pcts.append(match_pct)
+                # Only mark seen when AI actually returned a verdict. Quota/timeout
+                # errors leave the job unmarked so we can retry it next run.
+                if evaluated:
+                    tracker.mark_seen(str(row.get("job_url", "")))
                 
             combined_jobs['ai_verdict'] = verdicts
             combined_jobs['match_percentage'] = match_pcts
@@ -141,10 +155,6 @@ def main():
                 md_content = format_github_markdown(internships_df, jobs_df, stats)
                 today = datetime.now().strftime("%Y-%m-%d")
                 create_github_issue(f"Automated AI Job Alerts - {today}", md_content)
-                
-                # Clean up old issues to keep the repo clean
-                print("Running GitHub Issue cleanup...")
-                cleanup_old_github_issues(days_old=5)
         else:
             print("No new jobs survived the filters today.")
     else:
