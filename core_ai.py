@@ -86,9 +86,12 @@ def evaluate_job_with_ai(row, cv_text, api_key):
     
     # Check if we need to do a deep web search for remote policy ambiguity
     web_search_context = ""
+    # Phrases that strongly imply a GEOGRAPHIC restriction. "based in" alone was too broad
+    # (matches "we're a startup based in NYC") and triggered DDG on almost every job.
     web_search_triggers = [
-        "eligible countries", "selected countries", "certain countries", "based in", 
-        "residents of", "remote in", "must be located", "work authorization", 
+        "eligible countries", "selected countries", "certain countries",
+        "must be based", "candidates based", "residents of",
+        "remote in the", "must be located", "work authorization",
         "within the united states", "us only", "us-based", "uk only", "eu only"
     ]
     if any(trigger in description.lower() for trigger in web_search_triggers):

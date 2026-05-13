@@ -39,6 +39,10 @@ def main():
         print("Running GitHub Issue cleanup...")
         cleanup_old_github_issues(days_old=5)
 
+# Public APIs don't filter by recency server-side, so we look back further
+# than the 24h JobSpy window to surface more remote jobs from non-LinkedIn sources.
+API_HOURS_OLD = 72
+
 def run_pipeline(config, tracker):
     all_jobs_dfs = []
 
@@ -84,8 +88,8 @@ def run_pipeline(config, tracker):
         if raw.empty:
             print(f"  {name}: returned 0 jobs.")
             continue
-        filtered = filter_api_jobs(raw, hours_old=max_hours)
-        print(f"  {name}: {len(raw)} raw -> {len(filtered)} after role+recency filter.")
+        filtered = filter_api_jobs(raw, hours_old=API_HOURS_OLD)
+        print(f"  {name}: {len(raw)} raw -> {len(filtered)} after role+recency filter (last {API_HOURS_OLD}h).")
         if not filtered.empty:
             all_jobs_dfs.append(filtered)
             
