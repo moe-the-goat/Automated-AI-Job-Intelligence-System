@@ -10,7 +10,7 @@ from core_search import (
     fetch_jobicy_jobs,
     fetch_remoteok_jobs
 )
-from core_filter import filter_api_jobs, apply_pipeline_filters, JobTracker
+from core_filter import filter_api_jobs, apply_pipeline_filters
 from core_ai import evaluate_job_with_ai
 from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
@@ -92,13 +92,6 @@ def main():
         combined_jobs = pd.concat(all_jobs_dfs, ignore_index=True)
         stats['scraped'] = len(combined_jobs)
         
-        # Initialize Seen Jobs Tracker (Tier 3 Item 12)
-        tracker = JobTracker()
-        
-        # Remove jobs we've already evaluated on previous days
-        if "job_url" in combined_jobs.columns:
-            combined_jobs = combined_jobs[~combined_jobs['job_url'].apply(tracker.is_seen)]
-        
         # Apply the gauntlet of deterministic filters
         combined_jobs = apply_pipeline_filters(combined_jobs)
         stats['filtered'] = len(combined_jobs)
@@ -124,12 +117,6 @@ def main():
                 valid_mask.append(is_valid)
                 match_pcts.append(match_pct)
                 
-                # Mark as seen so we don't evaluate it tomorrow
-                tracker.mark_seen(str(row.get("job_url", "")))
-            
-            # Save the tracker database
-            tracker.save()
-            
             combined_jobs['ai_verdict'] = verdicts
             combined_jobs['match_percentage'] = match_pcts
             

@@ -117,7 +117,7 @@ Reply ONLY with valid JSON in this exact format, with no markdown formatting:
     try:
         time.sleep(4)
         response = client.models.generate_content(
-            model='gemini-2.0-flash-lite',
+            model='gemini-3.1-flash-lite',
             contents=prompt
         )
         text = response.text.strip()

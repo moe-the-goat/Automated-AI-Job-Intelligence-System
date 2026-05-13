@@ -7,7 +7,7 @@ from ddgs import DDGS
 from urllib.parse import urlparse
 from jobspy import scrape_jobs
 
-from core_filter import apply_pipeline_filters, JobTracker
+from core_filter import apply_pipeline_filters
 from core_ai import evaluate_job_with_ai
 from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
@@ -155,10 +155,6 @@ def main():
     print(f"Total raw jobs found: {stats['scraped']}")
     
     # 2. Filter Jobs
-    tracker = JobTracker()
-    if "job_url" in combined_jobs.columns:
-        combined_jobs = combined_jobs[~combined_jobs['job_url'].apply(tracker.is_seen)]
-        
     combined_jobs = apply_pipeline_filters(combined_jobs)
     stats['filtered'] = len(combined_jobs)
     print(f"Total jobs surviving pre-filters: {stats['filtered']}")
@@ -183,9 +179,6 @@ def main():
             valid_mask.append(is_valid)
             match_pcts.append(match_pct)
             
-            tracker.mark_seen(str(row.get("job_url", "")))
-            
-        tracker.save()
         combined_jobs['ai_verdict'] = verdicts
         combined_jobs['match_percentage'] = match_pcts
         
