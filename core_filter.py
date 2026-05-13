@@ -54,9 +54,13 @@ def filter_api_jobs(df, hours_old):
     has_role = title_lower.str.contains('|'.join(role_keywords), na=False)
     df = df[has_role].copy()
     
-    # Filter by recency (hours_old)
+    # Filter by recency (hours_old). Arbeitnow returns Unix timestamps; others return ISO strings.
     try:
-        df['date_posted_dt'] = pd.to_datetime(df['date_posted'], utc=True, errors='coerce')
+        # First try numeric (Unix seconds); whatever fails will be NaT and re-tried as ISO below.
+        numeric = pd.to_numeric(df['date_posted'], errors='coerce')
+        dt_from_unix = pd.to_datetime(numeric, unit='s', utc=True, errors='coerce')
+        dt_from_iso = pd.to_datetime(df['date_posted'], utc=True, errors='coerce')
+        df['date_posted_dt'] = dt_from_unix.fillna(dt_from_iso)
         now = pd.Timestamp.utcnow()
         cutoff = now - pd.Timedelta(hours=hours_old)
         df = df[df['date_posted_dt'].isna() | (df['date_posted_dt'] >= cutoff)]

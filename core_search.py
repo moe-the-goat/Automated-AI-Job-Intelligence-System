@@ -57,15 +57,23 @@ def fetch_arbeitnow_jobs():
         return pd.DataFrame()
 
 def fetch_jobicy_jobs():
-    """Fetches programming-specific remote jobs from the Jobicy API."""
+    """Fetches remote jobs from the Jobicy API and filters down to tech industries.
+
+    Jobicy's v2 API does NOT accept a `tag` query parameter (returns 0 results),
+    so we pull the unfiltered feed and filter by `jobIndustry` client-side.
+    """
     try:
-        url = "https://jobicy.com/api/v2/remote-jobs?count=50&tag=python,software,backend,ai,data,ml"
+        url = "https://jobicy.com/api/v2/remote-jobs?count=100"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         jobs = response.json().get("jobs", [])
-        
+
+        tech_industry_keywords = ("tech", "engineer", "software", "data", "ai", "develop", "it ", "information")
         parsed_jobs = []
         for j in jobs:
+            industries = " ".join(j.get("jobIndustry", []) if isinstance(j.get("jobIndustry"), list) else []).lower()
+            if industries and not any(k in industries for k in tech_industry_keywords):
+                continue
             parsed_jobs.append({
                 "title": j.get("jobTitle", ""),
                 "company": j.get("companyName", ""),

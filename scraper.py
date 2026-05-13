@@ -73,29 +73,21 @@ def run_pipeline(config, tracker):
         max_hours = max([s.get("hours_old", 24) for s in config.get("searches", [])])
 
     # 2. Secondary API Scrapes
-    print("Fetching from Remotive API...")
-    remotive_df = fetch_remotive_jobs()
-    if not remotive_df.empty:
-        remotive_df = filter_api_jobs(remotive_df, hours_old=max_hours)
-        all_jobs_dfs.append(remotive_df)
-            
-    print("Fetching from Arbeitnow API...")
-    arbeitnow_df = fetch_arbeitnow_jobs()
-    if not arbeitnow_df.empty:
-        arbeitnow_df = filter_api_jobs(arbeitnow_df, hours_old=max_hours)
-        all_jobs_dfs.append(arbeitnow_df)
-            
-    print("Fetching from Jobicy API...")
-    jobicy_df = fetch_jobicy_jobs()
-    if not jobicy_df.empty:
-        jobicy_df = filter_api_jobs(jobicy_df, hours_old=max_hours)
-        all_jobs_dfs.append(jobicy_df)
-
-    print("Fetching from RemoteOK API...")
-    remoteok_df = fetch_remoteok_jobs()
-    if not remoteok_df.empty:
-        remoteok_df = filter_api_jobs(remoteok_df, hours_old=max_hours)
-        all_jobs_dfs.append(remoteok_df)
+    for name, fetch_fn in [
+        ("Remotive", fetch_remotive_jobs),
+        ("Arbeitnow", fetch_arbeitnow_jobs),
+        ("Jobicy", fetch_jobicy_jobs),
+        ("RemoteOK", fetch_remoteok_jobs),
+    ]:
+        print(f"Fetching from {name} API...")
+        raw = fetch_fn()
+        if raw.empty:
+            print(f"  {name}: returned 0 jobs.")
+            continue
+        filtered = filter_api_jobs(raw, hours_old=max_hours)
+        print(f"  {name}: {len(raw)} raw -> {len(filtered)} after role+recency filter.")
+        if not filtered.empty:
+            all_jobs_dfs.append(filtered)
             
     # 3. Compile and Filter
     if all_jobs_dfs:
