@@ -4,7 +4,15 @@ import requests
 import pandas as pd
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from datetime import datetime
+from datetime import datetime, timezone
+
+# Title prefixes the bot creates. cleanup_old_github_issues matches any of these.
+MANAGED_ISSUE_TITLE_PREFIXES = (
+    "Automated AI Job Alerts",
+    "Automated Job Alerts",
+    "Local Companies Job Alerts",
+    "Local Companies Scan",
+)
 
 """
 CORE NOTIFY MODULE
@@ -186,19 +194,25 @@ def cleanup_old_github_issues(days_old=5):
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         issues = response.json()
-        
-        now = datetime.utcnow()
+
+        now = datetime.now(timezone.utc)
+        closed_count = 0
         for issue in issues:
-            if "Automated AI Job Alerts" in issue.get("title", ""):
-                created_at_str = issue.get("created_at")
-                if created_at_str:
-                    created_at = datetime.strptime(created_at_str, "%Y-%m-%dT%H:%M:%SZ")
-                    age_days = (now - created_at).days
-                    if age_days >= days_old:
-                        issue_num = issue.get("number")
-                        print(f"Closing old issue #{issue_num} (Age: {age_days} days)")
-                        patch_url = f"https://api.github.com/repos/{repo}/issues/{issue_num}"
-                        requests.patch(patch_url, headers=headers, json={"state": "closed"})
-                        
+            title = issue.get("title", "")
+            if not any(title.startswith(prefix) for prefix in MANAGED_ISSUE_TITLE_PREFIXES):
+                continue
+            created_at_str = issue.get("created_at")
+            if not created_at_str:
+                continue
+            created_at = datetime.strptime(created_at_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            age_days = (now - created_at).days
+            if age_days >= days_old:
+                issue_num = issue.get("number")
+                print(f"Closing old issue #{issue_num} '{title}' (Age: {age_days} days)")
+                patch_url = f"https://api.github.com/repos/{repo}/issues/{issue_num}"
+                requests.patch(patch_url, headers=headers, json={"state": "closed"})
+                closed_count += 1
+        print(f"GitHub cleanup done. Closed {closed_count} stale issue(s).")
+
     except Exception as e:
         print(f"Failed to cleanup old GitHub issues: {e}")
