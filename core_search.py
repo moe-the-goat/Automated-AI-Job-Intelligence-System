@@ -59,7 +59,7 @@ def fetch_arbeitnow_jobs():
 def fetch_jobicy_jobs():
     """Fetches programming-specific remote jobs from the Jobicy API."""
     try:
-        url = "https://jobicy.com/api/v2/remote-jobs?jobCategory=programming"
+        url = "https://jobicy.com/api/v2/remote-jobs?count=50&tag=python,software,backend,ai,data,ml"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         jobs = response.json().get("jobs", [])

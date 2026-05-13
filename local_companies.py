@@ -3,7 +3,7 @@ import pandas as pd
 from datetime import datetime
 import json
 import time
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from urllib.parse import urlparse
 from jobspy import scrape_jobs
 

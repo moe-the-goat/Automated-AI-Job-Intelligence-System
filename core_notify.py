@@ -1,6 +1,7 @@
 import smtplib
 import os
 import requests
+import pandas as pd
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
@@ -28,8 +29,6 @@ def sort_by_match_percentage(df):
 
 def format_email_html(internships_df, jobs_df, stats):
     """Generates the final HTML payload for the daily email."""
-    # Sort the dataframes first
-    import pandas as pd
     internships_df = sort_by_match_percentage(internships_df.copy() if not internships_df.empty else pd.DataFrame())
     jobs_df = sort_by_match_percentage(jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
 
@@ -102,7 +101,6 @@ def send_email(subject, html_content, email_settings):
 
 def format_github_markdown(internships_df, jobs_df, stats):
     """Generates Markdown formatting for a GitHub Issue payload."""
-    import pandas as pd
     internships_df = sort_by_match_percentage(internships_df.copy() if not internships_df.empty else pd.DataFrame())
     jobs_df = sort_by_match_percentage(jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
 

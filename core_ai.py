@@ -2,8 +2,8 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 import time
-import google.generativeai as genai
-from duckduckgo_search import DDGS
+from google import genai
+from ddgs import DDGS
 import json
 
 """
@@ -63,10 +63,8 @@ def evaluate_job_with_ai(row, cv_text, api_key):
     """
     if not api_key:
         return "No API Key provided", False, "N/A"
-        
-    genai.configure(api_key=api_key)
-    # Using Gemini 3.1 Flash Lite which has 500 RPD and 15 RPM limits on free tier
-    model = genai.GenerativeModel('gemini-3.1-flash-lite')
+
+    client = genai.Client(api_key=api_key)
     
     title = str(row.get("title", ""))
     company = str(row.get("company", ""))
@@ -117,9 +115,11 @@ Reply ONLY with valid JSON in this exact format, with no markdown formatting:
 {{"is_valid": true/false, "verdict": "A 1-sentence reason for your decision", "match_percentage": 85}}
 """
     try:
-        # Sleep for 4 seconds to strictly stay under the 15 Requests Per Minute free tier limit
         time.sleep(4)
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemini-2.0-flash-lite',
+            contents=prompt
+        )
         text = response.text.strip()
         if text.startswith('```json'):
             text = text[7:]
