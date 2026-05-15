@@ -3,6 +3,57 @@ import re
 import json
 import os
 
+# --- Reputation modifier rules (A1) ---
+# Loaded once at import time. A blacklisted company name (or post URL handle)
+# tags the row so downstream rendering shows a 🚫 badge and core_ai.py caps
+# match_percentage at 55. trust_boost is tagged but currently informational only.
+REPUTATION_FILE = "data/reputation.json"
+
+def _load_reputation():
+    try:
+        if os.path.exists(REPUTATION_FILE):
+            with open(REPUTATION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "blacklist_name":   [p.lower() for p in data.get("blacklist_name_patterns", [])],
+                "blacklist_handle": [p.lower() for p in data.get("blacklist_handle_patterns", [])],
+                "trust_boost":      [p.lower() for p in data.get("trust_boost", [])],
+            }
+    except Exception as e:
+        print(f"Reputation file load failed (using empty): {e}")
+    return {"blacklist_name": [], "blacklist_handle": [], "trust_boost": []}
+
+_REPUTATION = _load_reputation()
+
+def _pre_flag_reputation(df):
+    """Tag rows whose company name or post URL matches the reputation lists.
+
+    Adds two boolean columns: pre_flagged_low_quality, pre_flagged_trusted.
+    Does NOT drop rows (flag-and-pass is friendlier to auditing).
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    name_lower = df.get("company", pd.Series(dtype=str)).astype(str).str.lower()
+    url_lower = df.get("job_url", pd.Series(dtype=str)).astype(str).str.lower()
+
+    low_q = pd.Series(False, index=df.index)
+    for pat in _REPUTATION["blacklist_name"]:
+        low_q |= name_lower.str.contains(pat, na=False, regex=False)
+    for pat in _REPUTATION["blacklist_handle"]:
+        low_q |= url_lower.str.contains(pat, na=False, regex=False)
+
+    trusted = pd.Series(False, index=df.index)
+    for pat in _REPUTATION["trust_boost"]:
+        trusted |= name_lower.str.contains(pat, na=False, regex=False)
+
+    df["pre_flagged_low_quality"] = low_q
+    df["pre_flagged_trusted"] = trusted
+    flagged = int(low_q.sum())
+    if flagged:
+        print(f"Reputation filter: flagged {flagged} row(s) as low-quality.")
+    return df
+
 # langdetect catches non-English titles (Italian "Posizioni", German "Entwickler", etc.)
 # that the CJK Unicode pre-filter misses. Optional dependency — if missing, we
 # silently keep every title.
@@ -105,6 +156,9 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
         before = len(combined_jobs)
         combined_jobs = combined_jobs[~combined_jobs['job_url'].astype(str).apply(tracker.is_seen)]
         print(f"Seen-jobs filter: dropped {before - len(combined_jobs)} previously-evaluated jobs.")
+
+    # 0b. Tag rows against the reputation list (flag, don't drop).
+    combined_jobs = _pre_flag_reputation(combined_jobs)
 
     # 1. URL Deduplication
     if "job_url" in combined_jobs.columns:

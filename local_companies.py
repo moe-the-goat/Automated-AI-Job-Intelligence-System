@@ -226,6 +226,7 @@ def run_local_pipeline(tracker):
     verdicts, valid_mask, match_pcts = [], [], []
     tech_fits, exp_fits, log_fits = [], [], []
     comps, efforts, suspiciouses = [], [], []
+    blacklisteds = []
 
     if not combined_jobs.empty:
         print("Running AI Job Validation...")
@@ -240,6 +241,7 @@ def run_local_pipeline(tracker):
             comps.append(result["compensation"])
             efforts.append(result["effort"])
             suspiciouses.append(result["suspicious"])
+            blacklisteds.append(bool(row.get("pre_flagged_low_quality", False)))
             # Only mark seen on real verdicts; errors get retried next run.
             if evaluated:
                 tracker.mark_seen(str(row.get("job_url", "")))
@@ -252,6 +254,7 @@ def run_local_pipeline(tracker):
         combined_jobs['compensation'] = comps
         combined_jobs['effort'] = efforts
         combined_jobs['suspicious'] = suspiciouses
+        combined_jobs['pre_flagged_low_quality'] = blacklisteds
 
         # Filter down to approved
         approved_jobs = combined_jobs[valid_mask]

@@ -58,8 +58,15 @@ def _fmt_match_cell_md(row):
         return f"**{pct_str}** (T:{tech} E:{exp} L:{log})"
     return f"**{pct_str}**"
 
-def _suspicious_title(title, is_suspicious):
-    """Prepend a visible warning to suspicious-posting titles."""
+def _suspicious_title(title, is_suspicious, is_blacklisted=False):
+    """Prepend a visible warning to titles.
+
+    🚫 = pre-flagged low-quality via the reputation list (A1 / data/reputation.json).
+        This is the more severe signal — shown if both flags are set.
+    ⚠️  = AI-flagged suspicious posting (the model's own judgement).
+    """
+    if is_blacklisted:
+        return f"🚫 {title}"
     if is_suspicious:
         return f"⚠️ {title}"
     return title
@@ -75,7 +82,11 @@ def _render_html_table(df):
         "</tr>"
     )
     for _, row in df.iterrows():
-        title = _suspicious_title(row.get("title", "N/A"), bool(row.get("suspicious", False)))
+        title = _suspicious_title(
+            row.get("title", "N/A"),
+            bool(row.get("suspicious", False)),
+            bool(row.get("pre_flagged_low_quality", False)),
+        )
         company = row.get("company", "N/A")
         location = row.get("location", "Remote/Unspecified")
         match_cell = _fmt_match_cell_html(row)
@@ -143,7 +154,11 @@ def _render_md_table(df):
     out = "| Title | Company | Location | Match | Pay | Effort | AI Verdict | Link |\n"
     out += "|---|---|---|---|---|---|---|---|\n"
     for _, row in df.iterrows():
-        title = _suspicious_title(row.get("title", "N/A"), bool(row.get("suspicious", False)))
+        title = _suspicious_title(
+            row.get("title", "N/A"),
+            bool(row.get("suspicious", False)),
+            bool(row.get("pre_flagged_low_quality", False)),
+        )
         company = row.get("company", "N/A")
         location = row.get("location", "Remote/Unspecified")
         match_cell = _fmt_match_cell_md(row)

@@ -31,6 +31,7 @@ from core_notify import (
     format_email_html,
     format_github_markdown,
 )
+from core_filter import _pre_flag_reputation, _load_reputation
 
 
 def _check(name, got, expected):
@@ -209,6 +210,73 @@ def test_match_cell_md_rich():
 def test_suspicious_title_marker():
     _check("suspicious adds warning",  _suspicious_title("Data Intern", True),  "⚠️ Data Intern")
     _check("clean title unchanged",    _suspicious_title("Data Intern", False), "Data Intern")
+    _check("blacklisted shows blacklist badge",     _suspicious_title("Data Intern", False, True), "🚫 Data Intern")
+    _check("blacklisted overrides suspicious flag", _suspicious_title("Data Intern", True, True),  "🚫 Data Intern")
+
+
+# ---------------------------------------------------------------------------
+# A1 — Reputation pre-filter
+# ---------------------------------------------------------------------------
+
+def test_reputation_load_returns_dict():
+    rep = _load_reputation()
+    _check("load returns dict",          isinstance(rep, dict),                  True)
+    _check("has blacklist_name key",     "blacklist_name" in rep,                True)
+    _check("has blacklist_handle key",   "blacklist_handle" in rep,              True)
+    _check("has trust_boost key",        "trust_boost" in rep,                   True)
+
+
+def test_pre_flag_reputation_blacklist_by_name():
+    df = pd.DataFrame([
+        {"title": "A", "company": "Skillfied Mentor",   "job_url": "http://ex.com/1"},
+        {"title": "B", "company": "Anthropic",          "job_url": "http://ex.com/2"},
+        {"title": "C", "company": "Random Real Corp",   "job_url": "http://ex.com/3"},
+    ])
+    flagged = _pre_flag_reputation(df).reset_index(drop=True)
+    _check("blacklisted company flagged",    bool(flagged.iloc[0]["pre_flagged_low_quality"]), True)
+    _check("trusted company not low-q",      bool(flagged.iloc[1]["pre_flagged_low_quality"]), False)
+    _check("trusted company gets trust flag",bool(flagged.iloc[1]["pre_flagged_trusted"]),     True)
+    _check("random company not flagged",     bool(flagged.iloc[2]["pre_flagged_low_quality"]), False)
+    _check("random company not trusted",     bool(flagged.iloc[2]["pre_flagged_trusted"]),     False)
+
+
+def test_pre_flag_reputation_blacklist_by_handle():
+    df = pd.DataFrame([
+        {"title": "A", "company": "Some Random Name",
+         "job_url": "https://linkedin.com/posts/pankh-workforce-solution_x"},
+    ])
+    flagged = _pre_flag_reputation(df).reset_index(drop=True)
+    _check("blacklisted by URL handle", bool(flagged.iloc[0]["pre_flagged_low_quality"]), True)
+
+
+def test_pre_flag_reputation_case_insensitive():
+    df = pd.DataFrame([
+        {"title": "A", "company": "SKILLFIED MENTOR LLP", "job_url": "x"},
+        {"title": "B", "company": "skillfied mentor",     "job_url": "x"},
+    ])
+    flagged = _pre_flag_reputation(df).reset_index(drop=True)
+    _check("uppercase matches", bool(flagged.iloc[0]["pre_flagged_low_quality"]), True)
+    _check("lowercase matches", bool(flagged.iloc[1]["pre_flagged_low_quality"]), True)
+
+
+def test_pre_flag_reputation_empty_df():
+    out = _pre_flag_reputation(pd.DataFrame())
+    _check("empty df survives", out.empty, True)
+
+
+def test_pre_flag_reputation_renders_in_email():
+    """Integration: a blacklisted job should produce a 🚫 in the HTML."""
+    df = pd.DataFrame([{
+        "title": "AI Engineering Intern", "company": "Webboost Solutions",
+        "location": "Remote", "ai_verdict": "[BLACKLISTED] some text",
+        "match_percentage": 55, "tech_fit": 80, "experience_fit": 80,
+        "logistics_fit": 80, "compensation": "Not stated", "effort": "low",
+        "suspicious": False, "pre_flagged_low_quality": True,
+        "job_url": "https://example.com/x",
+    }])
+    html = format_email_html(df, pd.DataFrame(), {"scraped": 1, "filtered": 1, "approved": 1})
+    _check("blacklisted shows badge in html",     "🚫 AI Engineering Intern" in html, True)
+    _check("blacklisted shows BLACKLISTED tag",   "[BLACKLISTED]" in html,            True)
 
 
 def test_sort_with_tiebreaker():

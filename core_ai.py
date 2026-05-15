@@ -331,7 +331,17 @@ Reply with VALID JSON ONLY (no markdown, no comments):
                 contents=prompt
             )
             result = _parse_ai_response(response.text)
+
+            # Apply reputation-based cap (A1): pre-flagged low-quality companies
+            # cannot score above 55 regardless of what the AI says.
+            if bool(row.get("pre_flagged_low_quality", False)):
+                if result["match_percentage"] > 55:
+                    result["match_percentage"] = 55
+                if not result["verdict"].startswith("[BLACKLISTED]"):
+                    result["verdict"] = "[BLACKLISTED] " + result["verdict"]
+
             badge = " SUSPICIOUS" if result["suspicious"] else ""
+            badge += " BLACKLISTED" if bool(row.get("pre_flagged_low_quality", False)) else ""
             print(
                 f"  [AI] {title[:55]:<55} -> match={result['match_percentage']}% "
                 f"(T:{result['tech_fit']} E:{result['experience_fit']} L:{result['logistics_fit']}){badge}"

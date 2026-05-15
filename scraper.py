@@ -116,6 +116,7 @@ def run_pipeline(config, tracker):
             verdicts, valid_mask, match_pcts = [], [], []
             tech_fits, exp_fits, log_fits = [], [], []
             comps, efforts, suspiciouses = [], [], []
+            blacklisteds = []
 
             for idx, row in combined_jobs.iterrows():
                 result, evaluated = evaluate_job_with_ai(row, cv_text, gemini_key)
@@ -128,6 +129,7 @@ def run_pipeline(config, tracker):
                 comps.append(result["compensation"])
                 efforts.append(result["effort"])
                 suspiciouses.append(result["suspicious"])
+                blacklisteds.append(bool(row.get("pre_flagged_low_quality", False)))
                 # Only mark seen when AI actually returned a verdict. Quota/timeout
                 # errors leave the job unmarked so we can retry it next run.
                 if evaluated:
@@ -141,6 +143,7 @@ def run_pipeline(config, tracker):
             combined_jobs['compensation'] = comps
             combined_jobs['effort'] = efforts
             combined_jobs['suspicious'] = suspiciouses
+            combined_jobs['pre_flagged_low_quality'] = blacklisteds
             
             # Filter down to only AI-approved jobs
             combined_jobs = combined_jobs[valid_mask]

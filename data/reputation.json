@@ -1,0 +1,27 @@
+{
+  "_comment": "Curated reputation modifier list. Edit freely. Matched case-insensitively as substrings. blacklist patterns cap match_percentage at 55 in the AI verdict; trust_boost only marks rows for now (could be wired into the AI prompt later).",
+
+  "blacklist_name_patterns": [
+    "skillfied",
+    "webboost",
+    "webs it",
+    "wake up whistle",
+    "pankh workforce",
+    "future information systems"
+  ],
+
+  "blacklist_handle_patterns": [
+    "pankh-workforce-solution"
+  ],
+
+  "trust_boost": [
+    "anthropic",
+    "openai",
+    "deepmind",
+    "google deepmind",
+    "stripe",
+    "vercel",
+    "supabase",
+    "hugging face"
+  ]
+}
