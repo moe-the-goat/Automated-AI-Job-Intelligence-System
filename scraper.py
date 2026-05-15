@@ -113,22 +113,34 @@ def run_pipeline(config, tracker):
                 cv_text = "Computer Engineering student, strong in Python, PyTorch, FastAPI, RAG, ML, and Backend Development."
             
             print("Running AI Job Validation 1-by-1 (this may take a while)...")
-            verdicts = []
-            valid_mask = []
-            match_pcts = []
-            
+            verdicts, valid_mask, match_pcts = [], [], []
+            tech_fits, exp_fits, log_fits = [], [], []
+            comps, efforts, suspiciouses = [], [], []
+
             for idx, row in combined_jobs.iterrows():
-                verdict, is_valid, match_pct, evaluated = evaluate_job_with_ai(row, cv_text, gemini_key)
-                verdicts.append(verdict)
-                valid_mask.append(is_valid)
-                match_pcts.append(match_pct)
+                result, evaluated = evaluate_job_with_ai(row, cv_text, gemini_key)
+                verdicts.append(result["verdict"])
+                valid_mask.append(result["is_valid"])
+                match_pcts.append(result["match_percentage"])
+                tech_fits.append(result["tech_fit"])
+                exp_fits.append(result["experience_fit"])
+                log_fits.append(result["logistics_fit"])
+                comps.append(result["compensation"])
+                efforts.append(result["effort"])
+                suspiciouses.append(result["suspicious"])
                 # Only mark seen when AI actually returned a verdict. Quota/timeout
                 # errors leave the job unmarked so we can retry it next run.
                 if evaluated:
                     tracker.mark_seen(str(row.get("job_url", "")))
-                
+
             combined_jobs['ai_verdict'] = verdicts
             combined_jobs['match_percentage'] = match_pcts
+            combined_jobs['tech_fit'] = tech_fits
+            combined_jobs['experience_fit'] = exp_fits
+            combined_jobs['logistics_fit'] = log_fits
+            combined_jobs['compensation'] = comps
+            combined_jobs['effort'] = efforts
+            combined_jobs['suspicious'] = suspiciouses
             
             # Filter down to only AI-approved jobs
             combined_jobs = combined_jobs[valid_mask]

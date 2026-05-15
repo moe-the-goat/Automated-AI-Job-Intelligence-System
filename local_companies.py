@@ -223,24 +223,36 @@ def run_local_pipeline(tracker):
     except:
         cv_text = "Computer Engineering student, strong in Python, PyTorch, FastAPI, Backend."
         
-    verdicts = []
-    valid_mask = []
-    match_pcts = []
-    
+    verdicts, valid_mask, match_pcts = [], [], []
+    tech_fits, exp_fits, log_fits = [], [], []
+    comps, efforts, suspiciouses = [], [], []
+
     if not combined_jobs.empty:
         print("Running AI Job Validation...")
         for idx, row in combined_jobs.iterrows():
-            verdict, is_valid, match_pct, evaluated = evaluate_job_with_ai(row, cv_text, gemini_key)
-            verdicts.append(verdict)
-            valid_mask.append(is_valid)
-            match_pcts.append(match_pct)
+            result, evaluated = evaluate_job_with_ai(row, cv_text, gemini_key)
+            verdicts.append(result["verdict"])
+            valid_mask.append(result["is_valid"])
+            match_pcts.append(result["match_percentage"])
+            tech_fits.append(result["tech_fit"])
+            exp_fits.append(result["experience_fit"])
+            log_fits.append(result["logistics_fit"])
+            comps.append(result["compensation"])
+            efforts.append(result["effort"])
+            suspiciouses.append(result["suspicious"])
             # Only mark seen on real verdicts; errors get retried next run.
             if evaluated:
                 tracker.mark_seen(str(row.get("job_url", "")))
-            
+
         combined_jobs['ai_verdict'] = verdicts
         combined_jobs['match_percentage'] = match_pcts
-        
+        combined_jobs['tech_fit'] = tech_fits
+        combined_jobs['experience_fit'] = exp_fits
+        combined_jobs['logistics_fit'] = log_fits
+        combined_jobs['compensation'] = comps
+        combined_jobs['effort'] = efforts
+        combined_jobs['suspicious'] = suspiciouses
+
         # Filter down to approved
         approved_jobs = combined_jobs[valid_mask]
         stats['approved'] = len(approved_jobs)
