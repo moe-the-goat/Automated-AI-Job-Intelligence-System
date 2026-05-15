@@ -37,7 +37,7 @@ def main():
         # Always persist tracker + sweep stale issues, even if the pipeline crashed.
         tracker.save()
         print("Running GitHub Issue cleanup...")
-        cleanup_old_github_issues(days_old=5)
+        cleanup_old_github_issues(days_old=3)
 
 # Public APIs don't filter by recency server-side, so we look back further
 # than the 24h JobSpy window to surface more remote jobs from non-LinkedIn sources.

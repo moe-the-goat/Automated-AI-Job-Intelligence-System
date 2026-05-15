@@ -1,7 +1,8 @@
 import os
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import json
+import re
 import time
 from ddgs import DDGS
 from urllib.parse import urlparse
@@ -10,6 +11,40 @@ from jobspy import scrape_jobs
 from core_filter import apply_pipeline_filters, JobTracker
 from core_ai import evaluate_job_with_ai
 from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
+
+# How far back the local pipeline will accept LinkedIn posts (matches the JobSpy 6-day window).
+LOCAL_LOOKBACK_DAYS = 6
+
+# LinkedIn activity IDs are snowflake-like: right-shifting by 22 yields a Unix epoch
+# in seconds. Verified on real URLs (7397959444342575104 -> 2025-11-24).
+_LINKEDIN_ACTIVITY_RE = re.compile(r'activity-(\d+)')
+_LINKEDIN_HANDLE_RE = re.compile(r'linkedin\.com/posts/([a-z0-9\-]+?)(?:_|/)')
+
+def linkedin_post_date(url):
+    """Decode the post date from a LinkedIn activity URL. Returns None if undecodable."""
+    match = _LINKEDIN_ACTIVITY_RE.search(url or "")
+    if not match:
+        return None
+    try:
+        activity_id = int(match.group(1))
+        ts_seconds = activity_id >> 22
+        return datetime.fromtimestamp(ts_seconds, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+def linkedin_handle_matches(url, company_name):
+    """True if the LinkedIn post URL's handle contains a meaningful chunk of the company name.
+
+    Prevents DDG false positives where a generic first word like 'Future' matches a totally
+    unrelated post (e.g. linkedin.com/posts/pankh-workforce-solution_... for 'Future
+    Information Systems').
+    """
+    match = _LINKEDIN_HANDLE_RE.search((url or "").lower())
+    if not match:
+        return False
+    handle = match.group(1)
+    name_tokens = re.findall(r'[a-z]+', company_name.lower())
+    return any(len(tok) >= 3 and tok in handle for tok in name_tokens)
 
 """
 LOCAL COMPANIES SCRAPER
@@ -44,11 +79,24 @@ def ddg_search_for_jobs(company_name, domain):
         q1 = f'site:linkedin.com/posts {short_name} (hiring OR vacancy OR "looking for" OR job)'
         print(f"Searching LinkedIn Posts for: {company_name} (using '{short_name}')...")
         res1 = ddgs.text(q1, max_results=3, timelimit="w") # past week
+        cutoff = datetime.now(timezone.utc) - timedelta(days=LOCAL_LOOKBACK_DAYS)
         for r in res1:
             title = r.get('title', '')
             body = r.get('body', '')
             link = r.get('href', '')
-            
+
+            # DDG's `timelimit` is unreliable for LinkedIn — re-verify the post date
+            # from the activity ID itself and drop anything older than the lookback window.
+            post_date = linkedin_post_date(link)
+            if post_date and post_date < cutoff:
+                print(f"  Skipping old post for {company_name}: posted {post_date.date()}")
+                continue
+            # Drop unrelated companies that match only because the first word is generic
+            # (e.g. 'Future' matching 'pankh-workforce-solution' on a post mentioning FIS).
+            if not linkedin_handle_matches(link, company_name):
+                print(f"  Skipping unrelated post for {company_name}: handle mismatch ({link[:80]})")
+                continue
+
             jobs_found.append({
                 "title": "LinkedIn Post: " + title[:50] + "...",
                 "company": company_name,
@@ -108,7 +156,7 @@ def main():
         # Always persist tracker + sweep stale issues, even if the pipeline crashed.
         tracker.save()
         print("Running GitHub Issue cleanup...")
-        cleanup_old_github_issues(days_old=5)
+        cleanup_old_github_issues(days_old=3)
 
 def run_local_pipeline(tracker):
     print("Starting Local Companies Scrape...")

@@ -5,3 +5,4 @@ google-genai
 beautifulsoup4
 ddgs
 openpyxl
+langdetect

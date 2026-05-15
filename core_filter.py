@@ -3,6 +3,25 @@ import re
 import json
 import os
 
+# langdetect catches non-English titles (Italian "Posizioni", German "Entwickler", etc.)
+# that the CJK Unicode pre-filter misses. Optional dependency — if missing, we
+# silently keep every title.
+try:
+    from langdetect import detect, DetectorFactory, LangDetectException
+    DetectorFactory.seed = 0
+    _HAS_LANGDETECT = True
+except ImportError:
+    _HAS_LANGDETECT = False
+
+def _is_english_title(title):
+    """Returns False only when langdetect is confident the title is non-English."""
+    if not _HAS_LANGDETECT or not isinstance(title, str) or len(title.strip()) < 10:
+        return True
+    try:
+        return detect(title) == 'en'
+    except LangDetectException:
+        return True
+
 """
 CORE FILTER MODULE
 ------------------
@@ -101,7 +120,15 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
     # 3. Language Pre-filter: Reject Chinese/Korean/Japanese titles to save AI calls
     if "title" in combined_jobs.columns:
         combined_jobs = combined_jobs[~combined_jobs['title'].astype(str).str.contains(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]', na=False)]
-        
+
+    # 3b. Catch non-English titles that aren't CJK (e.g. Italian "Posizioni", German "Entwickler").
+    if "title" in combined_jobs.columns and _HAS_LANGDETECT:
+        before = len(combined_jobs)
+        combined_jobs = combined_jobs[combined_jobs['title'].apply(_is_english_title)]
+        dropped = before - len(combined_jobs)
+        if dropped:
+            print(f"Language filter: dropped {dropped} non-English titles.")
+
     # 4. Location Pre-filter: Drop clearly location-locked jobs that don't say remote
     if "location" in combined_jobs.columns:
         explicit_non_remote = ['shanghai', 'beijing', 'mumbai', 'bangalore', 'moscow', 'tx', 'ca', 'ny', 'california', 'texas', 'new york', 'india', 'china', 'russia']

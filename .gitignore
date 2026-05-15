@@ -5,3 +5,6 @@ __pycache__/
 .env
 # Tracker state is persisted via GitHub Actions cache, not via git.
 seen_jobs.json
+# Local-only working files — never push to GitHub.
+CLAUDE.md
+CHAT_HISTORY.md

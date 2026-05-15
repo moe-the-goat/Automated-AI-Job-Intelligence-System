@@ -84,17 +84,34 @@ def evaluate_job_with_ai(row, cv_text, api_key):
         
     is_internship = 'intern' in title.lower() or 'internship' in job_type
     
-    # Check if we need to do a deep web search for remote policy ambiguity
-    web_search_context = ""
-    # Phrases that strongly imply a GEOGRAPHIC restriction. "based in" alone was too broad
-    # (matches "we're a startup based in NYC") and triggered DDG on almost every job.
+    # --- Web search trigger logic ---
+    # Definite restriction signals -> always search to confirm exclusion.
     web_search_triggers = [
         "eligible countries", "selected countries", "certain countries",
         "must be based", "candidates based", "residents of",
         "remote in the", "must be located", "work authorization",
         "within the united states", "us only", "us-based", "uk only", "eu only"
     ]
-    if any(trigger in description.lower() for trigger in web_search_triggers):
+    # Explicit "globally welcome" signals -> skip search, eligibility is clear.
+    explicit_global_phrases = [
+        "worldwide", "globally remote", "anywhere in the world",
+        "no location restriction", "no geographic restriction",
+        "open to all locations", "global candidates", "emea welcome",
+        "middle east", "fully remote globally", "all countries", "global remote",
+    ]
+    # Ambiguity context: location matters but eligibility isn't spelled out either way.
+    ambiguity_context_phrases = [
+        "timezone", "country", "region", "office", "headquartered",
+        "headquarters", "based ", "located in",
+    ]
+
+    desc_lower = description.lower()
+    has_restriction = any(t in desc_lower for t in web_search_triggers)
+    has_global_signal = any(p in desc_lower for p in explicit_global_phrases)
+    has_ambiguity_context = any(p in desc_lower for p in ambiguity_context_phrases)
+
+    web_search_context = ""
+    if has_restriction or (has_ambiguity_context and not has_global_signal):
         search_data = search_company_remote_policy(company, title)
         if search_data:
             web_search_context = f"\n\n[LIVE WEB SEARCH RESULTS FOR '{company}' REMOTE POLICY]:\n{search_data}\n\nUse this live web data to determine if Palestine/Middle East is explicitly excluded from their remote eligible countries."
