@@ -5,6 +5,10 @@ __pycache__/
 .env
 # Tracker state is persisted via GitHub Actions cache, not via git.
 seen_jobs.json
+# CV embedding cache — regenerated per run if not present.
+data/cv_embedding.json
+# Future per-user feedback file (Fix 11) — never commit.
+data/feedback.json
 # Local-only working files — never push to GitHub.
 CLAUDE.md
 CHAT_HISTORY.md
