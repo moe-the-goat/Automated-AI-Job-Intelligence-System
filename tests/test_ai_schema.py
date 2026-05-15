@@ -34,6 +34,14 @@ from core_notify import (
     format_github_markdown,
 )
 from core_filter import _pre_flag_reputation, _load_reputation
+from core_embedding import (
+    _cv_hash,
+    _read_cached_embedding,
+    _write_cached_embedding,
+    cosine_similarity,
+    rank_by_similarity,
+    CV_EMBEDDING_CACHE,
+)
 
 
 def _check(name, got, expected):
@@ -365,6 +373,114 @@ def test_pre_flag_reputation_renders_in_email():
     html = format_email_html(df, pd.DataFrame(), {"scraped": 1, "filtered": 1, "approved": 1})
     _check("blacklisted shows badge in html",     "🚫 AI Engineering Intern" in html, True)
     _check("blacklisted shows BLACKLISTED tag",   "[BLACKLISTED]" in html,            True)
+
+
+# ---------------------------------------------------------------------------
+# A3 — Embedding pre-rank helpers (no network)
+# ---------------------------------------------------------------------------
+
+def test_cv_hash_stability():
+    _check("same text -> same hash", _cv_hash("hello world"), _cv_hash("hello world"))
+    _check("different text -> different hash", _cv_hash("a") != _cv_hash("b"), True)
+    _check("hash length is 16",      len(_cv_hash("anything")),                16)
+
+
+def test_cv_hash_handles_empty_and_none():
+    _check("empty hash exists",      isinstance(_cv_hash(""), str),  True)
+    _check("none hash exists",       isinstance(_cv_hash(None), str), True)
+
+
+def test_cosine_self_equals_one():
+    v = [1.0, 2.0, 3.0]
+    sim = cosine_similarity(v, v)
+    _check("self cosine ~ 1.0", abs(sim - 1.0) < 1e-9, True)
+
+
+def test_cosine_orthogonal_equals_zero():
+    a = [1.0, 0.0]
+    b = [0.0, 1.0]
+    _check("orthogonal cosine ~ 0.0", abs(cosine_similarity(a, b)) < 1e-9, True)
+
+
+def test_cosine_handles_none_and_zero_vec():
+    _check("None vec returns 0",         cosine_similarity(None, [1, 2]), 0.0)
+    _check("zero-norm vec returns 0",    cosine_similarity([0, 0, 0], [1, 2, 3]), 0.0)
+    _check("empty vec returns 0",        cosine_similarity([], [1, 2, 3]), 0.0)
+
+
+def test_rank_by_similarity_ordering():
+    cv = [1.0, 0.0, 0.0]
+    jobs = [
+        [1.0, 0.0, 0.0],   # identical to CV
+        [0.7, 0.7, 0.0],   # half-aligned
+        [0.0, 1.0, 0.0],   # orthogonal
+    ]
+    sims = rank_by_similarity(cv, jobs)
+    _check("identical first",     sims[0] > sims[1], True)
+    _check("half before orthog",  sims[1] > sims[2], True)
+    _check("orthog ~ 0",          abs(sims[2]) < 1e-9, True)
+
+
+def test_cv_embedding_cache_roundtrip(tmp_dir=".test_tmp_cache"):
+    """Write then read back; hash must match for the read to succeed."""
+    import shutil
+    test_cache_path = ".test_cv_embedding.json"
+    # monkeypatch the cache path
+    import core_embedding as _ce
+    original_path = _ce.CV_EMBEDDING_CACHE
+    _ce.CV_EMBEDDING_CACHE = test_cache_path
+    try:
+        text = "the candidate has strong python skills"
+        vec = [0.1, 0.2, 0.3]
+        _write_cached_embedding(text, vec)
+        loaded = _read_cached_embedding(text)
+        _check("cache roundtrip preserves vec", loaded, vec)
+        _check("wrong-text returns None",       _read_cached_embedding(text + " mutated"), None)
+    finally:
+        _ce.CV_EMBEDDING_CACHE = original_path
+        if os.path.exists(test_cache_path):
+            os.remove(test_cache_path)
+
+
+def test_lower_ranked_html_rendering():
+    """Integration: format_email_html should embed the lower-ranked section."""
+    main_df = pd.DataFrame([{
+        "title": "AI Engineering Intern", "company": "iion", "location": "Remote",
+        "ai_verdict": "Strong RAG match", "match_percentage": 92,
+        "tech_fit": 95, "experience_fit": 90, "logistics_fit": 90,
+        "compensation": "$25/hr", "effort": "low", "suspicious": False,
+        "pre_flagged_low_quality": False, "job_url": "https://example.com/1",
+    }])
+    lower_df = pd.DataFrame([
+        {"title": "Low-Sim Job 1", "company": "X", "location": "R",
+         "similarity": 0.45, "job_url": "https://example.com/2"},
+        {"title": "Low-Sim Job 2", "company": "Y", "location": "R",
+         "similarity": 0.32, "job_url": "https://example.com/3"},
+    ])
+    html = format_email_html(
+        main_df, pd.DataFrame(),
+        {"scraped": 100, "filtered": 50, "approved": 1},
+        lower_ranked_df=lower_df,
+    )
+    _check("lower-ranked section present",   "Lower-Ranked Matches" in html, True)
+    _check("lower-ranked count in heading",  "2 jobs" in html,               True)
+    _check("lower-ranked job 1 listed",      "Low-Sim Job 1" in html,        True)
+    _check("lower-ranked similarity shown",  "0.45" in html,                 True)
+
+
+def test_lower_ranked_section_omitted_when_empty():
+    """An empty / None lower-ranked df should NOT render a section header."""
+    main_df = pd.DataFrame([{
+        "title": "X", "company": "Y", "location": "R",
+        "ai_verdict": "v", "match_percentage": 80,
+        "tech_fit": 80, "experience_fit": 80, "logistics_fit": 80,
+        "compensation": "Not stated", "effort": "low", "suspicious": False,
+        "pre_flagged_low_quality": False, "job_url": "#",
+    }])
+    html_none = format_email_html(main_df, pd.DataFrame(), {"scraped": 1, "filtered": 1, "approved": 1})
+    html_empty = format_email_html(main_df, pd.DataFrame(), {"scraped": 1, "filtered": 1, "approved": 1}, lower_ranked_df=pd.DataFrame())
+    _check("no section when lower_ranked_df is None",  "Lower-Ranked Matches" in html_none,  False)
+    _check("no section when lower_ranked_df is empty", "Lower-Ranked Matches" in html_empty, False)
 
 
 def test_sort_with_tiebreaker():

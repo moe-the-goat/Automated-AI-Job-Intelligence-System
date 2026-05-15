@@ -12,6 +12,7 @@ from core_search import (
 )
 from core_filter import filter_api_jobs, apply_pipeline_filters, JobTracker
 from core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
+from core_embedding import attach_similarity
 from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
 """
@@ -42,6 +43,12 @@ def main():
 # Public APIs don't filter by recency server-side, so we look back further
 # than the 24h JobSpy window to surface more remote jobs from non-LinkedIn sources.
 API_HOURS_OLD = 72
+
+# A3: only the top N jobs (by CV-embedding similarity) get the expensive AI verdict.
+# A small wildcard sample is also evaluated so a poorly-tuned embedding doesn't
+# permanently hide a great long-tail match.
+AI_EVAL_TOP_N = 30
+WILDCARD_COUNT = 5
 
 def run_pipeline(config, tracker):
     all_jobs_dfs = []
@@ -111,7 +118,27 @@ def run_pipeline(config, tracker):
                     cv_text = f.read()
             except:
                 cv_text = "Computer Engineering student, strong in Python, PyTorch, FastAPI, RAG, ML, and Backend Development."
-            
+
+            # A3: pre-rank by CV-embedding similarity. Top-N + wildcards go to AI;
+            # the rest still appear in the email under a "Lower-ranked" section.
+            combined_jobs = attach_similarity(combined_jobs, cv_text, gemini_key)
+            if len(combined_jobs) > AI_EVAL_TOP_N:
+                top_n = combined_jobs.head(AI_EVAL_TOP_N)
+                rest = combined_jobs.iloc[AI_EVAL_TOP_N:]
+                n_wild = min(WILDCARD_COUNT, len(rest))
+                wildcards = rest.sample(n_wild, random_state=42) if n_wild > 0 else rest.iloc[:0]
+                ai_eval_set = pd.concat([top_n, wildcards]).reset_index(drop=True)
+                lower_ranked = rest.drop(wildcards.index).reset_index(drop=True)
+                print(
+                    f"Embedding pre-rank: {len(ai_eval_set)} jobs to AI "
+                    f"(top {AI_EVAL_TOP_N} + {n_wild} wildcards); {len(lower_ranked)} lower-ranked deferred."
+                )
+            else:
+                ai_eval_set = combined_jobs
+                lower_ranked = pd.DataFrame()
+                print(f"Embedding pre-rank: {len(ai_eval_set)} jobs (under threshold, evaluating all).")
+            combined_jobs = ai_eval_set
+
             print("Running AI Job Validation 1-by-1 (this may take a while)...")
             verdicts, valid_mask, match_pcts = [], [], []
             tech_fits, exp_fits, log_fits = [], [], []
@@ -168,11 +195,11 @@ def run_pipeline(config, tracker):
             output_config = config.get("output", {"use_email": True, "use_github_issue": False})
             
             if output_config.get("use_email"):
-                html_content = format_email_html(internships_df, jobs_df, stats)
+                html_content = format_email_html(internships_df, jobs_df, stats, lower_ranked_df=lower_ranked)
                 send_email("Your Automated AI Job Alerts", html_content, config.get("email_settings", {}))
-                
+
             if output_config.get("use_github_issue"):
-                md_content = format_github_markdown(internships_df, jobs_df, stats)
+                md_content = format_github_markdown(internships_df, jobs_df, stats, lower_ranked_df=lower_ranked)
                 today = datetime.now().strftime("%Y-%m-%d")
                 create_github_issue(f"Automated AI Job Alerts - {today}", md_content)
         else:

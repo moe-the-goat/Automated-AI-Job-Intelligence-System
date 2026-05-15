@@ -102,14 +102,60 @@ def _render_html_table(df):
     out += "</table>"
     return out
 
-def format_email_html(internships_df, jobs_df, stats):
-    """Generates the final HTML payload for the daily email."""
+def _render_lower_ranked_html(df, limit=25):
+    """Compact table for jobs that didn't make the AI top-N: title, company, sim score, link."""
+    df = df.copy()
+    if "similarity" in df.columns:
+        df = df.sort_values("similarity", ascending=False)
+    df = df.head(limit)
+    out = "<table border='1' style='border-collapse: collapse; width: 100%;'>"
+    out += "<tr><th>Title</th><th>Company</th><th>Location</th><th>Similarity</th><th>Link</th></tr>"
+    for _, row in df.iterrows():
+        title = row.get("title", "N/A")
+        company = row.get("company", "N/A")
+        location = row.get("location", "Remote/Unspecified")
+        sim = row.get("similarity", 0.0)
+        sim_str = f"{float(sim):.2f}" if sim else "—"
+        job_url = row.get("job_url", "#")
+        out += (
+            f"<tr><td>{title}</td><td>{company}</td><td>{location}</td>"
+            f"<td>{sim_str}</td><td><a href='{job_url}'>View</a></td></tr>"
+        )
+    out += "</table>"
+    return out
+
+
+def _render_lower_ranked_md(df, limit=25):
+    df = df.copy()
+    if "similarity" in df.columns:
+        df = df.sort_values("similarity", ascending=False)
+    df = df.head(limit)
+    out = "| Title | Company | Location | Similarity | Link |\n"
+    out += "|---|---|---|---|---|\n"
+    for _, row in df.iterrows():
+        title = row.get("title", "N/A")
+        company = row.get("company", "N/A")
+        location = row.get("location", "Remote/Unspecified")
+        sim = row.get("similarity", 0.0)
+        sim_str = f"{float(sim):.2f}" if sim else "—"
+        job_url = row.get("job_url", "#")
+        out += f"| {title} | {company} | {location} | {sim_str} | [View]({job_url}) |\n"
+    return out
+
+
+def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None):
+    """Generates the final HTML payload for the daily email.
+
+    `lower_ranked_df` (A3) is an optional dataframe of jobs that survived
+    filtering but didn't make the AI top-N — rendered as a compact summary
+    so the long tail is visible without burning AI quota.
+    """
     internships_df = sort_by_match_percentage(internships_df.copy() if not internships_df.empty else pd.DataFrame())
     jobs_df = sort_by_match_percentage(jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
 
     html = "<h2>Automated AI Job Alerts</h2>"
     html += f"<div><b>Pipeline Stats:</b> Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {stats['approved']}</div>"
-    html += "<div style='color: #666; font-size: 12px;'>Match cell shows composite % with sub-scores Tech / Experience / Logistics. ⚠️ marks suspicious / job-mill postings.</div><hr>"
+    html += "<div style='color: #666; font-size: 12px;'>Match cell shows composite % with sub-scores Tech / Experience / Logistics. ⚠️ marks AI-flagged suspicious postings; 🚫 marks blacklisted companies.</div><hr>"
 
     html += "<h3>🎓 Internships (AI & SWE)</h3>"
     if internships_df.empty:
@@ -122,6 +168,11 @@ def format_email_html(internships_df, jobs_df, stats):
         html += "<p>No relevant full-time jobs found today.</p>"
     else:
         html += _render_html_table(jobs_df)
+
+    if lower_ranked_df is not None and not lower_ranked_df.empty:
+        html += f"<br><h3>📋 Lower-Ranked Matches ({len(lower_ranked_df)} jobs — no AI verdict)</h3>"
+        html += "<div style='color: #666; font-size: 12px;'>These passed the deterministic filters but ranked below the top-N by CV similarity, so AI didn't evaluate them. Higher similarity = closer to your CV.</div>"
+        html += _render_lower_ranked_html(lower_ranked_df)
 
     return html
 
@@ -171,14 +222,14 @@ def _render_md_table(df):
         out += f"| {title} | {company} | {location} | {match_cell} | {comp} | {effort} | {verdict} | [Apply]({job_url}) |\n"
     return out
 
-def format_github_markdown(internships_df, jobs_df, stats):
+def format_github_markdown(internships_df, jobs_df, stats, lower_ranked_df=None):
     """Generates Markdown formatting for a GitHub Issue payload."""
     internships_df = sort_by_match_percentage(internships_df.copy() if not internships_df.empty else pd.DataFrame())
     jobs_df = sort_by_match_percentage(jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
 
     md = "## Automated AI Job Alerts\n\n"
     md += f"**Pipeline Stats:** Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {stats['approved']}\n\n"
-    md += "_Match shows composite % with sub-scores Tech / Experience / Logistics. ⚠️ marks suspicious postings._\n\n---\n\n"
+    md += "_Match shows composite % with sub-scores Tech / Experience / Logistics. ⚠️ = AI-suspicious. 🚫 = blacklisted company._\n\n---\n\n"
 
     md += "### 🎓 Internships (AI & SWE)\n\n"
     if internships_df.empty:
@@ -191,6 +242,11 @@ def format_github_markdown(internships_df, jobs_df, stats):
         md += "No relevant full-time jobs found today.\n\n"
     else:
         md += _render_md_table(jobs_df)
+
+    if lower_ranked_df is not None and not lower_ranked_df.empty:
+        md += f"\n\n### 📋 Lower-Ranked Matches ({len(lower_ranked_df)} jobs — no AI verdict)\n\n"
+        md += "_Passed the deterministic filters but ranked below the top-N by CV similarity, so AI didn't evaluate them._\n\n"
+        md += _render_lower_ranked_md(lower_ranked_df)
 
     return md
 
