@@ -40,5 +40,7 @@ jobs:
         EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        LOGS_REPO: ${{ vars.LOGS_REPO }}
+        LOGS_REPO_TOKEN: ${{ secrets.LOGS_REPO_TOKEN }}
       run: |
         python scraper.py

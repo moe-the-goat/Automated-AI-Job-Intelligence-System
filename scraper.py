@@ -37,8 +37,15 @@ def main():
     finally:
         # Always persist tracker + sweep stale issues, even if the pipeline crashed.
         tracker.save()
+        # New issues now land in the private LOGS_REPO via the LOGS_REPO_TOKEN PAT.
+        # We still sweep the legacy public repo (default GITHUB_TOKEN) so any
+        # pre-existing issues there fade out within 2 days.
+        logs_repo = os.environ.get("LOGS_REPO")
+        logs_token = os.environ.get("LOGS_REPO_TOKEN")
         print("Running GitHub Issue cleanup...")
-        cleanup_old_github_issues(days_old=3)
+        if logs_repo and logs_token:
+            cleanup_old_github_issues(days_old=2, repo=logs_repo, token=logs_token)
+        cleanup_old_github_issues(days_old=2)
 
 # Public APIs don't filter by recency server-side, so we look back further
 # than the 24h JobSpy window to surface more remote jobs from non-LinkedIn sources.
@@ -201,7 +208,14 @@ def run_pipeline(config, tracker):
             if output_config.get("use_github_issue"):
                 md_content = format_github_markdown(internships_df, jobs_df, stats, lower_ranked_df=lower_ranked)
                 today = datetime.now().strftime("%Y-%m-%d")
-                create_github_issue(f"Automated AI Job Alerts - {today}", md_content)
+                # Route new issues to the private logs repo when LOGS_REPO_* are set;
+                # when missing (e.g. local dev), fall back to the working repo as before.
+                create_github_issue(
+                    f"Automated AI Job Alerts - {today}",
+                    md_content,
+                    repo=os.environ.get("LOGS_REPO"),
+                    token=os.environ.get("LOGS_REPO_TOKEN"),
+                )
         else:
             print("No new jobs survived the filters today.")
     else:

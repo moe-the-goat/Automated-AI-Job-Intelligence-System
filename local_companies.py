@@ -155,8 +155,14 @@ def main():
     finally:
         # Always persist tracker + sweep stale issues, even if the pipeline crashed.
         tracker.save()
+        # Sweep BOTH the private logs repo (PAT) and the legacy public repo
+        # (default token) so historical issues there also fade out in 2 days.
+        logs_repo = os.environ.get("LOGS_REPO")
+        logs_token = os.environ.get("LOGS_REPO_TOKEN")
         print("Running GitHub Issue cleanup...")
-        cleanup_old_github_issues(days_old=3)
+        if logs_repo and logs_token:
+            cleanup_old_github_issues(days_old=2, repo=logs_repo, token=logs_token)
+        cleanup_old_github_issues(days_old=2)
 
 def run_local_pipeline(tracker):
     print("Starting Local Companies Scrape...")
@@ -281,23 +287,30 @@ def run_local_pipeline(tracker):
     today = datetime.now().strftime("%Y-%m-%d")
     
     # 4. Routing Logic
+    logs_repo = os.environ.get("LOGS_REPO")
+    logs_token = os.environ.get("LOGS_REPO_TOKEN")
     if stats['approved'] > 0:
         # We have approved jobs. Send Email and create GitHub issue.
         intern_mask = approved_jobs['title'].str.lower().str.contains('intern')
         internships_df = approved_jobs[intern_mask]
         jobs_df = approved_jobs[~intern_mask]
-        
+
         html_content = format_email_html(internships_df, jobs_df, stats)
         send_email(f"Local Companies Job Alerts - {today}", html_content, config.get("email_settings", {}))
-        
+
         md_content = format_github_markdown(internships_df, jobs_df, stats)
-        create_github_issue(f"Local Companies Job Alerts - {today}", md_content)
-        
+        create_github_issue(
+            f"Local Companies Job Alerts - {today}",
+            md_content,
+            repo=logs_repo,
+            token=logs_token,
+        )
+
     elif stats['scraped'] > 0 and stats['approved'] == 0:
         # We found jobs but none passed. Create GitHub issue ONLY.
         title = f"Local Companies Scan - {today} (0 Passed)"
         body = f"## Local Companies Job Scan\n\n**Pipeline Stats:** Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: 0\n\nNo jobs passed the AI validation today. Did not send an email."
-        create_github_issue(title, body)
+        create_github_issue(title, body, repo=logs_repo, token=logs_token)
 
 if __name__ == "__main__":
     main()

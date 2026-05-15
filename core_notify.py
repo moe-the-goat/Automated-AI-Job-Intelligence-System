@@ -250,40 +250,50 @@ def format_github_markdown(internships_df, jobs_df, stats, lower_ranked_df=None)
 
     return md
 
-def create_github_issue(title, body):
-    """Posts a new GitHub Issue with the collected jobs."""
-    token = os.environ.get("GITHUB_TOKEN")
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    
+def create_github_issue(title, body, repo=None, token=None):
+    """Posts a new GitHub Issue with the collected jobs.
+
+    `repo` (in `owner/name` form) and `token` (a PAT or GitHub Actions token)
+    can be passed explicitly to route the issue to a different repository
+    (e.g. the private logs repo). When omitted they fall back to the
+    `GITHUB_REPOSITORY` and `GITHUB_TOKEN` environment variables that
+    GitHub Actions sets automatically.
+    """
+    token = token or os.environ.get("GITHUB_TOKEN")
+    repo = repo or os.environ.get("GITHUB_REPOSITORY")
+
     if not token or not repo:
-        print("Error: GITHUB_TOKEN or GITHUB_REPOSITORY environment variables are not set.")
+        print("Error: no GitHub token/repo available for issue creation.")
         return
-        
+
     url = f"https://api.github.com/repos/{repo}/issues"
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github.v3+json"
     }
-    data = {
-        "title": title,
-        "body": body
-    }
-    
+    data = {"title": title, "body": body}
+
     try:
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
-        print(f"GitHub Issue created successfully: {response.json().get('html_url')}")
+        print(f"GitHub Issue created in {repo}: {response.json().get('html_url')}")
     except Exception as e:
-        print(f"Failed to create GitHub Issue: {e}")
+        print(f"Failed to create GitHub Issue in {repo}: {e}")
 
-def cleanup_old_github_issues(days_old=5):
-    """Closes 'Automated AI Job Alerts' issues that are older than `days_old` days to keep the repo clean."""
-    token = os.environ.get("GITHUB_TOKEN")
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    
+def cleanup_old_github_issues(days_old=5, repo=None, token=None):
+    """Closes managed bot-issues older than `days_old` calendar days.
+
+    `repo` and `token` follow the same override pattern as `create_github_issue`:
+    explicit args win; otherwise fall back to GITHUB_REPOSITORY / GITHUB_TOKEN.
+    Lets the caller sweep the private logs repo AND the legacy public repo
+    by calling this function twice with different `(repo, token)` pairs.
+    """
+    token = token or os.environ.get("GITHUB_TOKEN")
+    repo = repo or os.environ.get("GITHUB_REPOSITORY")
+
     if not token or not repo:
         return
-        
+
     url = f"https://api.github.com/repos/{repo}/issues?state=open&per_page=100"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -310,11 +320,11 @@ def cleanup_old_github_issues(days_old=5):
             age_days = (now.date() - created_at.date()).days
             if age_days >= days_old:
                 issue_num = issue.get("number")
-                print(f"Closing old issue #{issue_num} '{title}' (Age: {age_days} days)")
+                print(f"Closing old issue #{issue_num} '{title}' in {repo} (Age: {age_days} days)")
                 patch_url = f"https://api.github.com/repos/{repo}/issues/{issue_num}"
                 requests.patch(patch_url, headers=headers, json={"state": "closed"})
                 closed_count += 1
-        print(f"GitHub cleanup done. Closed {closed_count} stale issue(s).")
+        print(f"GitHub cleanup done in {repo}. Closed {closed_count} stale issue(s).")
 
     except Exception as e:
         print(f"Failed to cleanup old GitHub issues: {e}")
