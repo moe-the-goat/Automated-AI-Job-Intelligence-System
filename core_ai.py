@@ -166,6 +166,73 @@ def _error_result(message):
     r["verdict"] = message
     return r
 
+
+def skipped_result(reason):
+    """Build a result dict for a job the pre-screen rejected (A2 / Fix 9).
+
+    The skip is deterministic, so callers should still mark the URL as seen —
+    re-running the heuristic on the same row will produce the same outcome,
+    no point spending tokens on it again.
+    """
+    r = dict(DEFAULT_AI_RESULT)
+    r["verdict"] = f"Pre-screen skipped: {reason}"
+    r["is_valid"] = False
+    return r
+
+
+# Heuristic pre-screen patterns. Kept as module constants so tests can import them.
+_NON_TECH_TITLE_SIGNALS = (
+    "sales ", "marketing ", " hr ", " hr-", "recruiter", "talent acquisition",
+    "customer success", "account executive", "account manager",
+    " operations ", "social media", "copywriter", "growth ",
+    "business development",
+)
+_SENIOR_REGEX_PATTERNS = (
+    r"\b[5-9]\+?\s*years?\s+(?:of\s+)?(?:experience|exp)\b",
+    r"\b1[0-9]\+?\s*years?\s+(?:of\s+)?(?:experience|exp)\b",
+    r"\bminimum\s+(?:of\s+)?[5-9]\s*years?\b",
+    r"\bsenior-level\s+(?:engineer|developer|role)\b",
+    r"\bstaff\s+engineer\b",
+    r"\bprincipal\s+engineer\b",
+)
+_MIN_DESCRIPTION_CHARS = 150
+
+
+def quick_viability_check(row):
+    """Cheap heuristic that decides whether to spend a Gemini call on this job (A2).
+
+    Runs AFTER apply_pipeline_filters (so seniority titles, non-tech keywords,
+    non-English titles, etc. are already gone) but BEFORE the expensive AI eval.
+
+    Returns (is_viable: bool, reason: str). reason is a short tag suitable for log lines.
+    """
+    title = str(row.get("title", "")).lower()
+    description = str(row.get("description", "")).lower()
+    description_clean = description.strip()
+
+    # 1. Reputation list already flagged this. Don't waste a call.
+    if bool(row.get("pre_flagged_low_quality", False)):
+        return False, "blacklisted by reputation list"
+
+    # 2. Title looks tech-keyworded but the role is actually sales/marketing/HR/etc.
+    for signal in _NON_TECH_TITLE_SIGNALS:
+        if signal in title:
+            return False, f"non-tech role signal in title ({signal.strip()})"
+
+    # 3. Lazy reposts with empty descriptions. We honour the limited-info protocol
+    # ONLY when the description was scraped-blocked (the placeholder is set
+    # explicitly); short organic descriptions are still rejected.
+    if "[no description" not in description and "[description truncated" not in description:
+        if len(description_clean) < _MIN_DESCRIPTION_CHARS:
+            return False, f"description too short ({len(description_clean)} chars)"
+
+    # 4. Explicit senior-experience requirement that we have no chance of meeting.
+    for pat in _SENIOR_REGEX_PATTERNS:
+        if re.search(pat, description):
+            return False, "senior experience requirement in description"
+
+    return True, "viable"
+
 def evaluate_job_with_ai(row, cv_text, api_key):
     """
     Evaluate a single job posting against the candidate's CV using Gemini 3.1 Flash Lite.

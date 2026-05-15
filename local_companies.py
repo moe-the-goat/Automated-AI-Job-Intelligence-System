@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from jobspy import scrape_jobs
 
 from core_filter import apply_pipeline_filters, JobTracker
-from core_ai import evaluate_job_with_ai
+from core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
 from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
 # How far back the local pipeline will accept LinkedIn posts (matches the JobSpy 6-day window).
@@ -227,11 +227,19 @@ def run_local_pipeline(tracker):
     tech_fits, exp_fits, log_fits = [], [], []
     comps, efforts, suspiciouses = [], [], []
     blacklisteds = []
+    prescreen_skipped = 0
 
     if not combined_jobs.empty:
         print("Running AI Job Validation...")
         for idx, row in combined_jobs.iterrows():
-            result, evaluated = evaluate_job_with_ai(row, cv_text, gemini_key)
+            is_viable, reason = quick_viability_check(row)
+            if not is_viable:
+                prescreen_skipped += 1
+                print(f"  [SKIP] {str(row.get('title', ''))[:55]:<55} -> {reason}")
+                result = skipped_result(reason)
+                evaluated = True
+            else:
+                result, evaluated = evaluate_job_with_ai(row, cv_text, gemini_key)
             verdicts.append(result["verdict"])
             valid_mask.append(result["is_valid"])
             match_pcts.append(result["match_percentage"])
@@ -246,6 +254,7 @@ def run_local_pipeline(tracker):
             if evaluated:
                 tracker.mark_seen(str(row.get("job_url", "")))
 
+        print(f"Pre-screen summary: skipped {prescreen_skipped} / {len(combined_jobs)} jobs before AI eval.")
         combined_jobs['ai_verdict'] = verdicts
         combined_jobs['match_percentage'] = match_pcts
         combined_jobs['tech_fit'] = tech_fits

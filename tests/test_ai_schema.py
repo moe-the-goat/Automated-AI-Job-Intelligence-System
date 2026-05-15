@@ -22,6 +22,8 @@ from core_ai import (
     _normalize_effort,
     _normalize_result,
     _parse_ai_response,
+    quick_viability_check,
+    skipped_result,
 )
 from core_notify import (
     sort_by_match_percentage,
@@ -212,6 +214,92 @@ def test_suspicious_title_marker():
     _check("clean title unchanged",    _suspicious_title("Data Intern", False), "Data Intern")
     _check("blacklisted shows blacklist badge",     _suspicious_title("Data Intern", False, True), "🚫 Data Intern")
     _check("blacklisted overrides suspicious flag", _suspicious_title("Data Intern", True, True),  "🚫 Data Intern")
+
+
+# ---------------------------------------------------------------------------
+# A2 — Heuristic pre-screen (quick_viability_check + skipped_result)
+# ---------------------------------------------------------------------------
+
+_GOOD_DESC = (
+    "Build production RAG systems with LangChain and FastAPI. We deploy ML "
+    "models on AWS and our team is fully distributed across EMEA timezones. "
+    "Looking for candidates passionate about LLM applications."
+)
+
+
+def test_viability_good_row():
+    row = {"title": "AI Engineering Intern", "description": _GOOD_DESC}
+    ok, reason = quick_viability_check(row)
+    _check("good row is viable", ok, True)
+    _check("good row reason tag", reason, "viable")
+
+
+def test_viability_rejects_blacklisted_first():
+    """Blacklisted should short-circuit before any other check."""
+    row = {"title": "AI Engineering Intern", "description": _GOOD_DESC,
+           "pre_flagged_low_quality": True}
+    ok, reason = quick_viability_check(row)
+    _check("blacklisted -> not viable", ok, False)
+    _check("blacklist reason mentions reputation", "reputation" in reason, True)
+
+
+def test_viability_rejects_sales_title():
+    row = {"title": "Sales Engineer", "description": _GOOD_DESC}
+    ok, reason = quick_viability_check(row)
+    _check("sales role rejected", ok, False)
+    _check("sales reason tag", "non-tech" in reason, True)
+
+
+def test_viability_rejects_recruiter_title():
+    row = {"title": "Technical Recruiter Intern", "description": _GOOD_DESC}
+    ok, reason = quick_viability_check(row)
+    _check("recruiter role rejected", ok, False)
+
+
+def test_viability_rejects_short_description():
+    row = {"title": "AI Intern", "description": "Apply now."}
+    ok, reason = quick_viability_check(row)
+    _check("short desc rejected", ok, False)
+    _check("short desc reason mentions chars", "chars" in reason, True)
+
+
+def test_viability_keeps_jobs_with_limited_info_protocol():
+    """When the description is the explicit '[NO DESCRIPTION]' placeholder,
+    the AI handles it via its Limited Info Protocol — we don't pre-skip."""
+    row = {"title": "AI Engineering Intern",
+           "description": "[NO DESCRIPTION AVAILABLE - SCRAPING BLOCKED]"}
+    ok, reason = quick_viability_check(row)
+    _check("no-description placeholder allowed through", ok, True)
+
+
+def test_viability_rejects_5_plus_years():
+    row = {"title": "AI Intern",
+           "description": "We require 5+ years of experience in production ML. " * 5}
+    ok, reason = quick_viability_check(row)
+    _check("5+ years rejected", ok, False)
+    _check("years reason tag", "senior experience" in reason, True)
+
+
+def test_viability_rejects_minimum_7_years():
+    row = {"title": "AI Intern",
+           "description": "Minimum of 7 years experience required in this field. " * 5}
+    ok, reason = quick_viability_check(row)
+    _check("minimum 7y rejected", ok, False)
+
+
+def test_viability_rejects_principal_engineer():
+    row = {"title": "AI Intern",
+           "description": "You'll be a principal engineer leading the AI team. " * 5}
+    ok, reason = quick_viability_check(row)
+    _check("principal engineer rejected", ok, False)
+
+
+def test_skipped_result_schema():
+    r = skipped_result("test reason")
+    _check("skipped result has all keys", set(r.keys()), set(DEFAULT_AI_RESULT.keys()))
+    _check("skipped result is_valid False", r["is_valid"], False)
+    _check("skipped result verdict tag", r["verdict"].startswith("Pre-screen skipped:"), True)
+    _check("skipped result match 0", r["match_percentage"], 0)
 
 
 # ---------------------------------------------------------------------------
