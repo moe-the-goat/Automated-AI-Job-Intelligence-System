@@ -11,6 +11,11 @@ from urllib.parse import urlparse
 
 from core_filter import apply_pipeline_filters, JobTracker
 from core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
+from core_ats import (
+    extract_linkedin_handle,
+    get_jobs_for_company as get_ats_jobs,
+    AtsCache,
+)
 from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
 # How far back the local pipeline will accept LinkedIn posts (matches the JobSpy 6-day window).
@@ -74,20 +79,27 @@ def extract_domain(url):
     except:
         return ""
 
-def ddg_search_for_jobs(company_name, domain):
-    """Uses DuckDuckGo to search for recent job posts on LinkedIn and the company website."""
+def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
+    """Uses DuckDuckGo to search for recent job posts on LinkedIn and the company website.
+
+    When `linkedin_handle` is provided (extracted from the Excel-sheet LinkedIn URL),
+    the LinkedIn search becomes a precise site:linkedin.com/company/{handle}/posts
+    query — far less noise than the old first-word-of-company-name approach.
+    """
     from ddgs import DDGS  # lazy import — see top-of-file comment
     jobs_found = []
     ddgs = DDGS()
-    
-    # Relax company name to the first highly identifiable word (e.g., "ASAL Technologies" -> "ASAL")
-    # This helps catch posts by "asaltech" or those that just say "ASAL is hiring"
+
     short_name = company_name.split()[0] if len(company_name.split()) > 0 else company_name
-    
-    # 1. Search LinkedIn Posts
+
+    # 1. Search LinkedIn Posts (handle-precise when available, fall back to name search)
     try:
-        q1 = f'site:linkedin.com/posts {short_name} (hiring OR vacancy OR "looking for" OR job)'
-        print(f"Searching LinkedIn Posts for: {company_name} (using '{short_name}')...")
+        if linkedin_handle:
+            q1 = f'site:linkedin.com/company/{linkedin_handle}/posts (hiring OR vacancy OR "looking for" OR job)'
+            print(f"Searching LinkedIn Posts (handle '{linkedin_handle}') for: {company_name}...")
+        else:
+            q1 = f'site:linkedin.com/posts {short_name} (hiring OR vacancy OR "looking for" OR job)'
+            print(f"Searching LinkedIn Posts for: {company_name} (using '{short_name}')...")
         res1 = ddgs.text(q1, max_results=3, timelimit="w") # past week
         cutoff = datetime.now(timezone.utc) - timedelta(days=LOCAL_LOOKBACK_DAYS)
         for r in res1:
@@ -144,13 +156,20 @@ def ddg_search_for_jobs(company_name, domain):
     return jobs_found
 
 def load_local_companies():
-    """Loads all companies from the Excel files."""
+    """Loads all companies from the Excel files.
+
+    The two sheets use slightly different column casing (`LinkedIn Profile` vs
+    `LinkedIn profile`, `Jobs Website` vs `Jobs website`). We normalize to lower-case
+    field names so the rest of the pipeline can read them uniformly.
+    """
     files = ["IT Companies - Nablus.xlsx", "IT Companies - Ramallah.xlsx"]
     dfs = []
     for f in files:
         if os.path.exists(f):
             try:
                 df = pd.read_excel(f)
+                # Normalize column names: trim + lowercase.
+                df.columns = [str(c).strip().lower() for c in df.columns]
                 dfs.append(df)
             except Exception as e:
                 print(f"Error loading {f}: {e}")
@@ -182,23 +201,39 @@ def run_local_pipeline(tracker):
         return
         
     all_raw_jobs = []
-    
+    ats_cache = AtsCache()
+
     # Track statistics
-    stats = {"scraped": 0, "filtered": 0, "approved": 0}
-    
+    stats = {"scraped": 0, "filtered": 0, "approved": 0, "ats_jobs": 0}
+
     # 1. Scrape Jobs for each company
     for _, row in companies_df.iterrows():
-        company_name = str(row.get("Company Name", "")).strip()
-        website = str(row.get("Jobs Website", ""))
+        company_name = str(row.get("company name", "")).strip()
+        website = str(row.get("jobs website", ""))
+        linkedin_url = str(row.get("linkedin profile", ""))
         domain = extract_domain(website)
-        
+        linkedin_handle = extract_linkedin_handle(linkedin_url) if linkedin_url and linkedin_url.lower() != "nan" else None
+
         if not company_name or company_name == "nan":
             continue
-            
-        # DuckDuckGo Scrapes
-        ddg_jobs = ddg_search_for_jobs(company_name, domain)
+
+        # NEW: ATS API scrape (Greenhouse / Lever / Workable). One-time detection
+        # cached in data/ats_cache.json so subsequent runs go straight to the API.
+        # `website` doubles as the careers-page seed for first-time detection.
+        if website and website.lower() != "nan":
+            try:
+                ats_jobs = get_ats_jobs(company_name, website, cache=ats_cache)
+                if ats_jobs:
+                    print(f"  ATS yielded {len(ats_jobs)} job(s) for {company_name}")
+                    stats["ats_jobs"] += len(ats_jobs)
+                    all_raw_jobs.extend(ats_jobs)
+            except Exception as e:
+                print(f"ATS scrape failed for {company_name}: {str(e)[:120]}")
+
+        # DuckDuckGo Scrapes (now precision-boosted with linkedin_handle when available)
+        ddg_jobs = ddg_search_for_jobs(company_name, domain, linkedin_handle=linkedin_handle)
         all_raw_jobs.extend(ddg_jobs)
-        
+
         # JobSpy Scrape (Jobs Section)
         try:
             from jobspy import scrape_jobs  # lazy import
@@ -218,6 +253,11 @@ def run_local_pipeline(tracker):
                     all_raw_jobs.append(j_row.to_dict())
         except Exception as e:
             print(f"JobSpy failed for {company_name}: {e}")
+
+    # Persist ATS cache for future runs (so re-detection is rare).
+    ats_cache.save()
+    if stats["ats_jobs"]:
+        print(f"ATS sweep contributed {stats['ats_jobs']} job(s) this run.")
             
     if not all_raw_jobs:
         print("No jobs found at all. Shutting down quietly.")

@@ -9,6 +9,8 @@ seen_jobs.json
 data/cv_embedding.json
 # Future per-user feedback file (Fix 11) — never commit.
 data/feedback.json
+# ATS detection cache (Greenhouse/Lever/Workable tokens). Re-detected after 30d.
+data/ats_cache.json
 # Local-only working files — never push to GitHub.
 CLAUDE.md
 CHAT_HISTORY.md
