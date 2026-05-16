@@ -1,0 +1,6 @@
+# Dev / QA dependencies. NOT installed in CI production workflows.
+# Install locally for richer test output:
+#     pip install -r requirements-qa.txt
+# QA/run_all.py works without these — they're just nice-to-haves.
+pytest>=8.0
+pytest-mock>=3.12

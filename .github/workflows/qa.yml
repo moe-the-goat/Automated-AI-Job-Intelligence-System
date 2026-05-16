@@ -1,0 +1,32 @@
+name: QA Tests
+
+# Runs on every push and pull request. Failing tests block green status.
+# This is the safety net behind every commit — the CLAUDE.md convention also
+# asks contributors to run `python QA/run_all.py` locally before pushing.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install runtime dependencies
+        # Tests use lazy imports for the heaviest deps (google-genai, ddgs, jobspy),
+        # but we still need pandas, langdetect, requests, etc. for import-time.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run QA suite (stdlib runner)
+        run: python QA/run_all.py
