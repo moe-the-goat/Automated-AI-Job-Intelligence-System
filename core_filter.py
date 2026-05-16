@@ -65,8 +65,17 @@ except ImportError:
     _HAS_LANGDETECT = False
 
 def _is_english_title(title):
-    """Returns False only when langdetect is confident the title is non-English."""
-    if not _HAS_LANGDETECT or not isinstance(title, str) or len(title.strip()) < 10:
+    """Returns False only when langdetect is confident the title is non-English.
+
+    langdetect's accuracy collapses on short strings — its own docs say it needs
+    ~50 chars to be reliable. Tech titles are also loaded with proper nouns
+    (PyTorch, FastAPI, RAG, etc.) that confuse it into reporting Italian / Welsh
+    on titles like "AI Engineer". 30 chars is a calibrated trade-off: keeps real
+    tech titles, still catches obviously non-English long-form postings like
+    "Sviluppatore Senior PHP per fintech italiana". The CJK regex filter (step 3)
+    catches truly non-English short titles in Asian languages.
+    """
+    if not _HAS_LANGDETECT or not isinstance(title, str) or len(title.strip()) < 30:
         return True
     try:
         return detect(title) == 'en'
