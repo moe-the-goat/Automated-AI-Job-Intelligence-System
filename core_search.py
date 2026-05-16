@@ -5,11 +5,23 @@ from jobspy import scrape_jobs
 """
 CORE SEARCH MODULE
 ------------------
-This module is responsible for hunting down jobs across the internet. 
-It talks directly to JobSpy (for LinkedIn, Glassdoor, Indeed) and connects 
-to completely free APIs (Remotive, Arbeitnow, Jobicy, RemoteOK) to ensure 
-we have the largest pool of jobs possible before filtering.
+This module is responsible for hunting down jobs across the internet.
+It talks directly to JobSpy (for LinkedIn + Indeed; Glassdoor removed because
+JobSpy's connector errors on every call) and to several free public APIs:
+Remotive, Arbeitnow, Jobicy, RemoteOK, Himalayas, The Muse, WeWorkRemotely.
+The fetchers each return a pandas DataFrame with the same shape so the rest
+of the pipeline can concat them without per-source casing.
+
+Common output schema:
+    title, company, location, job_url, description (optional), date_posted
+
+Pure functions — pure transformations of HTTP/RSS responses. Each fetcher
+is wrapped in try/except so a single dead source can never block the rest
+of the pipeline.
 """
+
+USER_AGENT = "Mozilla/5.0 (compatible; JobAlertsBot/1.0)"
+HTTP_TIMEOUT = 10
 
 def fetch_remotive_jobs():
     """Fetches purely remote software development jobs from Remotive's public API."""
@@ -95,7 +107,7 @@ def fetch_remoteok_jobs():
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         jobs = response.json()
-        
+
         parsed_jobs = []
         for j in jobs:
             if "legal" in j:
@@ -112,3 +124,146 @@ def fetch_remoteok_jobs():
     except Exception as e:
         print(f"Failed to fetch RemoteOK jobs: {e}")
         return pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------
+# Wave 1 additions — Himalayas, The Muse, WeWorkRemotely
+# ---------------------------------------------------------------------------
+
+def fetch_himalayas_jobs(limit=100):
+    """https://himalayas.app/jobs/api — 100% free, no auth, remote-tech focus.
+
+    Response shape:
+      {"comments": ..., "offset": 0, "limit": 100, "totalCount": N, "jobs": [
+        {"title": "...", "companyName": "...", "locationRestrictions": ["EU", "Worldwide"],
+         "applicationLink": "...", "pubDate": "ISO8601", "description": "...", ...}
+      ]}
+    """
+    try:
+        url = f"https://himalayas.app/jobs/api?limit={limit}"
+        response = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
+        response.raise_for_status()
+        payload = response.json()
+        return parse_himalayas_payload(payload)
+    except Exception as e:
+        print(f"Failed to fetch Himalayas jobs: {e}")
+        return pd.DataFrame()
+
+
+def parse_himalayas_payload(payload):
+    """Pure parser. Separate from network so QA can pin it down."""
+    parsed = []
+    for j in (payload or {}).get("jobs", []) or []:
+        locations = j.get("locationRestrictions") or []
+        if isinstance(locations, list):
+            location = ", ".join(str(x) for x in locations) or "Remote"
+        else:
+            location = str(locations) or "Remote"
+        parsed.append({
+            "title": j.get("title", ""),
+            "company": j.get("companyName", ""),
+            "location": location,
+            "job_url": j.get("applicationLink", "") or j.get("guid", ""),
+            "description": j.get("description", "") or j.get("excerpt", ""),
+            "date_posted": j.get("pubDate", ""),
+        })
+    return pd.DataFrame(parsed)
+
+
+def fetch_themuse_jobs(page=0, category=None):
+    """https://www.themuse.com/api/public/jobs — 500 req/hour without API key.
+
+    Response shape:
+      {"page": 0, "page_count": N, "items_per_page": 20, "total": N, "results": [
+        {"name": "...", "company": {"name": "..."}, "locations": [{"name": "Remote"}],
+         "refs": {"landing_page": "..."}, "publication_date": "ISO8601", ...}
+      ]}
+    """
+    try:
+        params = {"page": page}
+        if category:
+            params["category"] = category
+        url = "https://www.themuse.com/api/public/jobs"
+        response = requests.get(url, params=params, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
+        response.raise_for_status()
+        payload = response.json()
+        return parse_themuse_payload(payload)
+    except Exception as e:
+        print(f"Failed to fetch The Muse jobs: {e}")
+        return pd.DataFrame()
+
+
+def parse_themuse_payload(payload):
+    parsed = []
+    for j in (payload or {}).get("results", []) or []:
+        company = (j.get("company") or {}).get("name", "") or ""
+        locs = j.get("locations") or []
+        if isinstance(locs, list) and locs:
+            location = ", ".join(str((x or {}).get("name", "")) for x in locs if isinstance(x, dict))
+        else:
+            location = "Remote/Unspecified"
+        refs = j.get("refs") or {}
+        parsed.append({
+            "title": j.get("name", ""),
+            "company": company,
+            "location": location or "Remote/Unspecified",
+            "job_url": refs.get("landing_page", "") if isinstance(refs, dict) else "",
+            "description": j.get("contents", "") or "",
+            "date_posted": j.get("publication_date", ""),
+        })
+    return pd.DataFrame(parsed)
+
+
+def fetch_wwr_jobs():
+    """WeWorkRemotely programming-jobs RSS feed.
+
+    No REST API — they publish per-category RSS that we parse via the
+    `feedparser` library. Largest remote-work board globally.
+
+    Each entry encodes Company in the title (format "Company: Title") and
+    metadata (region, headquarters) inside the description HTML.
+    """
+    try:
+        import feedparser  # lazy import — keeps QA imports cheap
+    except ImportError:
+        print("Failed to fetch WWR jobs: feedparser not installed")
+        return pd.DataFrame()
+    try:
+        url = "https://weworkremotely.com/categories/remote-programming-jobs.rss"
+        feed = feedparser.parse(url)
+        return parse_wwr_feed(feed)
+    except Exception as e:
+        print(f"Failed to fetch WWR jobs: {e}")
+        return pd.DataFrame()
+
+
+def parse_wwr_feed(feed):
+    """Pure parser. Accepts either a feedparser FeedParserDict or a stub dict."""
+    parsed = []
+    entries = getattr(feed, "entries", None)
+    if entries is None and isinstance(feed, dict):
+        entries = feed.get("entries", []) or []
+    for entry in (entries or []):
+        # Title in WWR's RSS is often "CompanyName: Job Title" — split on first colon.
+        raw_title = (entry.get("title", "") if isinstance(entry, dict) else getattr(entry, "title", "")) or ""
+        company, title = _split_wwr_title(raw_title)
+        link = (entry.get("link", "") if isinstance(entry, dict) else getattr(entry, "link", "")) or ""
+        summary = (entry.get("summary", "") if isinstance(entry, dict) else getattr(entry, "summary", "")) or ""
+        pub = (entry.get("published", "") if isinstance(entry, dict) else getattr(entry, "published", "")) or ""
+        parsed.append({
+            "title": title,
+            "company": company,
+            "location": "Remote",
+            "job_url": link,
+            "description": summary,
+            "date_posted": pub,
+        })
+    return pd.DataFrame(parsed)
+
+
+def _split_wwr_title(raw):
+    """WWR's <title> usually formats as 'Company: Job Title'. Split conservatively."""
+    if not raw or ":" not in raw:
+        return ("", raw or "")
+    company, _, title = raw.partition(":")
+    return (company.strip(), title.strip())

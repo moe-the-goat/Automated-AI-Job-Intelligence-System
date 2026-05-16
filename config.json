@@ -1,7 +1,7 @@
 {
   "searches": [
     {
-      "site_name": ["linkedin", "indeed"],
+      "site_name": ["linkedin", "indeed", "zip_recruiter"],
       "search_term": "junior software engineer",
       "location": "Worldwide",
       "job_type": "fulltime",
@@ -11,7 +11,7 @@
       "country_indeed": "USA"
     },
     {
-      "site_name": ["linkedin", "indeed"],
+      "site_name": ["linkedin", "indeed", "zip_recruiter"],
       "search_term": "python developer entry level",
       "location": "Worldwide",
       "job_type": "fulltime",
@@ -21,7 +21,7 @@
       "country_indeed": "USA"
     },
     {
-      "site_name": ["linkedin", "indeed"],
+      "site_name": ["linkedin", "indeed", "zip_recruiter"],
       "search_term": "backend developer junior",
       "location": "Worldwide",
       "job_type": "fulltime",
@@ -31,7 +31,7 @@
       "country_indeed": "USA"
     },
     {
-      "site_name": ["linkedin", "indeed"],
+      "site_name": ["linkedin", "indeed", "zip_recruiter"],
       "search_term": "machine learning junior",
       "location": "Worldwide",
       "job_type": "fulltime",
@@ -41,7 +41,7 @@
       "country_indeed": "USA"
     },
     {
-      "site_name": ["linkedin", "indeed"],
+      "site_name": ["linkedin", "indeed", "zip_recruiter"],
       "search_term": "software engineer intern",
       "location": "Worldwide",
       "job_type": "internship",
@@ -51,7 +51,7 @@
       "country_indeed": "USA"
     },
     {
-      "site_name": ["linkedin", "indeed"],
+      "site_name": ["linkedin", "indeed", "zip_recruiter"],
       "search_term": "AI intern",
       "location": "Worldwide",
       "job_type": "internship",
@@ -61,7 +61,7 @@
       "country_indeed": "USA"
     },
     {
-      "site_name": ["linkedin", "indeed"],
+      "site_name": ["linkedin", "indeed", "zip_recruiter"],
       "search_term": "software engineer",
       "location": "State of Palestine",
       "is_remote": false,
@@ -70,7 +70,7 @@
       "country_indeed": "USA"
     },
     {
-      "site_name": ["linkedin", "indeed"],
+      "site_name": ["linkedin", "indeed", "zip_recruiter"],
       "search_term": "AI engineer",
       "location": "State of Palestine",
       "is_remote": false,

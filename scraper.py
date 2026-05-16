@@ -8,7 +8,10 @@ from core_search import (
     fetch_remotive_jobs,
     fetch_arbeitnow_jobs,
     fetch_jobicy_jobs,
-    fetch_remoteok_jobs
+    fetch_remoteok_jobs,
+    fetch_himalayas_jobs,
+    fetch_themuse_jobs,
+    fetch_wwr_jobs,
 )
 from core_filter import filter_api_jobs, apply_pipeline_filters, JobTracker
 from core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
@@ -96,6 +99,9 @@ def run_pipeline(config, tracker):
         ("Arbeitnow", fetch_arbeitnow_jobs),
         ("Jobicy", fetch_jobicy_jobs),
         ("RemoteOK", fetch_remoteok_jobs),
+        ("Himalayas", fetch_himalayas_jobs),
+        ("TheMuse", fetch_themuse_jobs),
+        ("WWR", fetch_wwr_jobs),
     ]:
         print(f"Fetching from {name} API...")
         raw = fetch_fn()
