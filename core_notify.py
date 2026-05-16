@@ -1,10 +1,29 @@
 import smtplib
 import os
+import re
 import requests
 import pandas as pd
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timezone
+
+
+def _normalize_repo(repo):
+    """Coerce a repo value into `owner/name` form.
+
+    Accepts: `owner/name`, `https://github.com/owner/name`,
+    `https://github.com/owner/name/`, `github.com/owner/name`,
+    with or without `.git` suffix. Returns None if the input is empty
+    or unrecognizable.
+    """
+    if not repo:
+        return None
+    s = str(repo).strip().rstrip("/")
+    s = re.sub(r"^https?://", "", s)
+    s = re.sub(r"^(www\.)?github\.com/", "", s)
+    if s.endswith(".git"):
+        s = s[:-4]
+    return s or None
 
 # Title prefixes the bot creates. cleanup_old_github_issues matches any of these.
 MANAGED_ISSUE_TITLE_PREFIXES = (
@@ -115,7 +134,7 @@ def _render_lower_ranked_html(df, limit=25):
         company = row.get("company", "N/A")
         location = row.get("location", "Remote/Unspecified")
         sim = row.get("similarity", 0.0)
-        sim_str = f"{float(sim):.2f}" if sim else "—"
+        sim_str = f"{float(sim):.2f}" if sim is not None else "—"
         job_url = row.get("job_url", "#")
         out += (
             f"<tr><td>{title}</td><td>{company}</td><td>{location}</td>"
@@ -137,7 +156,7 @@ def _render_lower_ranked_md(df, limit=25):
         company = row.get("company", "N/A")
         location = row.get("location", "Remote/Unspecified")
         sim = row.get("similarity", 0.0)
-        sim_str = f"{float(sim):.2f}" if sim else "—"
+        sim_str = f"{float(sim):.2f}" if sim is not None else "—"
         job_url = row.get("job_url", "#")
         out += f"| {title} | {company} | {location} | {sim_str} | [View]({job_url}) |\n"
     return out
@@ -260,7 +279,7 @@ def create_github_issue(title, body, repo=None, token=None):
     GitHub Actions sets automatically.
     """
     token = token or os.environ.get("GITHUB_TOKEN")
-    repo = repo or os.environ.get("GITHUB_REPOSITORY")
+    repo = _normalize_repo(repo or os.environ.get("GITHUB_REPOSITORY"))
 
     if not token or not repo:
         print("Error: no GitHub token/repo available for issue creation.")
@@ -289,7 +308,7 @@ def cleanup_old_github_issues(days_old=5, repo=None, token=None):
     by calling this function twice with different `(repo, token)` pairs.
     """
     token = token or os.environ.get("GITHUB_TOKEN")
-    repo = repo or os.environ.get("GITHUB_REPOSITORY")
+    repo = _normalize_repo(repo or os.environ.get("GITHUB_REPOSITORY"))
 
     if not token or not repo:
         return

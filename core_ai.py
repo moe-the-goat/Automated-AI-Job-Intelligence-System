@@ -219,10 +219,20 @@ def quick_viability_check(row):
         if signal in title:
             return False, f"non-tech role signal in title ({signal.strip()})"
 
-    # 3. Lazy reposts with empty descriptions. We honour the limited-info protocol
-    # ONLY when the description was scraped-blocked (the placeholder is set
-    # explicitly); short organic descriptions are still rejected.
-    if "[no description" not in description and "[description truncated" not in description:
+    # 3. Description-length sanity check, with several bypasses for cases where a
+    # "short" description doesn't actually mean "lazy repost":
+    #   - Literally missing values from APIs (`nan` / `None` / `null` / empty / <20 chars)
+    #     should pass through so `evaluate_job_with_ai`'s URL-fetch fallback can run.
+    #   - LinkedIn post snippets (from the local pipeline) are legitimately terse —
+    #     the title is prefixed with "LinkedIn Post:" and the body is a hashtag teaser.
+    #   - Truncated-by-authwall placeholders trigger the AI's Limited Info Protocol.
+    is_missing = description_clean in ("", "nan", "none", "null") or len(description_clean) < 20
+    is_linkedin_post = title.startswith("linkedin post:")
+    is_truncated_placeholder = (
+        "[no description" in description or "[description truncated" in description
+    )
+
+    if not (is_missing or is_linkedin_post or is_truncated_placeholder):
         if len(description_clean) < _MIN_DESCRIPTION_CHARS:
             return False, f"description too short ({len(description_clean)} chars)"
 

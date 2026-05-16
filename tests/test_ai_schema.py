@@ -32,6 +32,8 @@ from core_notify import (
     _suspicious_title,
     format_email_html,
     format_github_markdown,
+    _normalize_repo,
+    _render_lower_ranked_html,
 )
 from core_filter import _pre_flag_reputation, _load_reputation
 from core_embedding import (
@@ -265,9 +267,11 @@ def test_viability_rejects_recruiter_title():
 
 
 def test_viability_rejects_short_description():
-    row = {"title": "AI Intern", "description": "Apply now."}
+    # 47 chars — in the "substantive but lazy repost" 20-149 range that still gets skipped.
+    row = {"title": "AI Intern",
+           "description": "Apply now for this great role at our company."}
     ok, reason = quick_viability_check(row)
-    _check("short desc rejected", ok, False)
+    _check("substantive short desc rejected", ok, False)
     _check("short desc reason mentions chars", "chars" in reason, True)
 
 
@@ -278,6 +282,42 @@ def test_viability_keeps_jobs_with_limited_info_protocol():
            "description": "[NO DESCRIPTION AVAILABLE - SCRAPING BLOCKED]"}
     ok, reason = quick_viability_check(row)
     _check("no-description placeholder allowed through", ok, True)
+
+
+def test_viability_keeps_nan_description():
+    """API-sourced rows with description='nan' must pass to the AI URL-fetch fallback."""
+    row = {"title": "AI Engineering Intern", "description": "nan"}
+    ok, reason = quick_viability_check(row)
+    _check("nan desc passes pre-screen", ok, True)
+
+
+def test_viability_keeps_none_string_description():
+    row = {"title": "AI Engineering Intern", "description": "None"}
+    ok, reason = quick_viability_check(row)
+    _check("'None' desc passes pre-screen", ok, True)
+
+
+def test_viability_keeps_empty_description():
+    row = {"title": "AI Engineering Intern", "description": ""}
+    ok, reason = quick_viability_check(row)
+    _check("empty desc passes pre-screen", ok, True)
+
+
+def test_viability_keeps_linkedin_post_with_short_body():
+    """LinkedIn posts have legitimately short hashtag-teaser bodies — allow."""
+    row = {"title": "LinkedIn Post: #hiring #python #react ...",
+           "description": "#hiring #python #python #react #developer #remote"}
+    ok, reason = quick_viability_check(row)
+    _check("LinkedIn post with short body passes", ok, True)
+
+
+def test_viability_still_rejects_substantive_short_description():
+    """A real but lazy-repost description in the 30-149 range is still rejected."""
+    row = {"title": "AI Intern",
+           "description": "Apply now. We're hiring an AI intern for a paid role this summer."}
+    ok, reason = quick_viability_check(row)
+    _check("substantive 30-150 char desc still rejected", ok, False)
+    _check("substantive-short reason tag", "chars" in reason, True)
 
 
 def test_viability_rejects_5_plus_years():
@@ -481,6 +521,44 @@ def test_lower_ranked_section_omitted_when_empty():
     html_empty = format_email_html(main_df, pd.DataFrame(), {"scraped": 1, "filtered": 1, "approved": 1}, lower_ranked_df=pd.DataFrame())
     _check("no section when lower_ranked_df is None",  "Lower-Ranked Matches" in html_none,  False)
     _check("no section when lower_ranked_df is empty", "Lower-Ranked Matches" in html_empty, False)
+
+
+def test_normalize_repo_passthrough():
+    _check("owner/name passthrough", _normalize_repo("moe-the-goat/job-scrapper-logs"),
+           "moe-the-goat/job-scrapper-logs")
+
+
+def test_normalize_repo_strips_full_url():
+    _check("https URL stripped",
+           _normalize_repo("https://github.com/moe-the-goat/job-scrapper-logs"),
+           "moe-the-goat/job-scrapper-logs")
+
+
+def test_normalize_repo_strips_trailing_slash():
+    _check("trailing slash stripped",
+           _normalize_repo("https://github.com/moe-the-goat/job-scrapper-logs/"),
+           "moe-the-goat/job-scrapper-logs")
+
+
+def test_normalize_repo_strips_git_suffix():
+    _check("trailing .git stripped",
+           _normalize_repo("https://github.com/moe-the-goat/job-scrapper-logs.git"),
+           "moe-the-goat/job-scrapper-logs")
+
+
+def test_normalize_repo_handles_none_and_empty():
+    _check("None passthrough",  _normalize_repo(None), None)
+    _check("empty passthrough", _normalize_repo(""),    None)
+    _check("whitespace -> None", _normalize_repo("   "), None)
+
+
+def test_lower_ranked_zero_similarity_renders_as_number():
+    """Regression: a similarity of 0.0 used to render as '—'. Should be '0.00'."""
+    df = pd.DataFrame([{"title": "X", "company": "Y", "location": "R",
+                        "similarity": 0.0, "job_url": "#"}])
+    html = _render_lower_ranked_html(df)
+    _check("zero similarity renders as 0.00", "0.00" in html, True)
+    _check("zero similarity does NOT render as em-dash", "—" not in html, True)
 
 
 def test_sort_with_tiebreaker():
