@@ -24,7 +24,10 @@ from core_ai import (
     _parse_ai_response,
     quick_viability_check,
     skipped_result,
+    looks_like_india_employer,
+    scan_for_scam_signals,
 )
+from local_companies import linkedin_post_date, LOCAL_LOOKBACK_DAYS
 from core_notify import (
     sort_by_match_percentage,
     _fmt_match_cell_html,
@@ -189,8 +192,88 @@ def test_parse_empty_raises():
 def test_default_schema_keys():
     expected_keys = {"is_valid", "verdict", "tech_fit", "experience_fit",
                      "logistics_fit", "match_percentage", "compensation",
-                     "effort", "suspicious"}
+                     "effort", "suspicious", "scam"}
     _check("default keys", set(DEFAULT_AI_RESULT.keys()), expected_keys)
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn post date decoder (formerly buggy: treated ms as seconds -> always None)
+# ---------------------------------------------------------------------------
+
+def test_linkedin_post_date_iconnect_5mo():
+    """IConnect Technologies post the user flagged as 5 months stale -> Nov 22, 2025."""
+    url = "https://www.linkedin.com/posts/iconnect-tech_hiring-fullstackdeveloper-ai-activity-7397959444342575104-p6DK"
+    d = linkedin_post_date(url)
+    _check("iconnect decodes to a real datetime", d is not None, True)
+    _check("iconnect year is 2025",  d.year,  2025)
+    _check("iconnect month is November", d.month, 11)
+
+
+def test_linkedin_post_date_smartweb_1yr():
+    """SmartWeb post the user flagged as ~1 year stale -> Jan 13, 2025."""
+    url = "https://www.linkedin.com/posts/smartweb-labs_hiring-python-python-activity-7284632728031944704-93L4"
+    d = linkedin_post_date(url)
+    _check("smartweb decodes to a real datetime", d is not None, True)
+    _check("smartweb year is 2025", d.year, 2025)
+    _check("smartweb month is January", d.month, 1)
+
+
+def test_linkedin_post_date_no_activity_id():
+    """URLs without an activity-XYZ segment should return None."""
+    _check("missing activity returns None",
+           linkedin_post_date("https://www.linkedin.com/posts/someone_a-cool-post-xxxx"),
+           None)
+    _check("empty URL returns None", linkedin_post_date(""), None)
+    _check("None URL returns None", linkedin_post_date(None), None)
+
+
+def test_linkedin_post_date_filter_logic():
+    """The post-date filter should reject stale posts and accept fresh ones."""
+    from datetime import datetime, timezone, timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(days=LOCAL_LOOKBACK_DAYS)
+    stale = linkedin_post_date(
+        "https://www.linkedin.com/posts/x_y-activity-7397959444342575104-z")
+    _check("stale post is before cutoff", stale < cutoff, True)
+
+
+# ---------------------------------------------------------------------------
+# Scam detection helpers (India signal + keyword scan)
+# ---------------------------------------------------------------------------
+
+def test_india_employer_by_location():
+    _check("location India flagged",     looks_like_india_employer("Bangalore, India", "Foo Corp"), True)
+    _check("location Bengaluru flagged", looks_like_india_employer("Bengaluru", "X"),               True)
+    _check("location Mumbai flagged",    looks_like_india_employer("Mumbai, IN", "X"),              True)
+
+
+def test_india_employer_by_company_suffix():
+    _check("Private Limited flagged", looks_like_india_employer("Remote", "Zetheta Algorithms Private Limited"), True)
+    _check("Pvt Ltd flagged",         looks_like_india_employer("Remote", "Acme Tech Pvt Ltd"),                  True)
+
+
+def test_india_employer_no_signal():
+    _check("US company not flagged",     looks_like_india_employer("San Francisco, CA", "Anthropic"),       False)
+    _check("EU company not flagged",     looks_like_india_employer("Berlin, Germany", "Hugging Face GmbH"), False)
+    _check("empty location/company",     looks_like_india_employer("", ""),                                  False)
+
+
+def test_scam_keyword_scan_positive():
+    text = (
+        "I worked there for two months and it turned out to be a scam, they never paid me. "
+        "Lots of reddit threads about this being a fake job."
+    )
+    _check("two+ scam signals triggers True", scan_for_scam_signals(text), True)
+
+
+def test_scam_keyword_scan_below_threshold():
+    # Single mention isn't enough — many real companies appear in articles about scams generally.
+    text = "Top 10 ways to spot a job scam in 2026: tip 1, tip 2..."
+    _check("single 'scam' mention does NOT trigger", scan_for_scam_signals(text), False)
+
+
+def test_scam_keyword_scan_empty():
+    _check("empty text returns False", scan_for_scam_signals(""), False)
+    _check("None text returns False",  scan_for_scam_signals(None), False)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +307,10 @@ def test_suspicious_title_marker():
     _check("clean title unchanged",    _suspicious_title("Data Intern", False), "Data Intern")
     _check("blacklisted shows blacklist badge",     _suspicious_title("Data Intern", False, True), "🚫 Data Intern")
     _check("blacklisted overrides suspicious flag", _suspicious_title("Data Intern", True, True),  "🚫 Data Intern")
+    _check("scam shows scam badge",             _suspicious_title("Data Intern", False, False, True), "🚨 Data Intern")
+    _check("scam overrides blacklist",          _suspicious_title("Data Intern", False, True, True),  "🚨 Data Intern")
+    _check("scam overrides suspicious",         _suspicious_title("Data Intern", True, False, True),  "🚨 Data Intern")
+    _check("scam overrides everything",         _suspicious_title("Data Intern", True, True, True),   "🚨 Data Intern")
 
 
 # ---------------------------------------------------------------------------

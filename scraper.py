@@ -149,7 +149,7 @@ def run_pipeline(config, tracker):
             print("Running AI Job Validation 1-by-1 (this may take a while)...")
             verdicts, valid_mask, match_pcts = [], [], []
             tech_fits, exp_fits, log_fits = [], [], []
-            comps, efforts, suspiciouses = [], [], []
+            comps, efforts, suspiciouses, scams = [], [], [], []
             blacklisteds = []
             prescreen_skipped = 0
 
@@ -171,6 +171,7 @@ def run_pipeline(config, tracker):
                 comps.append(result["compensation"])
                 efforts.append(result["effort"])
                 suspiciouses.append(result["suspicious"])
+                scams.append(result.get("scam", False))
                 blacklisteds.append(bool(row.get("pre_flagged_low_quality", False)))
                 # Only mark seen when AI actually returned a verdict. Quota/timeout
                 # errors leave the job unmarked so we can retry it next run.
@@ -186,6 +187,7 @@ def run_pipeline(config, tracker):
             combined_jobs['compensation'] = comps
             combined_jobs['effort'] = efforts
             combined_jobs['suspicious'] = suspiciouses
+            combined_jobs['scam'] = scams
             combined_jobs['pre_flagged_low_quality'] = blacklisteds
             
             # Filter down to only AI-approved jobs

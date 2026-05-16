@@ -77,13 +77,15 @@ def _fmt_match_cell_md(row):
         return f"**{pct_str}** (T:{tech} E:{exp} L:{log})"
     return f"**{pct_str}**"
 
-def _suspicious_title(title, is_suspicious, is_blacklisted=False):
-    """Prepend a visible warning to titles.
+def _suspicious_title(title, is_suspicious, is_blacklisted=False, is_scam=False):
+    """Prepend a visible warning to titles. Severity order (most severe first):
 
+    🚨 = web-confirmed scam (India + suspicious + Reddit/review mentions of fraud).
     🚫 = pre-flagged low-quality via the reputation list (A1 / data/reputation.json).
-        This is the more severe signal — shown if both flags are set.
     ⚠️  = AI-flagged suspicious posting (the model's own judgement).
     """
+    if is_scam:
+        return f"🚨 {title}"
     if is_blacklisted:
         return f"🚫 {title}"
     if is_suspicious:
@@ -105,6 +107,7 @@ def _render_html_table(df):
             row.get("title", "N/A"),
             bool(row.get("suspicious", False)),
             bool(row.get("pre_flagged_low_quality", False)),
+            bool(row.get("scam", False)),
         )
         company = row.get("company", "N/A")
         location = row.get("location", "Remote/Unspecified")
@@ -174,7 +177,7 @@ def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None):
 
     html = "<h2>Automated AI Job Alerts</h2>"
     html += f"<div><b>Pipeline Stats:</b> Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {stats['approved']}</div>"
-    html += "<div style='color: #666; font-size: 12px;'>Match cell shows composite % with sub-scores Tech / Experience / Logistics. ⚠️ marks AI-flagged suspicious postings; 🚫 marks blacklisted companies.</div><hr>"
+    html += "<div style='color: #666; font-size: 12px;'>Match cell shows composite % with sub-scores Tech / Experience / Logistics. 🚨 = web-confirmed scam · 🚫 = blacklisted company · ⚠️ = AI-flagged suspicious.</div><hr>"
 
     html += "<h3>🎓 Internships (AI & SWE)</h3>"
     if internships_df.empty:
@@ -228,6 +231,7 @@ def _render_md_table(df):
             row.get("title", "N/A"),
             bool(row.get("suspicious", False)),
             bool(row.get("pre_flagged_low_quality", False)),
+            bool(row.get("scam", False)),
         )
         company = row.get("company", "N/A")
         location = row.get("location", "Remote/Unspecified")
@@ -248,7 +252,7 @@ def format_github_markdown(internships_df, jobs_df, stats, lower_ranked_df=None)
 
     md = "## Automated AI Job Alerts\n\n"
     md += f"**Pipeline Stats:** Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {stats['approved']}\n\n"
-    md += "_Match shows composite % with sub-scores Tech / Experience / Logistics. ⚠️ = AI-suspicious. 🚫 = blacklisted company._\n\n---\n\n"
+    md += "_Match shows composite % with sub-scores Tech / Experience / Logistics. 🚨 = web-confirmed scam · 🚫 = blacklisted · ⚠️ = AI-suspicious._\n\n---\n\n"
 
     md += "### 🎓 Internships (AI & SWE)\n\n"
     if internships_df.empty:

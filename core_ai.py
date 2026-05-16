@@ -42,7 +42,60 @@ DEFAULT_AI_RESULT = {
     "compensation": "Not stated",
     "effort": "unknown",
     "suspicious": False,
+    "scam": False,                          # set True only after web-based scam confirmation
 }
+
+# Phrases that, in a company name or job location, strongly suggest an India-based
+# employer. Used by the scam-check to limit Reddit/review lookups to that segment.
+_INDIA_SIGNALS = (
+    "india", "pvt ltd", "pvt. ltd", "private limited", "(p) ltd", "pvt limited",
+    "bangalore", "bengaluru", "hyderabad", "mumbai", "delhi", "noida", "gurgaon",
+    "chennai", "pune", "kolkata", "ahmedabad",
+)
+_SCAM_KEYWORDS = (
+    "scam", "fraud", "fake job", "fraudulent", "did not pay", "didn't pay",
+    "ghost job", "ponzi", "pyramid scheme",
+)
+
+
+def looks_like_india_employer(location, company):
+    """Cheap text check: is this posting plausibly an India-based employer?"""
+    text = f"{location or ''} {company or ''}".lower()
+    return any(sig in text for sig in _INDIA_SIGNALS)
+
+
+def scan_for_scam_signals(text, min_matches=2):
+    """Count how many scam keywords appear in a body of text. >=min_matches -> True."""
+    t = (text or "").lower()
+    hits = sum(1 for kw in _SCAM_KEYWORDS if kw in t)
+    return hits >= min_matches
+
+
+def detect_company_scam(company_name):
+    """For an India-flagged suspicious company, search the open web for scam reports.
+
+    Runs three short DDG queries and returns True iff at least 2 distinct scam keywords
+    appear across the combined result bodies. Conservative by design — false positives
+    here would incorrectly tag legitimate Indian companies.
+    """
+    if not company_name:
+        return False
+    from ddgs import DDGS  # lazy import
+    queries = [
+        f'"{company_name}" scam',
+        f'"{company_name}" fake job complaints',
+        f'"{company_name}" reddit review',
+    ]
+    snippets = []
+    try:
+        ddgs = DDGS()
+        for q in queries:
+            for r in ddgs.text(q, max_results=2):
+                snippets.append(r.get('body', ''))
+    except Exception as e:
+        print(f"  [SCAM CHECK] DDG failed for {company_name}: {str(e)[:120]}")
+        return False
+    return scan_for_scam_signals(" ".join(snippets))
 
 _NUMBER_RE = re.compile(r'^\s*(-?\d+(?:\.\d+)?)')
 
@@ -93,6 +146,7 @@ def _normalize_result(raw):
         "compensation":     _safe_str(raw.get("compensation"), "Not stated"),
         "effort":           _normalize_effort(raw.get("effort")),
         "suspicious":       _safe_bool(raw.get("suspicious"), False),
+        "scam":             _safe_bool(raw.get("scam"), False),
     }
 
 def _parse_ai_response(text):
@@ -325,11 +379,23 @@ JOB:
 
 EVALUATION RULES (apply rigorously, default to deducting points):
 
-1. LOGISTICS_FIT (0-100) — geography + timezone overlap with UTC+2:
-   - "Worldwide" / "EMEA" / no geographic restriction → 85-100
-   - Required sync TZ overlaps UTC+2 by >=4 working hours (EU, MENA, UK) → 75-95
-   - Required sync TZ overlaps UTC+2 by <4 working hours (US Pacific, Australia, East Asia) → 20-50
-   - Explicit exclusion of Palestine/MENA → set is_valid=false AND logistics_fit <= 20
+1. LOGISTICS_FIT (0-100) — purely about whether the candidate is GEOGRAPHICALLY eligible.
+   Timezone differences DO NOT matter — the candidate is happy working any shift as
+   long as the role is fully remote and open to their location.
+
+   ELIGIBILITY BANDS:
+   - "Worldwide" / "Global" / "EMEA welcome" / "anywhere" / no geographic restriction → 90-100
+   - Description doesn't mention restriction but doesn't explicitly welcome remote-global either → 70-85
+   - WORK AUTHORIZATION RESTRICTIONS — these are HARD disqualifiers. Scan for ANY of:
+       * "must be authorized to work in the US/UK/EU/[country]"
+       * "must be legally able to work in [country]"
+       * "visa sponsorship not available" / "no visa sponsorship"
+       * "must be eligible to work in [country] without sponsorship"
+       * "US citizens / green card holders only"
+       * "must reside in [non-MENA country]"
+     If ANY such phrase appears (or the web search reveals one), set is_valid=false AND
+     logistics_fit <= 15. Note it explicitly in the verdict.
+   - Explicit exclusion of Palestine / Middle East → same: is_valid=false, logistics_fit <= 15.
 
 2. EXPERIENCE_FIT (0-100) — required experience vs candidate's 0 professional years:
    - "Internship" / "0-1 year" / "entry-level" → 85-100
@@ -376,12 +442,25 @@ EVALUATION RULES (apply rigorously, default to deducting points):
        40-59:  Poor fit; would not recommend applying.
        0-39:   Should not apply.
 
-8. VERDICT (1-2 sentences) MUST:
-   - Cite the specific CV project or technology by name driving the match (e.g.,
-     "your MSR-VTT text-to-video retrieval directly maps to their video search feature",
-     "your FAISS + Ollama RAG project aligns with their on-prem LLM stack").
-   - Generic phrases like "strong Python skills" or "strong technical match" are FORBIDDEN.
-   - State the SINGLE biggest concern if any (TZ gap, exp gap, frontend gap, suspicious posting).
+8. VERDICT — write as a senior recruiter would: structured, specific, no fluff.
+   Required structure (2-4 sentences, in this order):
+   a) MATCH: name 1-2 SPECIFIC CV assets (projects or technologies, by name) that
+      directly address what the job asks for. E.g.,
+      "Your RAG project (LangChain + FAISS + Ollama) directly matches their stated
+       need for LLM-integrated app development."
+   b) GAP: name the SPECIFIC missing requirement that the candidate doesn't have.
+      E.g., "Their stack also requires React/TypeScript frontend — your CV shows
+      backend-only experience."
+   c) (Optional) SECOND MATCH/GAP: a secondary positive or concern.
+   d) (Required only if is_valid=false) CLOSING REASON: explicitly state the
+      disqualifier (work auth, geo exclusion, senior-only, scam suspicion).
+
+   STRICT VOCABULARY RULES:
+   - Generic phrases are FORBIDDEN: "strong technical match", "strong Python skills",
+     "good fit", "well-aligned". Be specific or don't say it.
+   - Cite projects and tech BY NAME (MSR-VTT, FAISS, FastAPI, Ollama, etc.).
+   - When citing a gap, name the missing tech/experience SPECIFICALLY ("no AWS production
+     experience", "no React frontend background"), not vaguely ("limited experience").
 
 9. LIMITED INFO PROTOCOL:
    - If description contains [DESCRIPTION TRUNCATED] or [NO DESCRIPTION], deduct 10 from
@@ -417,7 +496,19 @@ Reply with VALID JSON ONLY (no markdown, no comments):
                 if not result["verdict"].startswith("[BLACKLISTED]"):
                     result["verdict"] = "[BLACKLISTED] " + result["verdict"]
 
-            badge = " SUSPICIOUS" if result["suspicious"] else ""
+            # India-suspicious -> open-web scam check. Only fires when both signals
+            # hold, keeping DDG calls cheap. Confirmed scams get a hard cap + tag.
+            location_text = str(row.get("location", ""))
+            if result["suspicious"] and looks_like_india_employer(location_text, company):
+                if detect_company_scam(company):
+                    result["scam"] = True
+                    result["is_valid"] = False
+                    if result["match_percentage"] > 30:
+                        result["match_percentage"] = 30
+                    if not result["verdict"].startswith("[SCAM]"):
+                        result["verdict"] = "[SCAM] " + result["verdict"]
+
+            badge = " SCAM" if result["scam"] else (" SUSPICIOUS" if result["suspicious"] else "")
             badge += " BLACKLISTED" if bool(row.get("pre_flagged_low_quality", False)) else ""
             print(
                 f"  [AI] {title[:55]:<55} -> match={result['match_percentage']}% "

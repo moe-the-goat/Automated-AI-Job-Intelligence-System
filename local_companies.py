@@ -4,9 +4,10 @@ from datetime import datetime, timezone, timedelta
 import json
 import re
 import time
-from ddgs import DDGS
 from urllib.parse import urlparse
-from jobspy import scrape_jobs
+# Heavy deps (`ddgs`, `jobspy`) are lazy-imported inside the functions that
+# actually need them so the pure helpers (linkedin_post_date, handle matcher)
+# can be unit-tested without those packages installed.
 
 from core_filter import apply_pipeline_filters, JobTracker
 from core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
@@ -15,20 +16,28 @@ from core_notify import format_email_html, format_github_markdown, send_email, c
 # How far back the local pipeline will accept LinkedIn posts (matches the JobSpy 6-day window).
 LOCAL_LOOKBACK_DAYS = 6
 
-# LinkedIn activity IDs are snowflake-like: right-shifting by 22 yields a Unix epoch
-# in seconds. Verified on real URLs (7397959444342575104 -> 2025-11-24).
+# LinkedIn activity IDs are snowflake-like: the top ~41 bits encode a UNIX timestamp
+# in MILLISECONDS (not seconds!). Right-shifting the 64-bit ID by 22 strips off the
+# low sequence/counter bits and yields a millisecond timestamp.
+# Verified on real URLs: 7397959444342575104 -> 1763830509824 ms -> 2025-11-22 UTC.
 _LINKEDIN_ACTIVITY_RE = re.compile(r'activity-(\d+)')
 _LINKEDIN_HANDLE_RE = re.compile(r'linkedin\.com/posts/([a-z0-9\-]+?)(?:_|/)')
 
 def linkedin_post_date(url):
-    """Decode the post date from a LinkedIn activity URL. Returns None if undecodable."""
+    """Decode the post date from a LinkedIn activity URL. Returns None if undecodable.
+
+    BUG HISTORY: an earlier version treated the shifted value as seconds, which
+    overflowed fromtimestamp() and made the function always return None. The
+    filter that used it then never fired and 5-month-old + 1-year-old posts
+    slipped into the email. Fixed by dividing by 1000 (ms -> s).
+    """
     match = _LINKEDIN_ACTIVITY_RE.search(url or "")
     if not match:
         return None
     try:
         activity_id = int(match.group(1))
-        ts_seconds = activity_id >> 22
-        return datetime.fromtimestamp(ts_seconds, tz=timezone.utc)
+        ts_milliseconds = activity_id >> 22
+        return datetime.fromtimestamp(ts_milliseconds / 1000, tz=timezone.utc)
     except (ValueError, OverflowError, OSError):
         return None
 
@@ -67,6 +76,7 @@ def extract_domain(url):
 
 def ddg_search_for_jobs(company_name, domain):
     """Uses DuckDuckGo to search for recent job posts on LinkedIn and the company website."""
+    from ddgs import DDGS  # lazy import — see top-of-file comment
     jobs_found = []
     ddgs = DDGS()
     
@@ -191,6 +201,7 @@ def run_local_pipeline(tracker):
         
         # JobSpy Scrape (Jobs Section)
         try:
+            from jobspy import scrape_jobs  # lazy import
             print(f"Running JobSpy for {company_name}...")
             jobspy_res = scrape_jobs(
                 site_name=["linkedin"],
@@ -231,7 +242,7 @@ def run_local_pipeline(tracker):
         
     verdicts, valid_mask, match_pcts = [], [], []
     tech_fits, exp_fits, log_fits = [], [], []
-    comps, efforts, suspiciouses = [], [], []
+    comps, efforts, suspiciouses, scams = [], [], [], []
     blacklisteds = []
     prescreen_skipped = 0
 
@@ -255,6 +266,7 @@ def run_local_pipeline(tracker):
             comps.append(result["compensation"])
             efforts.append(result["effort"])
             suspiciouses.append(result["suspicious"])
+            scams.append(result.get("scam", False))
             blacklisteds.append(bool(row.get("pre_flagged_low_quality", False)))
             # Only mark seen on real verdicts; errors get retried next run.
             if evaluated:
@@ -269,6 +281,7 @@ def run_local_pipeline(tracker):
         combined_jobs['compensation'] = comps
         combined_jobs['effort'] = efforts
         combined_jobs['suspicious'] = suspiciouses
+        combined_jobs['scam'] = scams
         combined_jobs['pre_flagged_low_quality'] = blacklisteds
 
         # Filter down to approved
