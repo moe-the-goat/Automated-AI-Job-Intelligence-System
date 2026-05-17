@@ -52,3 +52,37 @@ def test_case_insensitive_matching():
 
 def test_empty_dataframe_survives():
     assert _pre_flag_reputation(pd.DataFrame()).empty
+
+
+# ---------------------------------------------------------------------------
+# Companies added on 2026-05-17 after they leaked through into the daily email
+# ---------------------------------------------------------------------------
+
+def test_inficore_soft_blacklisted_after_internship_flood():
+    """Inficore Soft posted 2 India-sus internships in the 2026-05-17 email."""
+    df = pd.DataFrame([{"title": "Python Intern", "company": "Inficore Soft", "job_url": "x"}])
+    out = _pre_flag_reputation(df).reset_index(drop=True)
+    assert bool(out.iloc[0]["pre_flagged_low_quality"]) is True
+
+
+def test_skillzenloop_blacklisted_after_html_css_intern_flood():
+    df = pd.DataFrame([{"title": "HTML/CSS Intern", "company": "Skillzenloop Pvt", "job_url": "x"}])
+    out = _pre_flag_reputation(df).reset_index(drop=True)
+    assert bool(out.iloc[0]["pre_flagged_low_quality"]) is True
+
+
+def test_netrolynx_blacklisted_after_data_analyst_leak():
+    df = pd.DataFrame([{"title": "Data Analyst", "company": "Netrolynx AI", "job_url": "x"}])
+    out = _pre_flag_reputation(df).reset_index(drop=True)
+    assert bool(out.iloc[0]["pre_flagged_low_quality"]) is True
+
+
+def test_inficore_handle_pattern_in_linkedin_url():
+    """The `inficore-soft` LinkedIn handle should also catch via URL even if the
+    company field comes in differently spelled."""
+    df = pd.DataFrame([{
+        "title": "A", "company": "Generic Name",
+        "job_url": "https://linkedin.com/company/inficore-soft/posts/xyz",
+    }])
+    out = _pre_flag_reputation(df).reset_index(drop=True)
+    assert bool(out.iloc[0]["pre_flagged_low_quality"]) is True

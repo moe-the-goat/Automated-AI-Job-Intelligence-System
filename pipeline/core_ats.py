@@ -15,12 +15,14 @@ How:
 4. From then on we hit the ATS API directly — clean structured JSON, no HTML.
 
 Public API endpoints used:
-  Greenhouse:  GET https://boards-api.greenhouse.io/v1/boards/{token}/jobs
+  Greenhouse:  GET https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true
   Lever:       GET https://api.lever.co/v0/postings/{token}?mode=json
   Workable:    GET https://apply.workable.com/api/v3/accounts/{token}/jobs
   Ashby:       GET https://api.ashbyhq.com/posting-api/job-board/{token}?includeCompensation=true
   Workday:     POST https://{tenant}.{cluster}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs
                (token is encoded as "tenant|cluster|site" — see _parse_workday_token)
+  FactorialHR: GET https://api.factorialhr.com/resources/atsapi/v1/jobs?slug={token}
+               (used by many EU SMBs incl. Palestinian Innotech)
 
 Jina Reader fallback (Wave 2):
   When ATS detection fails on a careers page, the caller can route to Jina
@@ -92,6 +94,8 @@ _ATS_DETECTORS = [
     ("workable",   re.compile(r"workable\.com/(?:n/)?([a-zA-Z0-9\-_]+)/jobs",                          re.IGNORECASE)),
     ("bamboohr",   re.compile(r"([a-zA-Z0-9\-_]+)\.bamboohr\.com",                                     re.IGNORECASE)),
     ("smartrecruiters", re.compile(r"careers\.smartrecruiters\.com/([a-zA-Z0-9\-_]+)",                 re.IGNORECASE)),
+    # FactorialHR — common among EU SMBs. URL form: {slug}.factorialhr.com[/...]
+    ("factorialhr", re.compile(r"([a-zA-Z0-9\-_]+)\.factorialhr\.com",                                  re.IGNORECASE)),
 ]
 
 # Workday URLs look like `{tenant}.wd{N}.myworkdayjobs.com/{lang}/{site}` (optional
@@ -424,13 +428,101 @@ def parse_workday_payload(payload, company_name, tenant="", cluster="", site="")
     return out
 
 
+def fetch_factorialhr_jobs(token, company_name):
+    """https://api.factorialhr.com/resources/atsapi/v1/jobs?slug={token}.
+
+    Public endpoint, no auth. Many EU SMBs use FactorialHR — including the
+    Palestinian company Innotech we kept getting ghost-listings for. Hitting
+    the live API instead of scraping the indexed HTML kills the stale-listing
+    problem because the endpoint only returns currently-open positions.
+    """
+    import requests
+    url = f"https://api.factorialhr.com/resources/atsapi/v1/jobs?slug={token}"
+    try:
+        r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        print(f"  ATS factorialhr: {company_name} fetch failed: {str(e)[:120]}")
+        return []
+    return parse_factorialhr_payload(payload, company_name, token=token)
+
+
+def parse_factorialhr_payload(payload, company_name, token=""):
+    """Pure parser for FactorialHR's ATS API response.
+
+    Tolerant to several shapes the endpoint returns across versions:
+      - Bare list: [{...}, {...}]
+      - Wrapped under "jobs" key: {"jobs": [{...}]}
+      - Wrapped under "data" key: {"data": [{...}]}
+
+    Each job entry typically has: id, title, description, locations,
+    employment_type, url, slug. The public-facing apply URL pattern is
+    `{token}.factorialhr.com/job_posting/{slug}` if `url` isn't explicit.
+    """
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        items = payload.get("jobs") or payload.get("data") or []
+    else:
+        items = []
+
+    out = []
+    for j in items or []:
+        if not isinstance(j, dict):
+            continue
+        # FactorialHR uses different keys depending on the org's setup;
+        # try them in order and fall back to empty string.
+        loc = ""
+        loc_field = j.get("locations") or j.get("location") or j.get("city")
+        if isinstance(loc_field, list):
+            # Sometimes a list of dicts, sometimes a list of strings.
+            parts = []
+            for x in loc_field:
+                if isinstance(x, dict):
+                    parts.append(x.get("name", "") or x.get("city", "") or "")
+                elif isinstance(x, str):
+                    parts.append(x)
+            loc = ", ".join(p for p in parts if p)
+        elif isinstance(loc_field, dict):
+            loc = loc_field.get("name", "") or loc_field.get("city", "") or ""
+        elif isinstance(loc_field, str):
+            loc = loc_field
+
+        emp_type = (j.get("employment_type", "") or j.get("contract_type", "") or "").lower()
+        job_type = "internship" if "intern" in emp_type else "fulltime"
+
+        # Construct apply URL if the API didn't supply one.
+        job_url = j.get("url") or j.get("apply_url") or ""
+        if not job_url and token:
+            slug = j.get("slug") or j.get("id") or ""
+            if slug:
+                job_url = f"https://{token}.factorialhr.com/job_posting/{slug}"
+
+        # Description may be HTML; let downstream HTML-stripping in core_ai
+        # handle that. We just pass the raw text/HTML through.
+        description = j.get("description", "") or j.get("description_plain", "") or ""
+
+        out.append(_normalize_job(
+            title=j.get("title", "") or j.get("name", ""),
+            company=company_name,
+            location=loc,
+            job_url=job_url,
+            description=description,
+            date_posted=j.get("published_at", "") or j.get("created_at", "") or "",
+            job_type=job_type,
+        ))
+    return out
+
+
 # Dispatch table so callers don't need to switch/case.
 _ATS_FETCHERS = {
-    "greenhouse": fetch_greenhouse_jobs,
-    "lever":      fetch_lever_jobs,
-    "workable":   fetch_workable_jobs,
-    "ashby":      fetch_ashby_jobs,
-    "workday":    fetch_workday_jobs,
+    "greenhouse":  fetch_greenhouse_jobs,
+    "lever":       fetch_lever_jobs,
+    "workable":    fetch_workable_jobs,
+    "ashby":       fetch_ashby_jobs,
+    "workday":     fetch_workday_jobs,
+    "factorialhr": fetch_factorialhr_jobs,
 }
 
 

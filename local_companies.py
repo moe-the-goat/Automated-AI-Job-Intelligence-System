@@ -16,6 +16,7 @@ from pipeline.core_ats import (
     get_jobs_for_company as get_ats_jobs,
     AtsCache,
 )
+from pipeline.url_validation import is_job_url_like, probe_urls_alive_batch
 from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
 # How far back the local pipeline will accept LinkedIn posts (matches the JobSpy 6-day window).
@@ -140,7 +141,17 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
                 title = r.get('title', '')
                 body = r.get('body', '')
                 link = r.get('href', '')
-                
+
+                # URL-pattern check: a result for `site:freightos.com (hiring
+                # OR careers OR jobs OR vacancy)` once matched the URL
+                # /freight-industry-updates/market-updates/the-data-behind-
+                # amazons-logistics-and-fulfillment-play/ — a blog post about
+                # logistics, not a job. is_job_url_like requires the path to
+                # look like an actual job-posting page.
+                if not is_job_url_like(link):
+                    print(f"  Skipping non-job URL for {company_name}: {link[:80]}")
+                    continue
+
                 jobs_found.append({
                     "title": "Website Job: " + title[:50] + "...",
                     "company": company_name,
@@ -271,7 +282,32 @@ def run_local_pipeline(tracker):
     ats_cache.save()
     if stats["ats_jobs"]:
         print(f"ATS sweep contributed {stats['ats_jobs']} job(s) this run.")
-            
+
+    # Ghost-listing check: DDG/Bing index stale URLs for weeks after a company
+    # removes a job. Batch HEAD-probe every DDG-sourced URL and drop the dead
+    # ones BEFORE the AI ever sees them. We skip URLs from the ATS API path
+    # (those came from live endpoints, no need to verify) and JobSpy (which
+    # already filters by hours_old). The probe is concurrent so 30 URLs take
+    # ~1.5s instead of 30s.
+    ddg_urls = [
+        j.get("job_url") for j in all_raw_jobs
+        if str(j.get("title", "")).startswith(("LinkedIn Post:", "Website Job:"))
+        and j.get("job_url")
+    ]
+    if ddg_urls:
+        unique_urls = list(set(ddg_urls))
+        print(f"Verifying {len(unique_urls)} DDG-sourced URL(s) via HEAD probe...")
+        alive_map = probe_urls_alive_batch(unique_urls)
+        before = len(all_raw_jobs)
+        all_raw_jobs = [
+            j for j in all_raw_jobs
+            if not str(j.get("title", "")).startswith(("LinkedIn Post:", "Website Job:"))
+            or alive_map.get(j.get("job_url"), True)        # default True so unprobed entries stay
+        ]
+        dropped = before - len(all_raw_jobs)
+        if dropped:
+            print(f"Ghost-listing filter: dropped {dropped} dead URL(s).")
+
     if not all_raw_jobs:
         print("No jobs found at all. Shutting down quietly.")
         return

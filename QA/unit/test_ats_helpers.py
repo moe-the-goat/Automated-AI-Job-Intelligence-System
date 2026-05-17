@@ -191,3 +191,27 @@ def test_workday_beats_other_detectors_when_both_present():
     ats, token = detect_ats_from_html(html)
     assert ats == "workday"
     assert token == "acme|wd5|AcmeJobs"
+
+
+# --- FactorialHR ---
+
+def test_detect_factorialhr_from_subdomain():
+    """The Innotech case from 2026-05-17 that leaked through as a ghost listing."""
+    html = '<a href="https://innotech.factorialhr.com/job_posting/devops-engineer-20937">DevOps</a>'
+    ats, token = detect_ats_from_html(html)
+    assert ats == "factorialhr"
+    assert token == "innotech"
+
+
+def test_detect_factorialhr_from_bare_domain():
+    html = '<iframe src="https://acme.factorialhr.com/"></iframe>'
+    ats, token = detect_ats_from_html(html)
+    assert ats == "factorialhr"
+    assert token == "acme"
+
+
+def test_detect_factorialhr_case_insensitive():
+    html = '<a href="https://INNOTECH.FactorialHR.com/job_posting/x">Apply</a>'
+    ats, token = detect_ats_from_html(html)
+    assert ats == "factorialhr"
+    assert token.lower() == "innotech"

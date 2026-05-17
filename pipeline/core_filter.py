@@ -82,6 +82,45 @@ def _is_english_title(title):
     except LangDetectException:
         return True
 
+
+# Description-text langdetect threshold: deliberately higher than the title's
+# 30-char floor because descriptions can contain English boilerplate (job title
+# + buzzwords) ahead of a foreign-language requirements section. We need
+# enough body text to be confident a *non-English* verdict reflects the actual
+# job content. Below this length, we skip the check.
+_DESCRIPTION_LANGDETECT_MIN_CHARS = 400
+
+# Strip HTML so descriptions like "<p>Wir suchen einen Entwickler...</p>" don't
+# get the tags confusing langdetect into "English" because of `<p>` / `<div>`.
+_HTML_TAG_RE_FOR_LANGDETECT = re.compile(r"<[^>]+>")
+
+
+def _is_english_description(description):
+    """Returns False only when langdetect is confident the description is non-English.
+
+    Conservative by design — we only drop on a high-confidence non-English read
+    of substantial text. False positives here delete real jobs from the daily
+    email, so the threshold is high (400 chars). Below that, we keep the row
+    and let the AI handle whatever language confusion remains.
+
+    Also strips HTML tags first; raw HTML can fool langdetect into "English"
+    purely on tag names regardless of the actual body text language.
+    """
+    if not _HAS_LANGDETECT or not isinstance(description, str):
+        return True
+    cleaned = _HTML_TAG_RE_FOR_LANGDETECT.sub(" ", description).strip()
+    # Heavy whitespace collapse to make length check meaningful.
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if len(cleaned) < _DESCRIPTION_LANGDETECT_MIN_CHARS:
+        return True
+    # Cap the text we feed to langdetect; it doesn't need the whole essay,
+    # and a sampled 2KB chunk runs ~10x faster than 20KB descriptions.
+    sample = cleaned[:2000]
+    try:
+        return detect(sample) == 'en'
+    except LangDetectException:
+        return True
+
 """
 CORE FILTER MODULE
 ------------------
@@ -190,7 +229,19 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
         combined_jobs = combined_jobs[combined_jobs['title'].apply(_is_english_title)]
         dropped = before - len(combined_jobs)
         if dropped:
-            print(f"Language filter: dropped {dropped} non-English titles.")
+            print(f"Language filter (title): dropped {dropped} non-English titles.")
+
+    # 3c. Catch non-English DESCRIPTIONS even when the title looks English.
+    # Real failure mode: a job titled "Software Engineer (m/w/d)" passes the
+    # title filter, but its body is entirely in German — the AI then evaluates
+    # partial information and can score it spuriously high. We catch this only
+    # for descriptions long enough to be confident in the language detection.
+    if "description" in combined_jobs.columns and _HAS_LANGDETECT:
+        before = len(combined_jobs)
+        combined_jobs = combined_jobs[combined_jobs['description'].apply(_is_english_description)]
+        dropped = before - len(combined_jobs)
+        if dropped:
+            print(f"Language filter (description): dropped {dropped} non-English descriptions.")
 
     # 4. Location Pre-filter: Drop clearly location-locked jobs that don't say remote
     if "location" in combined_jobs.columns:
@@ -201,11 +252,30 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
         bad_loc = combined_jobs['location'].astype(str).str.lower().str.contains(pattern, na=False)
         combined_jobs = combined_jobs[~(bad_loc & ~remote_in_loc & ~remote_in_title)]
         
-    # 5. Filter out senior/lead roles
-    exclude_words = ['senior', 'sr', 'sr.', 'lead', 'principal', 'manager', 'director', 'staff', 'head', 'vp', 'president']
+    # 5. Filter out senior/lead roles by title — covers ordinary seniority words
+    # AND company-internal level codes used by FAANG-style ladders.
+    # Examples we want to catch:
+    #   "Software Engineer (L5)" — Netflix/Google
+    #   "Senior Engineer, IC6"   — Meta
+    #   "Software Engineer E5"   — Stripe
+    #   "Sr Engineer II"         — explicit Roman suffix on a senior role
+    # The level-code patterns require digits in the senior range to avoid
+    # false positives on titles that happen to contain "L1" or "E2" tokens.
+    exclude_words = ['senior', 'sr', 'sr.', 'lead', 'principal', 'manager', 'director',
+                     'staff', 'head', 'vp', 'president', 'architect']
+    exclude_level_codes = [
+        r'\bl[4-9]\b', r'\bl1[0-2]\b',           # L4-L12 (Google, Netflix)
+        r'\bic[4-9]\b', r'\bic1[0-2]\b',         # IC4-IC12 (Meta)
+        r'\be[4-9]\b',                            # E4-E9 (Stripe, some banks)
+        r'\bg[7-9]\b', r'\bg1[0-2]\b',           # G7-G12 (Amazon)
+        r'\bsde\s*[2-9]\b', r'\bsde-?[2-9]\b',   # SDE II / SDE-3 (Amazon)
+        r'\bswe\s*[2-9]\b', r'\bswe-?[2-9]\b',   # SWE II / SWE-3
+    ]
     if "title" in combined_jobs.columns:
-        pattern = '|'.join([rf'\b{w}\b' for w in exclude_words])
-        combined_jobs = combined_jobs[~combined_jobs['title'].str.lower().str.contains(pattern, na=False)]
+        word_pattern = '|'.join([rf'\b{w}\b' for w in exclude_words])
+        level_pattern = '|'.join(exclude_level_codes)
+        combined_pattern = f'{word_pattern}|{level_pattern}'
+        combined_jobs = combined_jobs[~combined_jobs['title'].str.lower().str.contains(combined_pattern, na=False)]
         
     # 6. Role keyword filter — must contain at least one signal that it's a tech role.
     # Wide enough to catch every legitimate target role; narrow enough that sales /

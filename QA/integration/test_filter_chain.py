@@ -80,3 +80,130 @@ def test_filter_deduplicates_normalized_title_company():
 def test_filter_survives_empty_dataframe():
     import pandas as pd
     assert apply_pipeline_filters(pd.DataFrame()).empty
+
+
+# ---------------------------------------------------------------------------
+# Company-internal level codes (FAANG-style ladders) — Fix #7
+# ---------------------------------------------------------------------------
+
+def _single_row_df(title, **extras):
+    """Minimal dataframe with one row + the required columns for the filter chain."""
+    import pandas as pd
+    row = {
+        "title": title,
+        "company": "TestCo",
+        "location": "Remote",
+        "job_url": f"https://example.com/job/{hash(title) & 0xFFFF}",
+        "description": "Build great software with our team using Python and AWS. We are growing fast.",
+        "date_posted": "",
+    }
+    row.update(extras)
+    return pd.DataFrame([row])
+
+
+def test_filter_drops_netflix_l5_title():
+    """Netflix L5 = senior; would slip past the plain word filter."""
+    df = _single_row_df("Software Engineer (L5) - Experimentation Platform")
+    out = apply_pipeline_filters(df)
+    assert len(out) == 0
+
+
+def test_filter_drops_l6_l7_l8():
+    for code in ("L6", "L7", "L8"):
+        df = _single_row_df(f"Software Engineer {code}")
+        assert len(apply_pipeline_filters(df)) == 0, f"Should drop {code}"
+
+
+def test_filter_drops_meta_ic5():
+    """Meta IC5+ codes denote senior individual contributors."""
+    df = _single_row_df("Software Engineer, IC5")
+    out = apply_pipeline_filters(df)
+    assert len(out) == 0
+
+
+def test_filter_drops_stripe_e5():
+    df = _single_row_df("Software Engineer E5 — Payments")
+    out = apply_pipeline_filters(df)
+    assert len(out) == 0
+
+
+def test_filter_drops_amazon_sde2():
+    """Amazon SDE II/SDE-2 denotes a senior software development engineer."""
+    df = _single_row_df("SDE II - Retail Systems")
+    out = apply_pipeline_filters(df)
+    assert len(out) == 0
+
+    df2 = _single_row_df("SDE-3 Engineer")
+    assert len(apply_pipeline_filters(df2)) == 0
+
+
+def test_filter_keeps_junior_l1_l2_l3():
+    """L1-L3 are entry/junior at most ladders — must NOT be filtered."""
+    df = _single_row_df("Software Engineer L2 - New Grad Track")
+    out = apply_pipeline_filters(df)
+    assert len(out) == 1, "L2 (entry level) must not be dropped"
+
+
+def test_filter_keeps_ic1_ic2_ic3():
+    df = _single_row_df("Software Engineer, IC2")
+    out = apply_pipeline_filters(df)
+    assert len(out) == 1
+
+
+def test_filter_drops_architect_title():
+    """Architect roles are senior by industry convention."""
+    df = _single_row_df("Software Architect, Backend")
+    out = apply_pipeline_filters(df)
+    assert len(out) == 0
+
+
+# ---------------------------------------------------------------------------
+# Description language filter (Fix #6) — should drop foreign-language bodies
+# ---------------------------------------------------------------------------
+
+def test_filter_drops_german_long_description():
+    """A title in English with a long German description (like L21s GmbH on
+    2026-05-17) should now be dropped by the description-langdetect pass."""
+    # 500+ chars of plausible German job description.
+    german = (
+        "Wir suchen einen erfahrenen Softwareentwickler mit fundierten Kenntnissen in "
+        "Java und Kotlin sowie Erfahrung mit modernen Webtechnologien. Unsere Plattform "
+        "verarbeitet täglich Millionen von Transaktionen und du wirst Teil eines "
+        "internationalen Teams sein. Wir bieten flexible Arbeitszeiten, ein modernes "
+        "Büro in Berlin und die Möglichkeit, von zu Hause aus zu arbeiten. "
+        "Voraussetzungen: mindestens drei Jahre Berufserfahrung, sehr gute Deutschkenntnisse, "
+        "Bereitschaft zur Teamarbeit. Wir freuen uns auf deine Bewerbung mit Lebenslauf "
+        "und Anschreiben. Unsere Firma wächst schnell und wir suchen motivierte Mitarbeiter "
+        "die etwas bewegen wollen und Verantwortung übernehmen können."
+    )
+    df = _single_row_df("Software Engineer (m/w/d)", description=german)
+    try:
+        from langdetect import detect  # noqa: F401
+    except ImportError:
+        # langdetect not installed — filter degrades to keep-all, can't test.
+        return
+    out = apply_pipeline_filters(df)
+    assert len(out) == 0, "German description should be dropped by language filter"
+
+
+def test_filter_keeps_short_description_in_any_language():
+    """Below the 400-char threshold we don't trust langdetect — keep the row."""
+    df = _single_row_df("Software Engineer", description="Kurz auf Deutsch.")
+    out = apply_pipeline_filters(df)
+    assert len(out) == 1, "Short non-English text must NOT be dropped"
+
+
+def test_filter_keeps_english_description():
+    """An English description well above the threshold passes."""
+    english = (
+        "We are looking for an experienced software engineer with strong knowledge of "
+        "Python, FastAPI, and modern backend architectures. Our team is fully distributed "
+        "and operates across Europe, Asia, and the Americas. You will work on production "
+        "systems that handle millions of requests per day. Required qualifications include "
+        "two or more years of professional software engineering experience, strong written "
+        "communication skills, and a track record of shipping production code. We offer "
+        "competitive compensation, full remote work, and a strong engineering culture."
+    )
+    df = _single_row_df("Software Engineer", description=english)
+    out = apply_pipeline_filters(df)
+    assert len(out) == 1, f"English description must pass; got {out}"

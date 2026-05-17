@@ -142,6 +142,54 @@ def _normalize_result(raw):
         "scam":             _safe_bool(raw.get("scam"), False),
     }
 
+def apply_post_ai_caps(result, row):
+    """Apply deterministic match-percentage caps to an AI verdict result.
+
+    Two caps, both at 55%, applied in priority order:
+
+      1. Reputation cap (A1): companies on `data/reputation.json`'s blacklist
+         (carried into the row as `pre_flagged_low_quality=True` by the
+         filter chain) cannot score above 55 no matter what the AI thinks.
+         Verdict gets a `[BLACKLISTED]` prefix.
+
+      2. AI-suspicious self-cap (new 2026-05-17 after India-sus internships
+         leaked into the daily email at match=80%). Even when the reputation
+         list hasn't caught a company yet, if the AI itself sets
+         `suspicious=True` and gives a score above 55, we clamp to 55 and
+         tag the verdict `[AI-SUSPICIOUS]`. The reputation cap is checked
+         first because it's a stronger signal (curated human judgment beats
+         the AI's per-row guess).
+
+    Pure function — mutates and returns the result dict. Reading-only against
+    the row. Tested in QA/unit/test_post_ai_caps.py.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    is_blacklisted = bool(row.get("pre_flagged_low_quality", False))
+
+    # 1. Reputation cap (A1).
+    if is_blacklisted:
+        if result.get("match_percentage", 0) > 55:
+            result["match_percentage"] = 55
+        verdict = result.get("verdict", "") or ""
+        if not verdict.startswith("[BLACKLISTED]"):
+            result["verdict"] = "[BLACKLISTED] " + verdict
+        return result
+
+    # 2. AI-suspicious self-cap (Fix #5).
+    if bool(result.get("suspicious")) and result.get("match_percentage", 0) > 55:
+        result["match_percentage"] = 55
+        verdict = result.get("verdict", "") or ""
+        # Don't double-tag if the AI's own verdict already mentions suspicion;
+        # only add our explicit marker. We never collide with [BLACKLISTED]
+        # because that branch returned above.
+        if not verdict.startswith(("[BLACKLISTED]", "[SCAM]", "[AI-SUSPICIOUS]")):
+            result["verdict"] = "[AI-SUSPICIOUS] " + verdict
+
+    return result
+
+
 def _parse_ai_response(text):
     """Parse a raw model output string into the canonical result dict.
 
@@ -538,13 +586,11 @@ Reply with VALID JSON ONLY (no markdown, no comments):
             )
             result = _parse_ai_response(response.text)
 
-            # Apply reputation-based cap (A1): pre-flagged low-quality companies
-            # cannot score above 55 regardless of what the AI says.
-            if bool(row.get("pre_flagged_low_quality", False)):
-                if result["match_percentage"] > 55:
-                    result["match_percentage"] = 55
-                if not result["verdict"].startswith("[BLACKLISTED]"):
-                    result["verdict"] = "[BLACKLISTED] " + result["verdict"]
+            # Apply deterministic caps before the (optional) network-based scam
+            # check. Both caps are pure functions of the AI's verdict + the row's
+            # pre-screening flags, so we extract them so tests can lock them down
+            # without mocking the Gemini client.
+            result = apply_post_ai_caps(result, row)
 
             # India-suspicious -> open-web scam check. Only fires when both signals
             # hold, keeping DDG calls cheap. Confirmed scams get a hard cap + tag.

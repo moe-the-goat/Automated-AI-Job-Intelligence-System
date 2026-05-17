@@ -7,11 +7,16 @@
     "webs it",
     "wake up whistle",
     "pankh workforce",
-    "future information systems"
+    "future information systems",
+    "inficore",
+    "skillzenloop",
+    "netrolynx"
   ],
 
   "blacklist_handle_patterns": [
-    "pankh-workforce-solution"
+    "pankh-workforce-solution",
+    "inficore-soft",
+    "skillzenloop"
   ],
 
   "trust_boost": [

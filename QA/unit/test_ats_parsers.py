@@ -12,6 +12,7 @@ from pipeline.core_ats import (
     parse_workable_payload,
     parse_ashby_payload,
     parse_workday_payload,
+    parse_factorialhr_payload,
 )
 
 
@@ -325,3 +326,101 @@ def test_workday_keeps_externalPath_as_is_when_no_tenant_info():
     payload = {"jobPostings": [{"title": "X", "externalPath": "/job/foo"}]}
     out = parse_workday_payload(payload, "Co")
     assert out[0]["job_url"] == "/job/foo"
+
+
+# --- FactorialHR ---
+
+def test_factorialhr_parses_jobs_wrapped_payload():
+    """Most common shape: payload wraps the list under 'jobs'."""
+    payload = {
+        "jobs": [
+            {
+                "id": 20937,
+                "title": "DevOps Engineer",
+                "description": "<p>Help us scale our infra.</p>",
+                "locations": [{"name": "Ramallah, Palestine"}],
+                "employment_type": "full_time",
+                "url": "https://innotech.factorialhr.com/job_posting/devops-engineer-20937",
+                "slug": "devops-engineer-20937",
+                "published_at": "2026-05-10T12:00:00Z",
+            }
+        ]
+    }
+    out = parse_factorialhr_payload(payload, "Innotech", token="innotech")
+    assert len(out) == 1
+    assert out[0]["title"] == "DevOps Engineer"
+    assert out[0]["company"] == "Innotech"
+    assert out[0]["location"] == "Ramallah, Palestine"
+    assert out[0]["job_url"].startswith("https://innotech.factorialhr.com")
+    assert out[0]["job_type"] == "fulltime"
+
+
+def test_factorialhr_parses_data_wrapped_payload():
+    """Alternative shape: payload wraps the list under 'data'."""
+    payload = {"data": [{"title": "Engineer", "slug": "engineer-1"}]}
+    out = parse_factorialhr_payload(payload, "Co", token="co")
+    assert len(out) == 1
+    assert out[0]["title"] == "Engineer"
+    # Constructed URL from token + slug
+    assert out[0]["job_url"] == "https://co.factorialhr.com/job_posting/engineer-1"
+
+
+def test_factorialhr_parses_bare_list_payload():
+    """Some versions return a bare list with no wrapper."""
+    payload = [{"title": "Backend Dev", "id": 99}]
+    out = parse_factorialhr_payload(payload, "Co", token="co")
+    assert len(out) == 1
+    assert out[0]["title"] == "Backend Dev"
+
+
+def test_factorialhr_maps_intern_employment_type():
+    payload = {"jobs": [{"title": "Junior Dev Intern", "employment_type": "internship"}]}
+    out = parse_factorialhr_payload(payload, "Co")
+    assert out[0]["job_type"] == "internship"
+
+
+def test_factorialhr_handles_list_of_strings_locations():
+    """Some payloads return locations as a list of strings, not dicts."""
+    payload = {"jobs": [{"title": "Engineer", "locations": ["Berlin", "Remote"]}]}
+    out = parse_factorialhr_payload(payload, "Co")
+    assert "Berlin" in out[0]["location"]
+    assert "Remote" in out[0]["location"]
+
+
+def test_factorialhr_handles_dict_location():
+    payload = {"jobs": [{"title": "Engineer", "location": {"name": "Madrid, Spain"}}]}
+    out = parse_factorialhr_payload(payload, "Co")
+    assert out[0]["location"] == "Madrid, Spain"
+
+
+def test_factorialhr_handles_empty_payloads():
+    assert parse_factorialhr_payload({"jobs": []}, "Co") == []
+    assert parse_factorialhr_payload({"data": []}, "Co") == []
+    assert parse_factorialhr_payload([], "Co") == []
+    assert parse_factorialhr_payload({}, "Co") == []
+    assert parse_factorialhr_payload(None, "Co") == []
+
+
+def test_factorialhr_skips_non_dict_entries():
+    payload = {"jobs": [None, "garbage", {"title": "Real"}]}
+    out = parse_factorialhr_payload(payload, "Co")
+    assert len(out) == 1
+    assert out[0]["title"] == "Real"
+
+
+def test_factorialhr_falls_back_to_name_when_title_missing():
+    """Some payloads put the job title under 'name' instead of 'title'."""
+    payload = {"jobs": [{"name": "Software Engineer", "id": 42}]}
+    out = parse_factorialhr_payload(payload, "Co")
+    assert out[0]["title"] == "Software Engineer"
+
+
+def test_factorialhr_uses_explicit_url_over_constructed():
+    """If the API supplies a `url`, use it verbatim instead of building one."""
+    payload = {"jobs": [{
+        "title": "Engineer",
+        "url": "https://custom-domain.com/jobs/engineer",
+        "slug": "engineer-1",
+    }]}
+    out = parse_factorialhr_payload(payload, "Co", token="co")
+    assert out[0]["job_url"] == "https://custom-domain.com/jobs/engineer"
