@@ -1,10 +1,10 @@
-import os
+﻿import os
 import json
 import pandas as pd
 from datetime import datetime
 from jobspy import scrape_jobs
 
-from core_search import (
+from pipeline.core_search import (
     fetch_remotive_jobs,
     fetch_arbeitnow_jobs,
     fetch_jobicy_jobs,
@@ -13,10 +13,10 @@ from core_search import (
     fetch_themuse_jobs,
     fetch_wwr_jobs,
 )
-from core_filter import filter_api_jobs, apply_pipeline_filters, JobTracker
-from core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
-from core_embedding import attach_similarity
-from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
+from pipeline.core_filter import filter_api_jobs, apply_pipeline_filters, JobTracker
+from pipeline.core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
+from pipeline.core_embedding import attach_similarity
+from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
 """
 MAIN SCRAPER EXECUTOR

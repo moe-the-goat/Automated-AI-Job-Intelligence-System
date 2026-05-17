@@ -1,10 +1,10 @@
-"""quick_viability_check — the cheap pre-screen that decides whether a job
+﻿"""quick_viability_check — the cheap pre-screen that decides whether a job
 deserves a full Gemini call.
 
 Bugs here cost real money: too strict and we skip legitimate jobs without
 any verdict; too lax and we burn Gemini quota on garbage.
 """
-from core_ai import quick_viability_check, skipped_result, DEFAULT_AI_RESULT
+from pipeline.core_ai import quick_viability_check, skipped_result, DEFAULT_AI_RESULT
 
 
 GOOD_DESCRIPTION = (

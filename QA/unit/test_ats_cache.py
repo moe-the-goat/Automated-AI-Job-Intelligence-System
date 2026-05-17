@@ -1,12 +1,12 @@
-"""AtsCache: persists ATS detection results so we don't re-fetch /careers every run.
+﻿"""AtsCache: persists ATS detection results so we don't re-fetch /careers every run.
 
 TTL logic — cached entries older than CACHE_TTL_DAYS are treated as misses.
 """
 import json
 import os
 from datetime import datetime, timezone, timedelta
-import core_ats
-from core_ats import AtsCache, CACHE_TTL_DAYS
+import pipeline.core_ats as core_ats
+from pipeline.core_ats import AtsCache, CACHE_TTL_DAYS
 
 
 def _tmp_cache_path():

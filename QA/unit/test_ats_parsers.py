@@ -1,4 +1,4 @@
-"""Per-platform payload parsers: Greenhouse, Lever, Workable.
+﻿"""Per-platform payload parsers: Greenhouse, Lever, Workable.
 
 The parsers are pure functions — given a JSON dict (the shape the public API
 returns), they produce normalized job records matching our pipeline schema.
@@ -6,7 +6,7 @@ returns), they produce normalized job records matching our pipeline schema.
 If a vendor changes their response shape, these tests fail loudly instead of
 silently producing empty job lists in production.
 """
-from core_ats import (
+from pipeline.core_ats import (
     parse_greenhouse_payload,
     parse_lever_payload,
     parse_workable_payload,

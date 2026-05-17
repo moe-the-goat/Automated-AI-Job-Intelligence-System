@@ -1,4 +1,4 @@
-"""Tests for the langdetect-backed language filter in core_filter._is_english_title.
+﻿"""Tests for the langdetect-backed language filter in core_filter._is_english_title.
 
 This function had a real production bug: the threshold was 10 chars, but langdetect
 mis-detects short tech titles ("AI Engineer", "Data Science Intern") as Italian/
@@ -8,7 +8,7 @@ If this test ever fails because someone lowered the threshold back, trace why
 short tech titles started getting dropped — it's almost certainly langdetect
 false positives on titles loaded with proper nouns.
 """
-from core_filter import _is_english_title
+from pipeline.core_filter import _is_english_title
 
 
 def test_short_tech_title_kept_regardless_of_langdetect():

@@ -1,6 +1,6 @@
-"""core_notify rendering helpers: match cells, suspicious title prefix, sort, normalize_repo."""
+﻿"""core_notify rendering helpers: match cells, suspicious title prefix, sort, normalize_repo."""
 import pandas as pd
-from core_notify import (
+from pipeline.core_notify import (
     sort_by_match_percentage,
     _fmt_match_cell_html,
     _fmt_match_cell_md,

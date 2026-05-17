@@ -1,10 +1,10 @@
-"""Jina Reader + Gemini extraction fallback for ATS-less careers pages.
+﻿"""Jina Reader + Gemini extraction fallback for ATS-less careers pages.
 
 Most of the logic is pure: we receive a string from Gemini and produce a list
 of normalized job dicts. The HTTP side (Jina Reader, Gemini client) is mocked
 via the bypass argument or by isolating the parser from the orchestrator.
 """
-from core_ats import parse_jina_jobs_response, extract_jobs_via_jina
+from pipeline.core_ats import parse_jina_jobs_response, extract_jobs_via_jina
 
 
 # ---------------------------------------------------------------------------

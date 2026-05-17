@@ -1,10 +1,10 @@
-"""core_embedding pure-math helpers: cosine, ranking, hashing, cache I/O.
+﻿"""core_embedding pure-math helpers: cosine, ranking, hashing, cache I/O.
 
 The embedding API call itself is mocked away in integration tests; here we
 just verify the math is right and the cache file format round-trips.
 """
 import os
-from core_embedding import (
+from pipeline.core_embedding import (
     _cv_hash, _read_cached_embedding, _write_cached_embedding,
     cosine_similarity, rank_by_similarity,
 )
@@ -62,7 +62,7 @@ def test_rank_orders_by_similarity():
 
 def test_cv_embedding_cache_roundtrip():
     """Writing and reading back the cache should preserve the vector for the same text."""
-    import core_embedding as _ce
+    import pipeline.core_embedding as _ce
     test_cache_path = "_test_cv_embedding.json"
     original_path = _ce.CV_EMBEDDING_CACHE
     _ce.CV_EMBEDDING_CACHE = test_cache_path

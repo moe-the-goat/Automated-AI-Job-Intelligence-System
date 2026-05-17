@@ -1,4 +1,4 @@
-"""apply_pipeline_filters end-to-end on a diverse 20-row dataframe.
+﻿"""apply_pipeline_filters end-to-end on a diverse 20-row dataframe.
 
 This is the closest thing to "run the whole pre-AI gauntlet" without making
 network calls. It catches regressions in any of: seen-jobs filter, reputation
@@ -8,7 +8,7 @@ location prefilter, seniority reject, tech-keyword filter.
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "fixtures"))
 from sample_jobs import mixed_filter_input
-from core_filter import apply_pipeline_filters
+from pipeline.core_filter import apply_pipeline_filters
 
 
 def test_filter_drops_senior_titles():

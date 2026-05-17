@@ -1,4 +1,4 @@
-"""End-to-end ATS flow: detection from HTML + fetcher dispatch + cache update.
+﻿"""End-to-end ATS flow: detection from HTML + fetcher dispatch + cache update.
 
 Stubs `requests` at the module level so no actual HTTP fires. Exercises the
 full `get_jobs_for_company` path including the cache write.
@@ -7,7 +7,7 @@ import json
 import os
 import sys
 import types
-import core_ats
+import pipeline.core_ats as core_ats
 
 
 # ---------------------------------------------------------------------------

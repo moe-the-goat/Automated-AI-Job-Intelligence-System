@@ -1,10 +1,10 @@
-"""Coercion helpers in core_ai: _safe_int, _safe_bool, _safe_str, _normalize_effort.
+﻿"""Coercion helpers in core_ai: _safe_int, _safe_bool, _safe_str, _normalize_effort.
 
 These guard every dimension of the AI response against malformed values (the
 model occasionally returns "82%" instead of 82, "true" instead of true, etc.).
 A regression here would corrupt every downstream column.
 """
-from core_ai import _safe_int, _safe_bool, _safe_str, _normalize_effort
+from pipeline.core_ai import _safe_int, _safe_bool, _safe_str, _normalize_effort
 
 
 def test_safe_int_passthrough():

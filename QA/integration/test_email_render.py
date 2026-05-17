@@ -1,4 +1,4 @@
-"""End-to-end rendering of format_email_html: realistic dataframes -> HTML.
+﻿"""End-to-end rendering of format_email_html: realistic dataframes -> HTML.
 
 Exercises the full layering: sort -> table rendering -> match-cell sub-scores ->
 suspicious/blacklist/scam title badges -> compensation column -> effort column ->
@@ -8,7 +8,7 @@ import pandas as pd
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "fixtures"))
 from sample_jobs import baseline_job_row
-from core_notify import format_email_html, format_github_markdown
+from pipeline.core_notify import format_email_html, format_github_markdown
 
 
 def _stats(approved=2):

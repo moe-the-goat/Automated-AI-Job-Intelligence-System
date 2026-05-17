@@ -1,6 +1,6 @@
-"""Reputation prefilter: catches known job-mill companies before they reach AI."""
+﻿"""Reputation prefilter: catches known job-mill companies before they reach AI."""
 import pandas as pd
-from core_filter import _pre_flag_reputation, _load_reputation
+from pipeline.core_filter import _pre_flag_reputation, _load_reputation
 
 
 def test_load_returns_expected_shape():

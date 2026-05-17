@@ -1,4 +1,4 @@
-import os
+﻿import os
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 import json
@@ -9,14 +9,14 @@ from urllib.parse import urlparse
 # actually need them so the pure helpers (linkedin_post_date, handle matcher)
 # can be unit-tested without those packages installed.
 
-from core_filter import apply_pipeline_filters, JobTracker
-from core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
-from core_ats import (
+from pipeline.core_filter import apply_pipeline_filters, JobTracker
+from pipeline.core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
+from pipeline.core_ats import (
     extract_linkedin_handle,
     get_jobs_for_company as get_ats_jobs,
     AtsCache,
 )
-from core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
+from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
 # How far back the local pipeline will accept LinkedIn posts (matches the JobSpy 6-day window).
 LOCAL_LOOKBACK_DAYS = 6

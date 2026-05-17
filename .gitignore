@@ -16,3 +16,7 @@ CLAUDE.md
 CHAT_HISTORY.md
 # CV text is stored as a GitHub Actions secret (CV_TEXT) and written at runtime.
 cv_text.txt
+# Claude Code editor state — local only.
+.claude/
+# Supabase migrations — local only until the Stream B web repo is split off.
+migrations/

@@ -1,4 +1,4 @@
-"""REGRESSION: a similarity of 0.0 used to render as the em-dash placeholder.
+﻿"""REGRESSION: a similarity of 0.0 used to render as the em-dash placeholder.
 
 Symptom: when the embedding API call failed (404 on the wrong model name),
 every job got similarity=0.0. The renderer used `if sim` which is falsy for
@@ -7,7 +7,7 @@ every job got similarity=0.0. The renderer used `if sim` which is falsy for
 Fix: `if sim is not None` so legitimate zero values render numerically.
 """
 import pandas as pd
-from core_notify import _render_lower_ranked_html, _render_lower_ranked_md
+from pipeline.core_notify import _render_lower_ranked_html, _render_lower_ranked_md
 
 
 def test_zero_similarity_renders_as_number_in_html():

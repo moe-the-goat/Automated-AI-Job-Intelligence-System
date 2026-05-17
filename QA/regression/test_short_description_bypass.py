@@ -1,4 +1,4 @@
-"""REGRESSION: pre-screen used to reject every API-sourced job with missing description.
+﻿"""REGRESSION: pre-screen used to reject every API-sourced job with missing description.
 
 Symptom on 2026-05-16: global workflow skipped 33 of 35 jobs in the pre-screen
 with reason `description too short (4 chars)`. The "4 chars" was the literal
@@ -12,7 +12,7 @@ Fix: bypass the short-description rule when description is one of
 snippet (title starts with "LinkedIn Post:"), OR is the explicit
 "[NO DESCRIPTION]" / "[DESCRIPTION TRUNCATED]" placeholder.
 """
-from core_ai import quick_viability_check
+from pipeline.core_ai import quick_viability_check
 
 
 def test_nan_description_passes_to_ai():

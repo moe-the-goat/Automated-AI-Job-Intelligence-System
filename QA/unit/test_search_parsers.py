@@ -1,11 +1,11 @@
-"""Wave-1 source parsers: Himalayas, The Muse, WeWorkRemotely.
+﻿"""Wave-1 source parsers: Himalayas, The Muse, WeWorkRemotely.
 
 Pure parsers — fed canonical / edge-case JSON or RSS dicts. If a vendor
 changes their response shape we'll see it as a red test, not as silently
 empty job lists in the daily email.
 """
 import pandas as pd
-from core_search import (
+from pipeline.core_search import (
     parse_himalayas_payload,
     parse_themuse_payload,
     parse_wwr_feed,

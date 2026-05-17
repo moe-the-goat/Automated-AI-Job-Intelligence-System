@@ -1,9 +1,9 @@
-"""LinkedIn handle extraction + ATS detection from HTML.
+﻿"""LinkedIn handle extraction + ATS detection from HTML.
 
 Pure functions, no network. The whole point of separating these from the HTTP
 calls in core_ats is so we can lock down the patterns with deterministic tests.
 """
-from core_ats import extract_linkedin_handle, detect_ats_from_html
+from pipeline.core_ats import extract_linkedin_handle, detect_ats_from_html
 
 
 # --- LinkedIn handle extraction ---
@@ -167,7 +167,7 @@ def test_detect_workday_wd1_cluster():
 
 
 def test_workday_token_parser_roundtrip():
-    from core_ats import _parse_workday_token
+    from pipeline.core_ats import _parse_workday_token
     tenant, cluster, site = _parse_workday_token("nvidia|wd5|NVIDIAExternalCareerSite")
     assert tenant == "nvidia"
     assert cluster == "wd5"
@@ -175,7 +175,7 @@ def test_workday_token_parser_roundtrip():
 
 
 def test_workday_token_parser_rejects_garbage():
-    from core_ats import _parse_workday_token
+    from pipeline.core_ats import _parse_workday_token
     assert _parse_workday_token("") == (None, None, None)
     assert _parse_workday_token(None) == (None, None, None)
     assert _parse_workday_token("nvidia") == (None, None, None)

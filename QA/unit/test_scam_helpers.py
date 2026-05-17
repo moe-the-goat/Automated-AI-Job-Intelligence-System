@@ -1,5 +1,5 @@
-"""Helpers backing the India + suspicious → scam detection in core_ai."""
-from core_ai import looks_like_india_employer, scan_for_scam_signals
+﻿"""Helpers backing the India + suspicious → scam detection in core_ai."""
+from pipeline.core_ai import looks_like_india_employer, scan_for_scam_signals
 
 
 def test_india_employer_by_location_india():

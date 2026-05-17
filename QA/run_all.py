@@ -90,15 +90,22 @@ def main():
     elapsed = time.time() - started
     total = len(results["passes"]) + len(results["failures"]) + len(results["errors"])
 
+    def _safe_print(text):
+        """Print with Unicode path characters replaced on narrow consoles (Windows cp1252)."""
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            print(text.encode("ascii", errors="backslashreplace").decode("ascii"))
+
     if results["failures"]:
-        print("\n----- FAILURES -----")
+        _safe_print("\n----- FAILURES -----")
         for label, msg, tb in results["failures"]:
-            print(f"\nFAIL  {label}\n{tb}")
+            _safe_print(f"\nFAIL  {label}\n{tb}")
 
     if results["errors"]:
-        print("\n----- ERRORS -----")
+        _safe_print("\n----- ERRORS -----")
         for label, msg, tb in results["errors"]:
-            print(f"\nERROR {label}  ({msg})\n{tb}")
+            _safe_print(f"\nERROR {label}  ({msg})\n{tb}")
 
     print(
         f"\nQA SUITE: {len(results['passes'])} passed, "

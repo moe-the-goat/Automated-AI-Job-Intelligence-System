@@ -1,4 +1,4 @@
-"""REGRESSION: GitHub repo identifier normalization.
+﻿"""REGRESSION: GitHub repo identifier normalization.
 
 Symptom on 2026-05-16: user added the GitHub Actions variable `LOGS_REPO`
 with value `https://github.com/moe-the-goat/job-scrapper-logs`. Our code
@@ -11,7 +11,7 @@ and `.git` suffix before use.
 This test locks the behaviour in so anyone who paste a full URL in the
 GH variable doesn't break the pipeline.
 """
-from core_notify import _normalize_repo
+from pipeline.core_notify import _normalize_repo
 
 
 def test_full_https_url_is_normalized():

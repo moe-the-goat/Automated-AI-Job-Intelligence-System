@@ -1,4 +1,4 @@
-"""Scam detection flow without hitting DDG.
+﻿"""Scam detection flow without hitting DDG.
 
 Monkey-patches sys.modules['ddgs'] before importing detect_company_scam so the
 real network call is replaced with a controllable fake.
@@ -42,26 +42,26 @@ def _install_fake_ddgs(fake_class):
 
 def test_scam_detected_when_signals_present():
     _install_fake_ddgs(_FakeResultsForScam)
-    from core_ai import detect_company_scam
+    from pipeline.core_ai import detect_company_scam
     assert detect_company_scam("Zetheta Algorithms Pvt Ltd") is True
 
 
 def test_scam_not_detected_when_results_clean():
     _install_fake_ddgs(_FakeResultsClean)
-    from core_ai import detect_company_scam
+    from pipeline.core_ai import detect_company_scam
     assert detect_company_scam("Real Indian Tech Pvt Ltd") is False
 
 
 def test_scam_not_detected_below_threshold():
     """A single 'scam' mention across all queries shouldn't trip the flag."""
     _install_fake_ddgs(_FakeResultsSingleMention)
-    from core_ai import detect_company_scam
+    from pipeline.core_ai import detect_company_scam
     assert detect_company_scam("Generic Co") is False
 
 
 def test_scam_handles_empty_company():
     _install_fake_ddgs(_FakeResultsForScam)
-    from core_ai import detect_company_scam
+    from pipeline.core_ai import detect_company_scam
     assert detect_company_scam("") is False
     assert detect_company_scam(None) is False
 
@@ -72,5 +72,5 @@ def test_scam_handles_ddg_exception():
         def text(self, query, **kwargs):
             raise RuntimeError("simulated network failure")
     _install_fake_ddgs(_ExplodingDDGS)
-    from core_ai import detect_company_scam
+    from pipeline.core_ai import detect_company_scam
     assert detect_company_scam("Whatever Co") is False

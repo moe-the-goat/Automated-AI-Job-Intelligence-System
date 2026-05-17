@@ -1,10 +1,10 @@
-"""Tests for DEFAULT_AI_RESULT shape, _normalize_result, and _parse_ai_response.
+﻿"""Tests for DEFAULT_AI_RESULT shape, _normalize_result, and _parse_ai_response.
 
 The verdict schema is the contract between core_ai and every consumer (renderer,
 DB, dashboard). Any silent change here would propagate to emails, GitHub Issues,
 and future Stream-B web UI rows. Tests here gatekeep that contract.
 """
-from core_ai import DEFAULT_AI_RESULT, _normalize_result, _parse_ai_response
+from pipeline.core_ai import DEFAULT_AI_RESULT, _normalize_result, _parse_ai_response
 
 
 def test_default_schema_keys():
