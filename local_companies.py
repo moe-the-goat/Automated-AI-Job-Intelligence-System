@@ -202,9 +202,12 @@ def run_local_pipeline(tracker):
         
     all_raw_jobs = []
     ats_cache = AtsCache()
+    # Load Gemini key early so the Jina-fallback branch in the ATS sweep can
+    # use it. The AI evaluation loop further down reads it again — harmless.
+    gemini_key = os.environ.get("GEMINI_API_KEY", "")
 
     # Track statistics
-    stats = {"scraped": 0, "filtered": 0, "approved": 0, "ats_jobs": 0}
+    stats = {"scraped": 0, "filtered": 0, "approved": 0, "ats_jobs": 0, "jina_jobs": 0}
 
     # 1. Scrape Jobs for each company
     for _, row in companies_df.iterrows():
@@ -217,12 +220,22 @@ def run_local_pipeline(tracker):
         if not company_name or company_name == "nan":
             continue
 
-        # NEW: ATS API scrape (Greenhouse / Lever / Workable). One-time detection
-        # cached in data/ats_cache.json so subsequent runs go straight to the API.
-        # `website` doubles as the careers-page seed for first-time detection.
+        # NEW: ATS API scrape (Greenhouse / Lever / Workable / Ashby / Workday).
+        # One-time detection cached in data/ats_cache.json so subsequent runs go
+        # straight to the API. `website` doubles as the careers-page seed for
+        # first-time detection.
+        #
+        # Wave 2: when no SaaS ATS is detected, route through Jina Reader +
+        # Gemini extraction. This costs one extra Gemini call per ATS-less
+        # company per run but unlocks the long tail of custom careers pages
+        # (most Palestinian companies fall here).
         if website and website.lower() != "nan":
             try:
-                ats_jobs = get_ats_jobs(company_name, website, cache=ats_cache)
+                ats_jobs = get_ats_jobs(
+                    company_name, website, cache=ats_cache,
+                    gemini_api_key=gemini_key,
+                    jina_fallback=bool(gemini_key),
+                )
                 if ats_jobs:
                     print(f"  ATS yielded {len(ats_jobs)} job(s) for {company_name}")
                     stats["ats_jobs"] += len(ats_jobs)
@@ -272,8 +285,7 @@ def run_local_pipeline(tracker):
     stats['filtered'] = len(combined_jobs)
     print(f"Total jobs surviving pre-filters: {stats['filtered']}")
     
-    # 3. AI Evaluation
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    # 3. AI Evaluation (gemini_key was loaded earlier for the Jina fallback)
     try:
         with open("cv_text.txt", "r", encoding="utf-8") as f:
             cv_text = f.read()

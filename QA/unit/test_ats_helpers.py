@@ -125,3 +125,69 @@ def test_detect_uses_first_match_on_multiple_ats_signals():
     ats, token = detect_ats_from_html(html)
     assert ats == "greenhouse"
     assert token == "companyA"
+
+
+# --- Ashby ---
+
+def test_detect_ashby_from_jobs_subdomain():
+    html = '<a href="https://jobs.ashbyhq.com/anthropic/abc-uuid">Apply</a>'
+    ats, token = detect_ats_from_html(html)
+    assert ats == "ashby"
+    assert token == "anthropic"
+
+
+def test_detect_ashby_from_embed_url():
+    html = '<iframe src="https://ashbyhq.com/embed/openai"></iframe>'
+    ats, token = detect_ats_from_html(html)
+    assert ats == "ashby"
+    assert token == "openai"
+
+
+# --- Workday ---
+
+def test_detect_workday_with_lang_segment():
+    html = '<a href="https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/">Careers</a>'
+    ats, token = detect_ats_from_html(html)
+    assert ats == "workday"
+    assert token == "nvidia|wd5|NVIDIAExternalCareerSite"
+
+
+def test_detect_workday_without_lang_segment():
+    html = '<a href="https://disney.wd5.myworkdayjobs.com/disneycareer">Careers</a>'
+    ats, token = detect_ats_from_html(html)
+    assert ats == "workday"
+    assert token == "disney|wd5|disneycareer"
+
+
+def test_detect_workday_wd1_cluster():
+    html = '<a href="https://example.wd1.myworkdayjobs.com/CompanyCareers">x</a>'
+    ats, token = detect_ats_from_html(html)
+    assert ats == "workday"
+    assert token == "example|wd1|CompanyCareers"
+
+
+def test_workday_token_parser_roundtrip():
+    from core_ats import _parse_workday_token
+    tenant, cluster, site = _parse_workday_token("nvidia|wd5|NVIDIAExternalCareerSite")
+    assert tenant == "nvidia"
+    assert cluster == "wd5"
+    assert site == "NVIDIAExternalCareerSite"
+
+
+def test_workday_token_parser_rejects_garbage():
+    from core_ats import _parse_workday_token
+    assert _parse_workday_token("") == (None, None, None)
+    assert _parse_workday_token(None) == (None, None, None)
+    assert _parse_workday_token("nvidia") == (None, None, None)
+    assert _parse_workday_token("nvidia|wd5") == (None, None, None)
+
+
+def test_workday_beats_other_detectors_when_both_present():
+    """Workday is checked first because its multi-piece URL is more specific."""
+    html = """
+    <a href="https://boards.greenhouse.io/distractor">Distractor</a>
+    <a href="https://acme.wd5.myworkdayjobs.com/en-US/AcmeJobs">Real</a>
+    """
+    ats, token = detect_ats_from_html(html)
+    assert ats == "workday"
+    assert token == "acme|wd5|AcmeJobs"

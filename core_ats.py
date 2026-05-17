@@ -18,6 +18,16 @@ Public API endpoints used:
   Greenhouse:  GET https://boards-api.greenhouse.io/v1/boards/{token}/jobs
   Lever:       GET https://api.lever.co/v0/postings/{token}?mode=json
   Workable:    GET https://apply.workable.com/api/v3/accounts/{token}/jobs
+  Ashby:       GET https://api.ashbyhq.com/posting-api/job-board/{token}?includeCompensation=true
+  Workday:     POST https://{tenant}.{cluster}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs
+               (token is encoded as "tenant|cluster|site" — see _parse_workday_token)
+
+Jina Reader fallback (Wave 2):
+  When ATS detection fails on a careers page, the caller can route to Jina
+  Reader (https://r.jina.ai/{url}) which extracts clean markdown from ANY
+  webpage — including JS-rendered sites. The markdown is then fed to Gemini
+  to produce structured job listings. Used as last resort for the Palestinian
+  companies pipeline where most career pages aren't on a known ATS.
 
 Cache file:  data/ats_cache.json  (gitignored, regenerated as needed)
 
@@ -72,14 +82,46 @@ def extract_linkedin_handle(url):
 # ---------------------------------------------------------------------------
 
 # Order matters: more specific patterns first. Each regex captures the ATS token.
+# Workday is special: its token is composite (tenant|cluster|site) — see _detect_workday.
 _ATS_DETECTORS = [
     ("greenhouse", re.compile(r"boards\.greenhouse\.io/(?:embed/job_board\?for=)?([a-zA-Z0-9\-_]+)", re.IGNORECASE)),
     ("lever",      re.compile(r"jobs\.lever\.co/([a-zA-Z0-9\-_]+)",                                   re.IGNORECASE)),
+    ("ashby",      re.compile(r"jobs\.ashbyhq\.com/([a-zA-Z0-9\-_]+)",                                re.IGNORECASE)),
+    ("ashby",      re.compile(r"ashbyhq\.com/(?:embed/)?([a-zA-Z0-9\-_]+)",                            re.IGNORECASE)),
     ("workable",   re.compile(r"apply\.workable\.com/([a-zA-Z0-9\-_]+)",                              re.IGNORECASE)),
     ("workable",   re.compile(r"workable\.com/(?:n/)?([a-zA-Z0-9\-_]+)/jobs",                          re.IGNORECASE)),
     ("bamboohr",   re.compile(r"([a-zA-Z0-9\-_]+)\.bamboohr\.com",                                     re.IGNORECASE)),
     ("smartrecruiters", re.compile(r"careers\.smartrecruiters\.com/([a-zA-Z0-9\-_]+)",                 re.IGNORECASE)),
 ]
+
+# Workday URLs look like `{tenant}.wd{N}.myworkdayjobs.com/{lang}/{site}` (optional
+# lang segment). We need all three pieces — tenant, cluster, site — so we handle
+# it outside the generic detector and pack them into a single token string.
+_WORKDAY_RE = re.compile(
+    r"([a-z0-9\-]+)\.(wd\d+)\.myworkdayjobs\.com/(?:[a-zA-Z\-]+/)?([a-zA-Z0-9_\-]+)",
+    re.IGNORECASE,
+)
+
+
+def _detect_workday(html):
+    """Return ('workday', 'tenant|cluster|site') or (None, None)."""
+    if not html:
+        return (None, None)
+    m = _WORKDAY_RE.search(html)
+    if not m:
+        return (None, None)
+    tenant, cluster, site = m.group(1), m.group(2), m.group(3)
+    return ("workday", f"{tenant.lower()}|{cluster.lower()}|{site}")
+
+
+def _parse_workday_token(token):
+    """Unpack 'tenant|cluster|site' back into a tuple. Returns (None, None, None) on garbage."""
+    if not token or "|" not in token:
+        return (None, None, None)
+    parts = token.split("|", 2)
+    if len(parts) != 3:
+        return (None, None, None)
+    return (parts[0], parts[1], parts[2])
 
 
 def detect_ats_from_html(html):
@@ -87,9 +129,16 @@ def detect_ats_from_html(html):
 
     Returns (ats_name, token) on first match, (None, None) if no ATS detected.
     Pure-function — easy to unit test without network.
+
+    Workday is checked FIRST because its multi-piece URL is more specific than
+    the generic detectors and we don't want a stray 'myworkdayjobs.com' string
+    to leak through as a different platform.
     """
     if not html:
         return (None, None)
+    wd_ats, wd_token = _detect_workday(html)
+    if wd_ats:
+        return (wd_ats, wd_token)
     for ats_name, pattern in _ATS_DETECTORS:
         m = pattern.search(html)
         if m:
@@ -239,11 +288,118 @@ def parse_workable_payload(payload, company_name, token=""):
     return out
 
 
+def fetch_ashby_jobs(token, company_name):
+    """https://api.ashbyhq.com/posting-api/job-board/{token}?includeCompensation=true (public, no auth)."""
+    import requests
+    url = f"https://api.ashbyhq.com/posting-api/job-board/{token}?includeCompensation=true"
+    try:
+        r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        print(f"  ATS ashby: {company_name} fetch failed: {str(e)[:120]}")
+        return []
+    return parse_ashby_payload(payload, company_name)
+
+
+def parse_ashby_payload(payload, company_name):
+    """Pure parser for Ashby's job board response.
+
+    Shape:
+      {"apiVersion": "...", "jobs": [
+        {"id": "...", "title": "...", "location": "...", "department": "...",
+         "employmentType": "FullTime", "jobUrl": "https://jobs.ashbyhq.com/.../...",
+         "publishedAt": "ISO8601", "descriptionPlain": "...", ...}
+      ]}
+    """
+    out = []
+    for j in (payload or {}).get("jobs", []) or []:
+        if not isinstance(j, dict):
+            continue
+        # Ashby usually exposes a plain string `location` but sometimes nests it.
+        loc = j.get("location", "")
+        if isinstance(loc, dict):
+            loc = loc.get("name", "") or ""
+        emp_type = (j.get("employmentType", "") or "").lower()
+        job_type = "internship" if "intern" in emp_type else "fulltime"
+        out.append(_normalize_job(
+            title=j.get("title", ""),
+            company=company_name,
+            location=loc,
+            job_url=j.get("jobUrl", "") or j.get("applyUrl", ""),
+            description=j.get("descriptionPlain", "") or j.get("descriptionHtml", "") or "",
+            date_posted=j.get("publishedAt", "") or j.get("updatedAt", ""),
+            job_type=job_type,
+        ))
+    return out
+
+
+def fetch_workday_jobs(token, company_name):
+    """POST https://{tenant}.{cluster}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs.
+
+    Token format: 'tenant|cluster|site' — see _detect_workday + _parse_workday_token.
+    Workday's API is POST-only with a JSON body specifying paging + search text.
+    """
+    import requests
+    tenant, cluster, site = _parse_workday_token(token)
+    if not tenant or not cluster or not site:
+        print(f"  ATS workday: {company_name} skipped: malformed token {token!r}")
+        return []
+    url = f"https://{tenant}.{cluster}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
+    body = {"limit": 20, "offset": 0, "searchText": ""}
+    try:
+        r = requests.post(
+            url, json=body, timeout=HTTP_TIMEOUT,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json", "Content-Type": "application/json"},
+        )
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        print(f"  ATS workday: {company_name} fetch failed: {str(e)[:120]}")
+        return []
+    return parse_workday_payload(payload, company_name, tenant=tenant, cluster=cluster, site=site)
+
+
+def parse_workday_payload(payload, company_name, tenant="", cluster="", site=""):
+    """Pure parser for Workday's CXS /jobs response.
+
+    Shape:
+      {"total": N, "jobPostings": [
+        {"title": "...", "externalPath": "/job/.../...",
+         "locationsText": "Remote, USA", "postedOn": "Posted Yesterday", "bulletFields": []}
+      ]}
+
+    `externalPath` is a relative URL — we glue the public origin back on so the
+    resulting job_url opens directly in a browser.
+    """
+    out = []
+    base = f"https://{tenant}.{cluster}.myworkdayjobs.com" if tenant and cluster else ""
+    for j in (payload or {}).get("jobPostings", []) or []:
+        if not isinstance(j, dict):
+            continue
+        path = j.get("externalPath", "") or ""
+        if path and base and path.startswith("/"):
+            job_url = f"{base}/{site}{path}" if site else f"{base}{path}"
+        else:
+            job_url = path
+        out.append(_normalize_job(
+            title=j.get("title", ""),
+            company=company_name,
+            location=j.get("locationsText", "") or "",
+            job_url=job_url,
+            description="",                       # detail endpoint required for body; skip
+            date_posted=j.get("postedOn", "") or "",
+        ))
+    return out
+
+
 # Dispatch table so callers don't need to switch/case.
 _ATS_FETCHERS = {
     "greenhouse": fetch_greenhouse_jobs,
     "lever":      fetch_lever_jobs,
     "workable":   fetch_workable_jobs,
+    "ashby":      fetch_ashby_jobs,
+    "workday":    fetch_workday_jobs,
 }
 
 
@@ -308,14 +464,156 @@ class AtsCache:
 
 
 # ---------------------------------------------------------------------------
-# 5. Public entry point — used by local_companies.py
+# 5. Jina Reader fallback (Wave 2) — for careers pages with no detectable ATS
+# ---------------------------------------------------------------------------
+#
+# Many Palestinian companies host custom HTML / JS-rendered careers pages with
+# no SaaS ATS at all. DDG/Bing don't reliably index them either. Jina Reader
+# (https://r.jina.ai/{url}) is a free unauthenticated service that extracts
+# clean markdown from any URL (handles JS-rendered content too). We then ask
+# Gemini to pick job listings out of the markdown.
+#
+# Cost: one Jina call + one Gemini call per ATS-less company per run. We only
+# enter this branch when ATS detection has failed AND the cache says "no ATS",
+# so the spend stays bounded.
+
+JINA_BASE_URL = "https://r.jina.ai/"
+JINA_TIMEOUT = 20                                  # Jina renders the page; needs more headroom
+
+# Hard ceilings to keep the Gemini call cheap when a careers page is enormous.
+JINA_MAX_MARKDOWN_CHARS = 12000
+
+
+_JINA_PROMPT_TEMPLATE = """You are extracting job listings from a company's careers-page content.
+
+Company: {company_name}
+Source URL: {careers_url}
+
+The content below was fetched from the careers page. Find every distinct job
+listing it advertises. For each listing, return a JSON object with these
+exact keys:
+  - title            (job title as written)
+  - location         (city/country/remote — leave empty string if not stated)
+  - job_url          (absolute URL to the job posting; empty string if not on page)
+  - description      (one or two sentences summarising the role; empty if none)
+  - date_posted      (date string if shown, else empty)
+
+Return a JSON object: {{"jobs": [ ... ]}}
+
+CRITICAL RULES:
+- Only include real job postings. Skip generic "Send us your CV" / "Join our
+  talent pool" sections that aren't tied to a specific role.
+- If the page advertises NO open positions, return {{"jobs": []}}.
+- Output VALID JSON only. No prose, no markdown fences.
+
+--- CONTENT START ---
+{markdown}
+--- CONTENT END ---
+"""
+
+
+def fetch_jina_markdown(careers_url):
+    """Hit Jina Reader and return the extracted markdown (or empty string)."""
+    if not careers_url:
+        return ""
+    import requests
+    url = JINA_BASE_URL + careers_url
+    try:
+        r = requests.get(url, timeout=JINA_TIMEOUT, headers={"User-Agent": USER_AGENT, "Accept": "text/plain"})
+        if r.status_code == 200:
+            return r.text or ""
+        print(f"  Jina: {careers_url} returned HTTP {r.status_code}")
+    except Exception as e:
+        print(f"  Jina: fetch failed for {careers_url}: {str(e)[:120]}")
+    return ""
+
+
+def parse_jina_jobs_response(text, company_name):
+    """Pure parser. Accepts whatever Gemini returns and yields normalized job dicts.
+
+    Tolerates: bare JSON object, JSON inside ```json fences, leading/trailing prose.
+    """
+    if not text:
+        return []
+    cleaned = text.strip()
+    # Strip markdown fences if the model wrapped its JSON despite our instructions.
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    # Carve out the first {...} block in case there's leading prose.
+    first_brace = cleaned.find("{")
+    last_brace = cleaned.rfind("}")
+    if first_brace == -1 or last_brace == -1 or last_brace <= first_brace:
+        return []
+    try:
+        payload = json.loads(cleaned[first_brace : last_brace + 1])
+    except Exception:
+        return []
+    out = []
+    for j in (payload or {}).get("jobs", []) or []:
+        if not isinstance(j, dict):
+            continue
+        title = (j.get("title") or "").strip()
+        if not title:
+            continue                                # skip placeholders
+        out.append(_normalize_job(
+            title=title,
+            company=company_name,
+            location=(j.get("location") or "").strip(),
+            job_url=(j.get("job_url") or "").strip(),
+            description=(j.get("description") or "").strip(),
+            date_posted=(j.get("date_posted") or "").strip(),
+        ))
+    return out
+
+
+def extract_jobs_via_jina(careers_url, company_name, gemini_api_key,
+                          model="gemini-3.1-flash-lite"):
+    """Full pipeline: Jina Reader -> Gemini structuring -> normalized job list.
+
+    Returns [] on any failure (Jina down, Gemini error, malformed JSON). The
+    caller is expected to treat this as a soft fallback, not a hard dependency.
+    """
+    if not careers_url or not gemini_api_key:
+        return []
+    markdown = fetch_jina_markdown(careers_url)
+    if not markdown.strip():
+        return []
+    truncated = markdown[:JINA_MAX_MARKDOWN_CHARS]
+    prompt = _JINA_PROMPT_TEMPLATE.format(
+        company_name=company_name,
+        careers_url=careers_url,
+        markdown=truncated,
+    )
+    try:
+        from google import genai                   # lazy — keeps QA imports cheap
+        client = genai.Client(api_key=gemini_api_key)
+        response = client.models.generate_content(model=model, contents=prompt)
+        text = getattr(response, "text", "") or ""
+    except Exception as e:
+        print(f"  Jina+Gemini extraction failed for {company_name}: {str(e)[:120]}")
+        return []
+    jobs = parse_jina_jobs_response(text, company_name)
+    if jobs:
+        print(f"  Jina fallback: extracted {len(jobs)} job(s) for {company_name}")
+    return jobs
+
+
+# ---------------------------------------------------------------------------
+# 6. Public entry point — used by local_companies.py
 # ---------------------------------------------------------------------------
 
-def get_jobs_for_company(company_name, careers_url, cache=None):
+def get_jobs_for_company(company_name, careers_url, cache=None,
+                         gemini_api_key=None, jina_fallback=False):
     """Detect (if needed) the ATS for one company and return its current jobs.
 
     Returns a list of normalized job dicts. Empty list if no ATS detected,
     no cached token, or every fetch failed.
+
+    When `jina_fallback=True` and `gemini_api_key` is set, companies with no
+    detectable ATS are routed through Jina Reader + Gemini extraction as a
+    last resort. Cached ATS misses are honored either way so we don't hammer
+    Jina on every run for the same dead-end pages.
 
     Side effect: when this triggers a fresh detection, the cache is updated
     in memory. Callers should `cache.save()` once at the end of the run.
@@ -326,13 +624,20 @@ def get_jobs_for_company(company_name, careers_url, cache=None):
     if cached and cached.get("ats") and cached.get("token"):
         ats = cached["ats"]; token = cached["token"]
     elif cached and cached.get("ats") is None:
-        # We tried before and found no ATS — don't re-fetch every run.
+        # We tried before and found no ATS. Jina fallback is independent of the
+        # ATS cache — it runs every time when enabled, because a custom careers
+        # page may legitimately gain new postings between runs.
+        if jina_fallback and gemini_api_key:
+            return extract_jobs_via_jina(careers_url, company_name, gemini_api_key)
         return []
     else:
         html = fetch_careers_page(careers_url)
         ats, token = detect_ats_from_html(html)
         cache.set(company_name, ats, token)
         if not ats:
+            print(f"  ATS not detected for {company_name}; trying Jina fallback" if jina_fallback else f"  ATS not detected for {company_name}")
+            if jina_fallback and gemini_api_key:
+                return extract_jobs_via_jina(careers_url, company_name, gemini_api_key)
             return []
         print(f"  ATS detected for {company_name}: {ats}/{token}")
 

@@ -10,6 +10,8 @@ from core_ats import (
     parse_greenhouse_payload,
     parse_lever_payload,
     parse_workable_payload,
+    parse_ashby_payload,
+    parse_workday_payload,
 )
 
 
@@ -157,3 +159,116 @@ def test_workable_handles_empty_jobs():
     assert parse_workable_payload({"jobs": []}, "Co") == []
     assert parse_workable_payload({}, "Co") == []
     assert parse_workable_payload(None, "Co") == []
+
+
+# --- Ashby ---
+
+def test_ashby_parses_canonical_response():
+    payload = {
+        "apiVersion": "1",
+        "jobs": [
+            {
+                "id": "uuid-1",
+                "title": "Senior Backend Engineer",
+                "location": "Remote (Worldwide)",
+                "department": "Engineering",
+                "employmentType": "FullTime",
+                "jobUrl": "https://jobs.ashbyhq.com/anthropic/uuid-1",
+                "publishedAt": "2026-05-15T10:00:00.000Z",
+                "descriptionPlain": "Build agents.",
+            },
+            {
+                "id": "uuid-2",
+                "title": "ML Intern",
+                "location": "Remote (Americas)",
+                "employmentType": "Intern",
+                "jobUrl": "https://jobs.ashbyhq.com/anthropic/uuid-2",
+                "publishedAt": "2026-05-16T09:00:00.000Z",
+            },
+        ],
+    }
+    out = parse_ashby_payload(payload, "Anthropic")
+    assert len(out) == 2
+    assert out[0]["title"] == "Senior Backend Engineer"
+    assert out[0]["company"] == "Anthropic"
+    assert out[0]["location"] == "Remote (Worldwide)"
+    assert out[0]["job_url"].startswith("https://jobs.ashbyhq.com")
+    assert out[0]["job_type"] == "fulltime"
+    # Intern employmentType should map to internship job_type
+    assert out[1]["job_type"] == "internship"
+
+
+def test_ashby_handles_nested_location_dict():
+    """Some Ashby payloads nest location instead of returning a string."""
+    payload = {"jobs": [{"title": "Engineer", "location": {"name": "Berlin, Germany"}, "jobUrl": "u"}]}
+    out = parse_ashby_payload(payload, "Co")
+    assert out[0]["location"] == "Berlin, Germany"
+
+
+def test_ashby_handles_empty_jobs():
+    assert parse_ashby_payload({"jobs": []}, "Co") == []
+    assert parse_ashby_payload({}, "Co") == []
+    assert parse_ashby_payload(None, "Co") == []
+
+
+def test_ashby_skips_non_dict_entries():
+    payload = {"jobs": [None, "garbage", {"title": "Real", "jobUrl": "u"}]}
+    out = parse_ashby_payload(payload, "Co")
+    assert len(out) == 1
+    assert out[0]["title"] == "Real"
+
+
+def test_ashby_falls_back_to_html_description():
+    payload = {"jobs": [{"title": "T", "descriptionHtml": "<p>html only</p>", "jobUrl": "u"}]}
+    out = parse_ashby_payload(payload, "Co")
+    assert "html" in out[0]["description"]
+
+
+# --- Workday ---
+
+def test_workday_parses_canonical_response():
+    payload = {
+        "total": 2,
+        "jobPostings": [
+            {
+                "title": "Senior Software Engineer",
+                "externalPath": "/job/Ramallah/Senior-Software-Engineer_R12345",
+                "locationsText": "Ramallah, Palestine",
+                "postedOn": "Posted Yesterday",
+                "bulletFields": [],
+            },
+            {
+                "title": "ML Engineering Intern",
+                "externalPath": "/job/Remote/ML-Intern_R67890",
+                "locationsText": "Remote, Worldwide",
+                "postedOn": "Posted 5 Days Ago",
+            },
+        ],
+    }
+    out = parse_workday_payload(payload, "Acme Corp", tenant="acme", cluster="wd5", site="AcmeCareers")
+    assert len(out) == 2
+    assert out[0]["title"] == "Senior Software Engineer"
+    assert out[0]["company"] == "Acme Corp"
+    assert out[0]["location"] == "Ramallah, Palestine"
+    # job_url must be a full URL combining origin + site + externalPath
+    assert out[0]["job_url"] == "https://acme.wd5.myworkdayjobs.com/AcmeCareers/job/Ramallah/Senior-Software-Engineer_R12345"
+
+
+def test_workday_handles_empty_postings():
+    assert parse_workday_payload({"jobPostings": []}, "Co") == []
+    assert parse_workday_payload({}, "Co") == []
+    assert parse_workday_payload(None, "Co") == []
+
+
+def test_workday_skips_non_dict_entries():
+    payload = {"jobPostings": [None, "garbage", {"title": "Real", "externalPath": "/job/x"}]}
+    out = parse_workday_payload(payload, "Co", tenant="t", cluster="wd1", site="s")
+    assert len(out) == 1
+    assert out[0]["title"] == "Real"
+
+
+def test_workday_keeps_externalPath_as_is_when_no_tenant_info():
+    """If we don't know the tenant/cluster, we can't rebuild the absolute URL — just keep the relative path."""
+    payload = {"jobPostings": [{"title": "X", "externalPath": "/job/foo"}]}
+    out = parse_workday_payload(payload, "Co")
+    assert out[0]["job_url"] == "/job/foo"
