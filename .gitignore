@@ -14,3 +14,5 @@ data/ats_cache.json
 # Local-only working files — never push to GitHub.
 CLAUDE.md
 CHAT_HISTORY.md
+# CV text is stored as a GitHub Actions secret (CV_TEXT) and written at runtime.
+cv_text.txt

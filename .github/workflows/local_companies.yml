@@ -34,6 +34,9 @@ jobs:
         key: seen-jobs-${{ github.run_id }}
         restore-keys: seen-jobs-
 
+    - name: Write CV from secret
+      run: echo "${{ secrets.CV_TEXT }}" > cv_text.txt
+
     - name: Run Local Companies Scraper
       env:
         SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
