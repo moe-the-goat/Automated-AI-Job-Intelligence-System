@@ -38,10 +38,47 @@ def test_email_renders_subscores_in_match_cell():
     df = pd.DataFrame([baseline_job_row(
         match_percentage=82, tech_fit=95, experience_fit=70, logistics_fit=85)])
     html = format_email_html(df, pd.DataFrame(), _stats(1))
-    assert "<b>82%</b>" in html
+    # 82 falls in the 70-84 (yellow / amber) bracket — verify the colored badge
+    # is present and the sub-scores render.
+    assert "82%" in html
+    assert "#eab308" in html                                    # amber badge for 70-84
     assert "T:95" in html
     assert "E:70" in html
     assert "L:85" in html
+
+
+def test_email_renders_green_badge_for_high_match():
+    """A 90% match should produce a green badge (#22c55e) in the rendered email."""
+    df = pd.DataFrame([baseline_job_row(match_percentage=90)])
+    html = format_email_html(df, pd.DataFrame(), _stats(1))
+    assert "#22c55e" in html
+    assert "90%" in html
+
+
+def test_email_renders_red_badge_for_low_match():
+    """A 55% match should produce a red badge (#ef4444)."""
+    df = pd.DataFrame([baseline_job_row(match_percentage=55)])
+    html = format_email_html(df, pd.DataFrame(), _stats(1))
+    assert "#ef4444" in html
+
+
+def test_email_bolds_verdict_match_and_gap_keywords():
+    """MATCH: and GAP: in the AI verdict should render as <strong> for scannability."""
+    df = pd.DataFrame([baseline_job_row(
+        ai_verdict="MATCH: Strong Python + PyTorch. GAP: 2 yrs prod ML experience."
+    )])
+    html = format_email_html(df, pd.DataFrame(), _stats(1))
+    assert "<strong>MATCH:</strong>" in html
+    assert "<strong>GAP:</strong>" in html
+
+
+def test_email_header_includes_color_legend():
+    """The stats header should explain the color coding to first-time readers."""
+    html = format_email_html(pd.DataFrame(), pd.DataFrame(), _stats(0))
+    assert "color-coded" in html
+    assert "#22c55e" in html                                    # legend swatch
+    assert "#eab308" in html
+    assert "#ef4444" in html
 
 
 def test_email_renders_compensation_and_effort_columns():

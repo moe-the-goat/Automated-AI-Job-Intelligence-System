@@ -66,6 +66,59 @@ def test_greenhouse_handles_string_location_gracefully():
     assert out[0]["location"] == "Remote/Unspecified"  # _normalize_job default
 
 
+def test_greenhouse_extracts_content_html_to_plain_text():
+    """With ?content=true, Greenhouse inlines HTML-escaped HTML in `content`. We
+    must unescape entities AND strip tags so downstream consumers see plain text."""
+    payload = {
+        "jobs": [
+            {
+                "id": 99,
+                "title": "Backend Developer",
+                "location": {"name": "Remote"},
+                "absolute_url": "https://boards.greenhouse.io/co/jobs/99",
+                "content": "&lt;p&gt;Build &lt;strong&gt;great&lt;/strong&gt; APIs in &lt;em&gt;Python&lt;/em&gt;.&lt;/p&gt;&lt;ul&gt;&lt;li&gt;Requirements: 3+ yrs&lt;/li&gt;&lt;/ul&gt;",
+            }
+        ]
+    }
+    out = parse_greenhouse_payload(payload, "Co")
+    assert len(out) == 1
+    desc = out[0]["description"]
+    # HTML tags removed, entities unescaped, whitespace collapsed.
+    assert "<p>" not in desc
+    assert "&lt;" not in desc
+    assert "Build great APIs in Python" in desc
+    assert "3+ yrs" in desc
+
+
+def test_greenhouse_handles_empty_content_field():
+    """If `content` is missing or empty, description should be empty (backward compat)."""
+    payload = {"jobs": [{"id": 1, "title": "X", "location": {"name": "Remote"}, "absolute_url": "u"}]}
+    out = parse_greenhouse_payload(payload, "Co")
+    assert out[0]["description"] == ""
+
+    payload2 = {"jobs": [{"id": 1, "title": "X", "content": ""}]}
+    out2 = parse_greenhouse_payload(payload2, "Co")
+    assert out2[0]["description"] == ""
+
+
+def test_greenhouse_content_with_nested_html_lists():
+    """Verify whitespace collapsing for multi-line HTML content."""
+    payload = {
+        "jobs": [
+            {
+                "title": "Engineer",
+                "content": "&lt;h2&gt;Role&lt;/h2&gt;\n&lt;p&gt;Description here.&lt;/p&gt;\n&lt;ul&gt;\n  &lt;li&gt;Python&lt;/li&gt;\n  &lt;li&gt;Docker&lt;/li&gt;\n&lt;/ul&gt;",
+            }
+        ]
+    }
+    out = parse_greenhouse_payload(payload, "Co")
+    desc = out[0]["description"]
+    # No double-spaces or newlines after collapsing.
+    assert "  " not in desc
+    assert "\n" not in desc
+    assert "Python" in desc and "Docker" in desc
+
+
 # --- Lever ---
 
 def test_lever_parses_canonical_response():

@@ -55,27 +55,74 @@ def sort_by_match_percentage(df):
     df = df.drop(columns=['_sort_pct', '_sort_tech'])
     return df
 
+def _match_pct_badge_html(pct):
+    """Color-coded inline pill badge for an integer match percentage.
+
+    Thresholds tuned for the rich-schema AI verdicts:
+      >= 85  -> green   (#22c55e)  strong match — worth scanning first
+      70-84  -> amber   (#eab308)  decent match — read carefully
+      <  70  -> red     (#ef4444)  long shot or significant gap
+      N/A    -> grey    (#9ca3af)  AI couldn't score (e.g. pre-screen skip)
+    """
+    try:
+        n = int(pct) if str(pct).upper() != "N/A" else -1
+    except (ValueError, TypeError):
+        n = -1
+    if n >= 85:
+        color = "#22c55e"
+    elif n >= 70:
+        color = "#eab308"
+    elif n >= 0:
+        color = "#ef4444"
+    else:
+        color = "#9ca3af"
+    label = f"{n}%" if n >= 0 else "N/A"
+    return (
+        f'<span style="background:{color};color:#fff;padding:3px 9px;'
+        f'border-radius:6px;font-weight:bold;display:inline-block;'
+        f'font-size:13px;">{label}</span>'
+    )
+
 def _fmt_match_cell_html(row):
-    """Build the rich Match cell for HTML email: composite + sub-score breakdown."""
+    """Build the rich Match cell for HTML email: badge + sub-score breakdown."""
     pct = row.get("match_percentage", "N/A")
-    pct_str = f"{pct}%" if str(pct) != "N/A" else "N/A"
+    badge = _match_pct_badge_html(pct)
     tech = row.get("tech_fit", "")
     exp = row.get("experience_fit", "")
     log = row.get("logistics_fit", "")
     if tech != "" and exp != "" and log != "":
-        return f"<b>{pct_str}</b><br><small>T:{tech} E:{exp} L:{log}</small>"
-    return f"<b>{pct_str}</b>"
+        return f"{badge}<br><small>T:{tech} E:{exp} L:{log}</small>"
+    return badge
 
 def _fmt_match_cell_md(row):
     """Build the Match cell for Markdown (single line)."""
     pct = row.get("match_percentage", "N/A")
-    pct_str = f"{pct}%" if str(pct) != "N/A" else "N/A"
+    pct_str = f"{pct}%" if str(pct).upper() != "N/A" else "N/A"
     tech = row.get("tech_fit", "")
     exp = row.get("experience_fit", "")
     log = row.get("logistics_fit", "")
     if tech != "" and exp != "" and log != "":
         return f"**{pct_str}** (T:{tech} E:{exp} L:{log})"
     return f"**{pct_str}**"
+
+# Anchored markers the AI prompt instructs the model to use in its verdict.
+# Bolding them in the rendered output makes the structure scannable at a glance.
+_VERDICT_KEYWORD_RE = re.compile(
+    r"\b(MATCH:|GAP:|CLOSING[\s\-]REASON:|CLOSING:|REASON:)",
+    re.IGNORECASE,
+)
+
+def _bolden_verdict_html(verdict):
+    """Wrap MATCH:/GAP:/CLOSING-REASON: markers in <strong> for HTML output."""
+    if not verdict:
+        return ""
+    return _VERDICT_KEYWORD_RE.sub(r"<strong>\1</strong>", str(verdict))
+
+def _bolden_verdict_md(verdict):
+    """Same but with markdown bold syntax. Caller still escapes pipes for tables."""
+    if not verdict:
+        return ""
+    return _VERDICT_KEYWORD_RE.sub(r"**\1**", str(verdict))
 
 def _suspicious_title(title, is_suspicious, is_blacklisted=False, is_scam=False):
     """Prepend a visible warning to titles. Severity order (most severe first):
@@ -114,7 +161,7 @@ def _render_html_table(df):
         match_cell = _fmt_match_cell_html(row)
         comp = row.get("compensation", "Not stated")
         effort = row.get("effort", "unknown")
-        verdict = row.get("ai_verdict", "")
+        verdict = _bolden_verdict_html(row.get("ai_verdict", ""))
         job_url = row.get("job_url", "#")
         out += (
             f"<tr><td>{title}</td><td>{company}</td><td>{location}</td>"
@@ -177,7 +224,15 @@ def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None):
 
     html = "<h2>Automated AI Job Alerts</h2>"
     html += f"<div><b>Pipeline Stats:</b> Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {stats['approved']}</div>"
-    html += "<div style='color: #666; font-size: 12px;'>Match cell shows composite % with sub-scores Tech / Experience / Logistics. 🚨 = web-confirmed scam · 🚫 = blacklisted company · ⚠️ = AI-flagged suspicious.</div><hr>"
+    html += (
+        "<div style='color: #666; font-size: 12px; margin-top:4px;'>"
+        "Match cell shows composite % (color-coded: "
+        "<span style='background:#22c55e;color:#fff;padding:1px 6px;border-radius:4px;'>&ge;85</span> "
+        "<span style='background:#eab308;color:#fff;padding:1px 6px;border-radius:4px;'>70-84</span> "
+        "<span style='background:#ef4444;color:#fff;padding:1px 6px;border-radius:4px;'>&lt;70</span>) "
+        "with sub-scores Tech / Experience / Logistics. "
+        "🚨 = web-confirmed scam · 🚫 = blacklisted company · ⚠️ = AI-flagged suspicious.</div><hr>"
+    )
 
     html += "<h3>🎓 Internships (AI & SWE)</h3>"
     if internships_df.empty:
@@ -238,7 +293,7 @@ def _render_md_table(df):
         match_cell = _fmt_match_cell_md(row)
         comp = row.get("compensation", "Not stated")
         effort = row.get("effort", "unknown")
-        verdict = row.get("ai_verdict", "")
+        verdict = _bolden_verdict_md(row.get("ai_verdict", ""))
         job_url = row.get("job_url", "#")
         # Escape pipes inside cells so the markdown table doesn't break.
         verdict = str(verdict).replace("|", "\\|")

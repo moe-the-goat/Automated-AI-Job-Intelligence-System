@@ -265,6 +265,33 @@ _SENIOR_REGEX_PATTERNS = (
     r"\bstaff\s+engineer\b",
     r"\bprincipal\s+engineer\b",
 )
+
+# Hard work-auth / clearance disqualifiers for a Palestine-based candidate.
+# Match conservatively — we want zero false positives, since these rules drop
+# the job entirely before any AI scoring. Each pattern is a real phrase seen in
+# US-locked postings; generic mentions of "US" or "United States" alone are
+# NOT enough to disqualify (a global remote company can mention HQ location).
+_HARD_DISQUALIFIER_PATTERNS = (
+    # Explicit citizenship / residency requirements
+    (r"\bu\.?s\.?\s+citizens?\s+only\b",                          "US citizens only"),
+    (r"\bmust\s+be\s+(?:a\s+)?u\.?s\.?\s+citizen\b",              "must be a US citizen"),
+    (r"\bmust\s+reside\s+in\s+the\s+(?:u\.?s\.?|united\s+states)\b", "must reside in the US"),
+    (r"\bu\.?s\.?[\-\s]based\s+(?:candidates?|applicants?)\s+only\b", "US-based candidates only"),
+    (r"\bus\s+only\s+remote\b",                                   "US-only remote"),
+    (r"\bremote\s*[-(]\s*us\s*(?:only)?\s*[)\-]?\s*$",            "remote (US only) — anchored"),
+    # Work authorization that excludes non-residents (Palestine isn't covered)
+    (r"\bmust\s+be\s+authorized\s+to\s+work\s+in\s+the\s+(?:u\.?s\.?|united\s+states)\b", "must be authorized to work in the US"),
+    (r"\b(?:u\.?s\.?|united\s+states)\s+work\s+authorization\s+required\b", "US work authorization required"),
+    (r"\bno\s+(?:visa\s+)?sponsorship\s+(?:will\s+be\s+)?(?:provided|offered|available)\b", "no visa sponsorship"),
+    (r"\bunable\s+to\s+sponsor\s+(?:work\s+)?visas?\b",           "unable to sponsor visas"),
+    # Security clearances (Palestinian candidate categorically cannot hold these)
+    (r"\bsecurity\s+clearance\s+required\b",                      "security clearance required"),
+    (r"\bactive\s+(?:security\s+)?clearance\b",                   "active clearance required"),
+    (r"\b(?:ts\s*/\s*sci|top\s+secret\s*/\s*sci)\b",              "TS/SCI clearance"),
+    (r"\bsecret\s+clearance\b",                                   "secret clearance"),
+    (r"\bpublic\s+trust\s+clearance\b",                           "public trust clearance"),
+)
+
 _MIN_DESCRIPTION_CHARS = 150
 
 
@@ -310,6 +337,13 @@ def quick_viability_check(row):
     for pat in _SENIOR_REGEX_PATTERNS:
         if re.search(pat, description):
             return False, "senior experience requirement in description"
+
+    # 5. Hard work-auth / clearance disqualifiers. Candidate is in Palestine —
+    # US-citizen / US-resident / clearance-required roles are non-starters and
+    # there's no point burning a Gemini call to reach that same conclusion.
+    for pat, reason in _HARD_DISQUALIFIER_PATTERNS:
+        if re.search(pat, description):
+            return False, f"hard disqualifier: {reason}"
 
     return True, "viable"
 

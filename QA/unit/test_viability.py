@@ -120,3 +120,109 @@ def test_skipped_result_matches_schema():
     assert r["is_valid"] is False
     assert r["verdict"].startswith("Pre-screen skipped:")
     assert r["match_percentage"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Hard work-auth / clearance disqualifiers (Fix #3b)
+# ---------------------------------------------------------------------------
+# Palestine-based candidate cannot legally accept US-only / US-clearance roles,
+# so we drop them at the pre-screen instead of wasting a Gemini call.
+
+def test_rejects_us_citizens_only():
+    row = {"title": "AI Intern",
+           "description": "Great team " + ("padding text. " * 10) + "US citizens only please."}
+    ok, reason = quick_viability_check(row)
+    assert ok is False
+    assert "hard disqualifier" in reason
+    assert "US citizens only" in reason
+
+
+def test_rejects_must_be_us_citizen():
+    row = {"title": "Software Engineer",
+           "description": "Great role with lots of work " + ("padding. " * 15) + "Candidate must be a US citizen."}
+    ok, reason = quick_viability_check(row)
+    assert ok is False
+    assert "US citizen" in reason
+
+
+def test_rejects_must_reside_in_us():
+    row = {"title": "AI Intern",
+           "description": "Build awesome ML systems " + ("padding. " * 15) + "Must reside in the United States."}
+    ok, reason = quick_viability_check(row)
+    assert ok is False
+    assert "reside in the US" in reason
+
+
+def test_rejects_must_be_authorized_to_work_in_us():
+    row = {"title": "Software Engineer",
+           "description": "Awesome distributed team " + ("padding. " * 15) + "Must be authorized to work in the United States."}
+    ok, reason = quick_viability_check(row)
+    assert ok is False
+    assert "authorized to work in the US" in reason
+
+
+def test_rejects_no_visa_sponsorship():
+    row = {"title": "Backend Developer",
+           "description": "Great role for the right candidate. " + ("padding. " * 15) + "No visa sponsorship will be provided."}
+    ok, reason = quick_viability_check(row)
+    assert ok is False
+    assert "visa sponsorship" in reason
+
+
+def test_rejects_security_clearance_required():
+    row = {"title": "Software Engineer",
+           "description": "Build government systems with our team. " + ("padding. " * 15) + "Security clearance required."}
+    ok, reason = quick_viability_check(row)
+    assert ok is False
+    assert "clearance" in reason
+
+
+def test_rejects_ts_sci_clearance():
+    row = {"title": "AI Engineer",
+           "description": "Work on classified ML projects with us. " + ("padding. " * 15) + "Must have an active TS/SCI clearance."}
+    ok, reason = quick_viability_check(row)
+    assert ok is False
+    assert "TS/SCI" in reason
+
+
+def test_rejects_us_based_candidates_only_phrase():
+    row = {"title": "Software Engineer",
+           "description": "Distributed remote team building cool stuff. " + ("padding. " * 15) + "US-based candidates only."}
+    ok, reason = quick_viability_check(row)
+    assert ok is False
+    assert "US-based candidates only" in reason
+
+
+def test_keeps_generic_us_mention_without_disqualifier():
+    """`headquartered in the US` alone should NOT disqualify — only specific phrases do.
+
+    This is the critical false-positive guard. A globally remote company can mention
+    that its HQ is in the US without that meaning the role is US-only.
+    """
+    row = {"title": "Software Engineer",
+           "description": "Our team is fully distributed; HQ is in the United States but we hire globally and welcome candidates from EMEA, APAC, and the Americas. "
+                          "Build great products with cutting-edge tech." + (" extra. " * 8)}
+    ok, reason = quick_viability_check(row)
+    assert ok is True, f"False positive: rejected with reason {reason!r}"
+
+
+def test_keeps_globally_remote_with_us_headquarters():
+    """Another flavor of the false-positive guard."""
+    row = {"title": "ML Engineer",
+           "description": "We are a US-headquartered company but the team works fully remote across the world. " + ("padding. " * 10)}
+    ok, _ = quick_viability_check(row)
+    assert ok is True
+
+
+def test_hard_disqualifier_runs_after_senior_check():
+    """A row that's both senior AND US-citizen-only should still be rejected.
+
+    Senior check runs first (step 4) and short-circuits, so the senior reason
+    is what we expect to see. Either reason is acceptable as long as the row
+    is rejected — we just want to confirm both filters are wired in.
+    """
+    row = {"title": "Software Engineer",
+           "description": "We require 10+ years of experience. " + ("padding text here. " * 20) + "US citizens only."}
+    ok, reason = quick_viability_check(row)
+    assert ok is False
+    assert "senior" in reason or "hard disqualifier" in reason

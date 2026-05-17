@@ -179,9 +179,15 @@ def _normalize_job(title, company, location, job_url, description, date_posted, 
 
 
 def fetch_greenhouse_jobs(token, company_name):
-    """https://boards-api.greenhouse.io/v1/boards/{token}/jobs (public, no auth)."""
+    """https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true (public, no auth).
+
+    The `content=true` query param makes Greenhouse inline each job's full
+    description in the SAME response — no N+1 follow-up calls. Saves us from
+    the anti-bot scraping fallback in core_ai.get_full_job_description when
+    a Greenhouse job reaches the AI evaluator.
+    """
     import requests
-    url = f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs"
+    url = f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
     try:
         r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
         r.raise_for_status()
@@ -193,7 +199,12 @@ def fetch_greenhouse_jobs(token, company_name):
 
 
 def parse_greenhouse_payload(payload, company_name):
-    """Pure parsing — separate from network so tests can pin payload shape."""
+    """Pure parsing — separate from network so tests can pin payload shape.
+
+    With `?content=true`, each job carries an HTML-encoded `content` field.
+    We strip the HTML tags so downstream consumers (embedding, AI, viability
+    pre-screen) all see clean plain text.
+    """
     out = []
     for j in (payload or {}).get("jobs", []) or []:
         loc = ""
@@ -204,10 +215,30 @@ def parse_greenhouse_payload(payload, company_name):
             company=company_name,
             location=loc,
             job_url=j.get("absolute_url", ""),
-            description="",                      # detail endpoint required for full content; skip for now
+            description=_clean_greenhouse_content(j.get("content", "")),
             date_posted=j.get("updated_at", "") or j.get("first_published", ""),
         ))
     return out
+
+
+def _clean_greenhouse_content(content):
+    """Strip HTML tags + unescape entities from Greenhouse's `content` field.
+
+    Greenhouse stores the description as HTML-escaped HTML (e.g.
+    `&lt;p&gt;Build great products&lt;/p&gt;`). We unescape, strip tags, and
+    collapse whitespace. BS4 is imported lazily because most pipelines never
+    hit a Greenhouse job at all.
+    """
+    if not content:
+        return ""
+    import html as _html
+    unescaped = _html.unescape(content)
+    try:
+        from bs4 import BeautifulSoup
+        text = BeautifulSoup(unescaped, "html.parser").get_text(separator=" ")
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", unescaped)        # fallback if BS4 absent
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def fetch_lever_jobs(token, company_name):
@@ -464,24 +495,32 @@ class AtsCache:
 
 
 # ---------------------------------------------------------------------------
-# 5. Jina Reader fallback (Wave 2) — for careers pages with no detectable ATS
+# 5. Custom-careers-page fallback (Wave 2 + Wave 3) — for pages with no ATS
 # ---------------------------------------------------------------------------
 #
 # Many Palestinian companies host custom HTML / JS-rendered careers pages with
-# no SaaS ATS at all. DDG/Bing don't reliably index them either. Jina Reader
-# (https://r.jina.ai/{url}) is a free unauthenticated service that extracts
-# clean markdown from any URL (handles JS-rendered content too). We then ask
-# Gemini to pick job listings out of the markdown.
+# no SaaS ATS at all. Two-tier extraction:
 #
-# Cost: one Jina call + one Gemini call per ATS-less company per run. We only
-# enter this branch when ATS detection has failed AND the cache says "no ATS",
-# so the spend stays bounded.
+#   Tier 1 — BeautifulSoup on the careers HTML we ALREADY fetched during ATS
+#            detection. Free, instant, works for SSR sites (which is most
+#            company careers pages).
+#   Tier 2 — Jina Reader (https://r.jina.ai/) renders JS and returns markdown.
+#            Only used when Tier 1 yields ~no text (true SPA / React shell).
+#
+# Both tiers feed the same Gemini prompt that structures the text into job
+# listings. Tier 2 is roughly 5-10x slower and uses an external rate-limited
+# service, so the tiered approach is a real latency / reliability win.
 
 JINA_BASE_URL = "https://r.jina.ai/"
 JINA_TIMEOUT = 20                                  # Jina renders the page; needs more headroom
 
 # Hard ceilings to keep the Gemini call cheap when a careers page is enormous.
 JINA_MAX_MARKDOWN_CHARS = 12000
+
+# Tier-1 BS extraction needs at least this many chars of meaningful text to be
+# trusted. Below this we assume the page is SPA / JS-rendered and fall through
+# to Jina (Tier 2).
+BS_MIN_USEFUL_CHARS = 500
 
 
 _JINA_PROMPT_TEMPLATE = """You are extracting job listings from a company's careers-page content.
@@ -510,6 +549,27 @@ CRITICAL RULES:
 {markdown}
 --- CONTENT END ---
 """
+
+
+def extract_text_from_html(html):
+    """Strip scripts/styles/nav from HTML and return clean visible text.
+
+    Used as the Tier-1 extractor for ATS-less careers pages. Cheap because we
+    already have the HTML in memory from the ATS-detection fetch.
+    Returns "" if BS4 isn't installed or parsing fails.
+    """
+    if not html:
+        return ""
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "noscript", "svg"]):
+            tag.decompose()
+        text = soup.get_text(separator=" ")
+    except Exception as e:
+        print(f"  BS4 extraction failed: {str(e)[:120]}")
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def fetch_jina_markdown(careers_url):
@@ -567,19 +627,17 @@ def parse_jina_jobs_response(text, company_name):
     return out
 
 
-def extract_jobs_via_jina(careers_url, company_name, gemini_api_key,
-                          model="gemini-3.1-flash-lite"):
-    """Full pipeline: Jina Reader -> Gemini structuring -> normalized job list.
+def _gemini_structure_jobs(text_content, careers_url, company_name, gemini_api_key,
+                           source_label, model="gemini-3.1-flash-lite"):
+    """Send extracted text (either BS4 or Jina) to Gemini for job-list structuring.
 
-    Returns [] on any failure (Jina down, Gemini error, malformed JSON). The
-    caller is expected to treat this as a soft fallback, not a hard dependency.
+    Returns a normalized job list, or [] if anything goes wrong. `source_label`
+    is purely cosmetic (used in print statements so you can tell which tier
+    contributed).
     """
-    if not careers_url or not gemini_api_key:
+    if not text_content.strip() or not gemini_api_key:
         return []
-    markdown = fetch_jina_markdown(careers_url)
-    if not markdown.strip():
-        return []
-    truncated = markdown[:JINA_MAX_MARKDOWN_CHARS]
+    truncated = text_content[:JINA_MAX_MARKDOWN_CHARS]
     prompt = _JINA_PROMPT_TEMPLATE.format(
         company_name=company_name,
         careers_url=careers_url,
@@ -591,12 +649,57 @@ def extract_jobs_via_jina(careers_url, company_name, gemini_api_key,
         response = client.models.generate_content(model=model, contents=prompt)
         text = getattr(response, "text", "") or ""
     except Exception as e:
-        print(f"  Jina+Gemini extraction failed for {company_name}: {str(e)[:120]}")
+        print(f"  {source_label}+Gemini extraction failed for {company_name}: {str(e)[:120]}")
         return []
     jobs = parse_jina_jobs_response(text, company_name)
     if jobs:
-        print(f"  Jina fallback: extracted {len(jobs)} job(s) for {company_name}")
+        print(f"  {source_label} fallback: extracted {len(jobs)} job(s) for {company_name}")
     return jobs
+
+
+def extract_jobs_via_jina(careers_url, company_name, gemini_api_key,
+                          model="gemini-3.1-flash-lite"):
+    """Tier-2 only: Jina Reader -> Gemini structuring.
+
+    Kept as a thin wrapper for backward compatibility and for callers that
+    want to skip Tier 1 entirely (e.g. when they don't have the HTML cached).
+    """
+    if not careers_url or not gemini_api_key:
+        return []
+    markdown = fetch_jina_markdown(careers_url)
+    return _gemini_structure_jobs(markdown, careers_url, company_name, gemini_api_key,
+                                  source_label="Jina", model=model)
+
+
+def extract_jobs_from_careers_page(careers_url, company_name, gemini_api_key,
+                                   html=None, model="gemini-3.1-flash-lite"):
+    """Two-tier fallback for careers pages with no detectable ATS.
+
+    Tier 1: BeautifulSoup extract on the supplied `html` (or freshly fetched if
+            None). If the extracted text passes BS_MIN_USEFUL_CHARS, structure
+            it with Gemini and return.
+    Tier 2: Jina Reader renders the page (handles SPAs). Send markdown to
+            Gemini, return results.
+
+    Returns [] only if both tiers fail. Side effect: prints which tier won.
+    """
+    if not careers_url or not gemini_api_key:
+        return []
+    if html is None:
+        html = fetch_careers_page(careers_url)
+
+    bs_text = extract_text_from_html(html)
+    if len(bs_text) >= BS_MIN_USEFUL_CHARS:
+        jobs = _gemini_structure_jobs(bs_text, careers_url, company_name, gemini_api_key,
+                                      source_label="BS4", model=model)
+        if jobs:
+            return jobs
+        # BS extraction yielded text but no jobs — could be the model missed them,
+        # or the page legitimately has no openings. Fall through to Jina anyway
+        # because Jina sometimes surfaces JS-injected job links the SSR markup hid.
+        print(f"  BS4 extraction returned 0 jobs for {company_name}; trying Jina")
+
+    return extract_jobs_via_jina(careers_url, company_name, gemini_api_key, model=model)
 
 
 # ---------------------------------------------------------------------------
@@ -624,20 +727,22 @@ def get_jobs_for_company(company_name, careers_url, cache=None,
     if cached and cached.get("ats") and cached.get("token"):
         ats = cached["ats"]; token = cached["token"]
     elif cached and cached.get("ats") is None:
-        # We tried before and found no ATS. Jina fallback is independent of the
-        # ATS cache — it runs every time when enabled, because a custom careers
-        # page may legitimately gain new postings between runs.
+        # We tried before and found no ATS. The custom-page fallback still runs
+        # because pages legitimately gain new postings between runs. No cached
+        # HTML, so the tiered extractor will fetch fresh.
         if jina_fallback and gemini_api_key:
-            return extract_jobs_via_jina(careers_url, company_name, gemini_api_key)
+            return extract_jobs_from_careers_page(careers_url, company_name, gemini_api_key)
         return []
     else:
         html = fetch_careers_page(careers_url)
         ats, token = detect_ats_from_html(html)
         cache.set(company_name, ats, token)
         if not ats:
-            print(f"  ATS not detected for {company_name}; trying Jina fallback" if jina_fallback else f"  ATS not detected for {company_name}")
+            print(f"  ATS not detected for {company_name}; trying tiered fallback" if jina_fallback else f"  ATS not detected for {company_name}")
+            # Pass the already-fetched HTML so Tier 1 (BS4) is free of an
+            # extra HTTP call. Tier 2 (Jina) only fires for true SPAs.
             if jina_fallback and gemini_api_key:
-                return extract_jobs_via_jina(careers_url, company_name, gemini_api_key)
+                return extract_jobs_from_careers_page(careers_url, company_name, gemini_api_key, html=html)
             return []
         print(f"  ATS detected for {company_name}: {ats}/{token}")
 
