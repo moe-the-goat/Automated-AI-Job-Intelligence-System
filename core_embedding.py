@@ -26,7 +26,7 @@ import math
 CV_EMBEDDING_CACHE = "data/cv_embedding.json"
 EMBED_MODEL = "gemini-embedding-001"     # Gemini embeddings, free tier, ~1500 RPM
 EMBED_THROTTLE_SECONDS = 0.05            # ~20 RPS — well under the limit
-JOB_TEXT_MAX_CHARS = 1000                # truncate long descriptions for embedding
+JOB_TEXT_MAX_CHARS = 7000                # include full requirements section, not just HR intro
 
 
 def _cv_hash(text):

@@ -80,21 +80,14 @@ def detect_company_scam(company_name):
     """
     if not company_name:
         return False
-    from ddgs import DDGS  # lazy import
     queries = [
         f'"{company_name}" scam',
         f'"{company_name}" fake job complaints',
         f'"{company_name}" reddit review',
     ]
     snippets = []
-    try:
-        ddgs = DDGS()
-        for q in queries:
-            for r in ddgs.text(q, max_results=2):
-                snippets.append(r.get('body', ''))
-    except Exception as e:
-        print(f"  [SCAM CHECK] DDG failed for {company_name}: {str(e)[:120]}")
-        return False
+    for q in queries:
+        snippets.extend(r.get('body', '') for r in _ddg_text(q, max_results=2))
     return scan_for_scam_signals(" ".join(snippets))
 
 _NUMBER_RE = re.compile(r'^\s*(-?\d+(?:\.\d+)?)')
@@ -169,7 +162,39 @@ def _parse_ai_response(text):
     return _normalize_result(raw)
 
 # ---------------------------------------------------------------------------
-# Description fetch + web search helpers (unchanged behaviour)
+# DDG search helper with exponential backoff
+# ---------------------------------------------------------------------------
+
+_DDG_BACKOFF_SECONDS = [2, 5]          # wait 2s after attempt 1, 5s after attempt 2
+
+def _ddg_text(query, max_results=2):
+    """Execute one DDG text query with exponential backoff on rate-limit / network errors.
+
+    GitHub Actions runners share IP space so DDG's rate limiter fires more often
+    than it would from a home IP. Three attempts (2s → 5s backoff) handle the
+    brief rate-limit windows DDG applies without waiting so long that the runner
+    times out.
+
+    Returns a list of result dicts on success, [] if all retries are exhausted.
+    """
+    from ddgs import DDGS  # lazy — only loaded when an AI eval actually fires
+    max_retries = len(_DDG_BACKOFF_SECONDS) + 1
+    for attempt in range(max_retries):
+        try:
+            return list(DDGS().text(query, max_results=max_results))
+        except Exception as e:
+            err = str(e)[:120]
+            if attempt < len(_DDG_BACKOFF_SECONDS):
+                wait = _DDG_BACKOFF_SECONDS[attempt]
+                print(f"  DDG attempt {attempt + 1}/{max_retries} failed ({err}), retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"  DDG exhausted retries for query: {query[:80]!r} ({err})")
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Description fetch + web search helpers
 # ---------------------------------------------------------------------------
 
 def get_full_job_description(url):
@@ -193,22 +218,13 @@ def get_full_job_description(url):
 
 def search_company_remote_policy(company_name, job_title):
     """Dual DuckDuckGo search for specific geographic restrictions tied to this role."""
-    from ddgs import DDGS  # lazy import — only loaded when AI eval actually fires
     print(f"Deep web search triggered for {company_name} ({job_title}) remote policy...")
     snippets = []
-    try:
-        q1 = f"{company_name} \"{job_title}\" remote eligible countries"
-        res1 = DDGS().text(q1, max_results=2)
-        snippets.extend([r.get('body', '') for r in res1])
-
-        q2 = f"{company_name} hire remote Middle East Palestine EMEA"
-        res2 = DDGS().text(q2, max_results=2)
-        snippets.extend([r.get('body', '') for r in res2])
-
-        return " ".join(snippets)
-    except Exception as e:
-        print(f"Web search failed: {e}")
-        return " ".join(snippets)
+    q1 = f"{company_name} \"{job_title}\" remote eligible countries"
+    snippets.extend(r.get('body', '') for r in _ddg_text(q1, max_results=2))
+    q2 = f"{company_name} hire remote Middle East Palestine EMEA"
+    snippets.extend(r.get('body', '') for r in _ddg_text(q2, max_results=2))
+    return " ".join(snippets)
 
 # ---------------------------------------------------------------------------
 # The main evaluation entry point

@@ -207,13 +207,34 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
         pattern = '|'.join([rf'\b{w}\b' for w in exclude_words])
         combined_jobs = combined_jobs[~combined_jobs['title'].str.lower().str.contains(pattern, na=False)]
         
-    # 6. TIGHTENED Role Keywords (Tier 3 Item 15)
-    # Replaced broad 'engineer' and 'data' with specific titles so we don't catch "Sales Engineer" or "Data Entry".
+    # 6. Role keyword filter — must contain at least one signal that it's a tech role.
+    # Wide enough to catch every legitimate target role; narrow enough that sales /
+    # marketing / HR / data-entry / customer-success cannot sneak through (those are
+    # blocked by the non-tech title signals earlier and by the seniority filter).
+    # The embedding ranker and AI handle final relevance — this layer just drops
+    # obviously irrelevant stuff before it burns any quota.
     role_keywords = [
-        'software engineer', 'software developer', 'backend', 'frontend', 'fullstack', 
-        'web developer', 'python', 'java ', 'c\\+\\+', 'c#', 'programmer',
-        'ml engineer', 'ai engineer', 'machine learning', 'data scientist', 'data engineer',
-        'artificial intelligence', 'intern'
+        # Core software / web roles
+        'software engineer', 'software developer', 'backend', 'frontend', 'fullstack',
+        'full-stack', 'full stack', 'web developer', 'web engineer', 'programmer',
+        # Languages and frameworks (specific enough to avoid "Java project manager" etc.)
+        'python', 'java developer', 'java engineer', 'javascript', 'typescript',
+        'c\\+\\+', 'c#', 'golang', 'rust', 'kotlin', 'swift',
+        'react', 'node.js', 'django', 'fastapi', 'flask',
+        # ML / AI / Data
+        'ml engineer', 'ai engineer', 'machine learning', 'deep learning',
+        'data scientist', 'data engineer', 'data analyst',
+        'artificial intelligence', 'neural', 'nlp', 'natural language',
+        'computer vision', 'llm', 'large language model', 'generative ai',
+        'research engineer', 'research scientist',
+        # Platform / Infrastructure
+        'devops', 'site reliability', 'sre', 'platform engineer',
+        'cloud engineer', 'cloud developer', 'infrastructure engineer',
+        'systems engineer', 'embedded',
+        # Distinguished IC titles
+        'member of technical staff',
+        # Entry-level catch-all
+        'intern',
     ]
     if "title" in combined_jobs.columns:
         pattern = '|'.join([rf'{w}' for w in role_keywords])
