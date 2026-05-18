@@ -331,7 +331,7 @@ def run_local_pipeline(tracker):
         with open("cv_text.txt", "r", encoding="utf-8") as f:
             cv_text = f.read()
     except:
-        cv_text = "Computer Engineering student, strong in Python, PyTorch, FastAPI, Backend."
+        cv_text = "Computer Engineering student specializing in AI systems engineering, building end-to-end pipelines that integrate LLMs, embeddings, and multi-source data into production-ready backend systems. Experienced deploying Python-based solutions with REST APIs, automated workflows, and real-world constraints. Growing focus on Generative AI, RAG architectures, and scalable intelligent systems."
         
     verdicts, valid_mask, match_pcts = [], [], []
     tech_fits, exp_fits, log_fits = [], [], []

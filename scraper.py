@@ -156,7 +156,7 @@ def run_pipeline(config, tracker):
                 with open("cv_text.txt", "r", encoding="utf-8") as f:
                     cv_text = f.read()
             except:
-                cv_text = "Computer Engineering student, strong in Python, PyTorch, FastAPI, RAG, ML, and Backend Development."
+                cv_text = "Computer Engineering student specializing in AI systems engineering, building end-to-end pipelines that integrate LLMs, embeddings, and multi-source data into production-ready backend systems. Experienced deploying Python-based solutions with REST APIs, automated workflows, and real-world constraints. Growing focus on Generative AI, RAG architectures, and scalable intelligent systems."
 
             # A3: pre-rank by CV-embedding similarity. Top-N + wildcards go to AI;
             # the rest still appear in the email under a "Lower-ranked" section.
