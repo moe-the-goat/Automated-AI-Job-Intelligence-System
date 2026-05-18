@@ -77,6 +77,81 @@
       "results_wanted": 20,
       "hours_old": 24,
       "country_indeed": "USA"
+    },
+
+    {
+      "site_name": ["linkedin", "indeed"],
+      "search_term": "junior software engineer remote",
+      "location": "Germany",
+      "is_remote": true,
+      "results_wanted": 25,
+      "hours_old": 24,
+      "country_indeed": "Germany"
+    },
+    {
+      "site_name": ["linkedin", "indeed"],
+      "search_term": "python developer remote",
+      "location": "Netherlands",
+      "is_remote": true,
+      "results_wanted": 25,
+      "hours_old": 24,
+      "country_indeed": "Netherlands"
+    },
+    {
+      "site_name": ["linkedin", "indeed"],
+      "search_term": "software engineer intern",
+      "location": "Ireland",
+      "job_type": "internship",
+      "is_remote": true,
+      "results_wanted": 20,
+      "hours_old": 24,
+      "country_indeed": "Ireland"
+    },
+    {
+      "site_name": ["linkedin", "indeed"],
+      "search_term": "junior backend engineer",
+      "location": "Canada",
+      "is_remote": true,
+      "results_wanted": 25,
+      "hours_old": 24,
+      "country_indeed": "Canada"
+    },
+    {
+      "site_name": ["linkedin", "indeed"],
+      "search_term": "software engineer intern remote",
+      "location": "Brazil",
+      "job_type": "internship",
+      "is_remote": true,
+      "results_wanted": 25,
+      "hours_old": 24,
+      "country_indeed": "Brazil"
+    },
+    {
+      "site_name": ["linkedin", "indeed"],
+      "search_term": "junior software engineer remote",
+      "location": "Mexico",
+      "is_remote": true,
+      "results_wanted": 25,
+      "hours_old": 24,
+      "country_indeed": "Mexico"
+    },
+    {
+      "site_name": ["linkedin", "indeed"],
+      "search_term": "AI engineer remote",
+      "location": "United Arab Emirates",
+      "is_remote": true,
+      "results_wanted": 20,
+      "hours_old": 24,
+      "country_indeed": "UAE"
+    },
+    {
+      "site_name": ["linkedin", "indeed"],
+      "search_term": "machine learning engineer",
+      "location": "United Kingdom",
+      "is_remote": true,
+      "results_wanted": 25,
+      "hours_old": 24,
+      "country_indeed": "UK"
     }
   ],
   "output": {

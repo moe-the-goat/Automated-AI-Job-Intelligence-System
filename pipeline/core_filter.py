@@ -87,8 +87,11 @@ def _is_english_title(title):
 # 30-char floor because descriptions can contain English boilerplate (job title
 # + buzzwords) ahead of a foreign-language requirements section. We need
 # enough body text to be confident a *non-English* verdict reflects the actual
-# job content. Below this length, we skip the check.
-_DESCRIPTION_LANGDETECT_MIN_CHARS = 400
+# job content. Lowered 400 -> 300 on 2026-05-17 after the user reported a few
+# short-description non-English jobs (incl. a German-mention "CHEFS CULINAR
+# Data Scientist (m/w/d)") slipping into lower-ranked. 300 still gives
+# langdetect enough text to be confident.
+_DESCRIPTION_LANGDETECT_MIN_CHARS = 300
 
 # Strip HTML so descriptions like "<p>Wir suchen einen Entwickler...</p>" don't
 # get the tags confusing langdetect into "English" because of `<p>` / `<div>`.
@@ -309,5 +312,32 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
     if "title" in combined_jobs.columns:
         pattern = '|'.join([rf'{w}' for w in role_keywords])
         combined_jobs = combined_jobs[combined_jobs['title'].str.lower().str.contains(pattern, na=False)]
+
+    # 7. Non-tech intern blockers. The "intern" catch-all in step 6 is broad —
+    # too broad on its own. Real failures observed on 2026-05-17:
+    #   - "Graduate Research Intern, Biology"     (pure science, not SWE)
+    #   - "Business Analyst Intern (Entry Level)" (business analytics, not data)
+    # Strategy: if "intern" is in the title AND any of these non-tech signals
+    # ALSO appears, drop the row. Tech-keyword positives in step 6 alone aren't
+    # enough — the title has to be a tech role on its own merits.
+    nontech_intern_blockers = [
+        'biology', 'biomed', 'biotech', 'biochem', 'pharma', 'medical', 'nursing',
+        'business analyst', 'business analytics',
+        'social media', 'communications intern', 'pr intern', 'public relations',
+        'hr intern', 'human resources', 'recruiting intern',
+        'accounting', 'finance intern', 'tax intern', 'audit intern',
+        'legal intern', 'law intern',
+        'marketing analyst intern', 'brand intern',
+    ]
+    if "title" in combined_jobs.columns:
+        title_lower = combined_jobs['title'].astype(str).str.lower()
+        has_intern = title_lower.str.contains(r'\bintern\b', na=False, regex=True)
+        blocker_pattern = '|'.join(nontech_intern_blockers)
+        has_blocker = title_lower.str.contains(blocker_pattern, na=False)
+        before = len(combined_jobs)
+        combined_jobs = combined_jobs[~(has_intern & has_blocker)]
+        dropped = before - len(combined_jobs)
+        if dropped:
+            print(f"Non-tech intern filter: dropped {dropped} title(s) (biology / business / etc.).")
 
     return combined_jobs

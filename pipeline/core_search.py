@@ -267,3 +267,67 @@ def _split_wwr_title(raw):
         return ("", raw or "")
     company, _, title = raw.partition(":")
     return (company.strip(), title.strip())
+
+
+# ---------------------------------------------------------------------------
+# Wave 4 — Y Combinator's Work at a Startup
+# ---------------------------------------------------------------------------
+
+# Work at a Startup (YC's job board) doesn't expose a clean public REST API.
+# Instead we use the same BS4-before-Jina tiered extraction we use for ATS-
+# less Palestinian companies — fetch the listings page, let BeautifulSoup pull
+# the visible text, then feed it to Gemini for structuring. This gives us
+# fresh YC-backed remote roles without parsing brittle HTML directly.
+
+YC_WAAS_BASE_URL = "https://www.workatastartup.com/jobs"
+
+
+def fetch_yc_workatastartup_jobs(query="software engineer", remote=True, gemini_api_key=None):
+    """Fetch YC-funded startup jobs via Work at a Startup.
+
+    Uses the existing tiered (BS4 -> Jina -> Gemini) extractor from core_ats so
+    we don't duplicate scraping logic. Returns an empty DataFrame on any
+    failure — same contract as the other fetchers.
+
+    Args:
+        query: search term (default "software engineer"). YC's UI filters by
+               role title; we pass it through to the URL.
+        remote: when True, filters to remote-friendly listings.
+        gemini_api_key: required for the Gemini extraction step. If absent,
+               the function short-circuits to an empty DataFrame (so QA
+               imports stay cheap and CI without a key still passes).
+    """
+    import os
+    api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        print("YC Work at a Startup: GEMINI_API_KEY missing, skipping.")
+        return pd.DataFrame()
+    try:
+        from urllib.parse import urlencode
+        from pipeline.core_ats import extract_jobs_from_careers_page
+        params = {"query": query}
+        if remote:
+            params["remote"] = "yes"
+        url = f"{YC_WAAS_BASE_URL}?{urlencode(params)}"
+        print(f"Fetching YC Work at a Startup: {url}")
+        jobs = extract_jobs_from_careers_page(url, "YC Startup Network", api_key)
+        if not jobs:
+            print("YC Work at a Startup: no jobs extracted.")
+            return pd.DataFrame()
+        # Normalize the field set so the rest of the pipeline can concat
+        # without surprises. The extractor returns dicts with title/company/
+        # location/job_url/description/job_type/date_posted already.
+        out = []
+        for j in jobs:
+            out.append({
+                "title": j.get("title", ""),
+                "company": j.get("company", "") or "YC Startup",
+                "location": j.get("location", "") or "Remote",
+                "job_url": j.get("job_url", ""),
+                "description": j.get("description", ""),
+                "date_posted": j.get("date_posted", ""),
+            })
+        return pd.DataFrame(out)
+    except Exception as e:
+        print(f"Failed to fetch YC Work at a Startup jobs: {str(e)[:200]}")
+        return pd.DataFrame()

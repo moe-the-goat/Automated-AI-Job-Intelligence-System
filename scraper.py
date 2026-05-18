@@ -12,6 +12,7 @@ from pipeline.core_search import (
     fetch_himalayas_jobs,
     fetch_themuse_jobs,
     fetch_wwr_jobs,
+    fetch_yc_workatastartup_jobs,
 )
 from pipeline.core_filter import filter_api_jobs, apply_pipeline_filters, JobTracker
 from pipeline.core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
@@ -54,10 +55,14 @@ def main():
 # than the 24h JobSpy window to surface more remote jobs from non-LinkedIn sources.
 API_HOURS_OLD = 72
 
-# A3: only the top N jobs (by CV-embedding similarity) get the expensive AI verdict.
-# A small wildcard sample is also evaluated so a poorly-tuned embedding doesn't
-# permanently hide a great long-tail match.
-AI_EVAL_TOP_N = 30
+# A3: only the top N jobs (by weighted CV-embedding similarity) get the AI verdict.
+# Ranking multiplies raw similarity by region+trust weights so EU / Americas /
+# Middle East and trusted big-name companies sort above India-only postings at
+# equal raw similarity. A wildcard sample is also evaluated so an imperfectly-
+# tuned weighting doesn't permanently hide a long-tail match.
+# Top_N bumped 30 -> 45 on 2026-05-17 after the user observed real-good jobs
+# (MixRank Brazil/Mexico/Argentina) ranking just outside the previous cutoff.
+AI_EVAL_TOP_N = 45
 WILDCARD_COUNT = 5
 
 def run_pipeline(config, tracker):
@@ -93,7 +98,9 @@ def run_pipeline(config, tracker):
     if config.get("searches"):
         max_hours = max([s.get("hours_old", 24) for s in config.get("searches", [])])
 
-    # 2. Secondary API Scrapes
+    # 2. Secondary API Scrapes. YC Work at a Startup uses Jina+Gemini extraction
+    # so it doesn't take a `hours_old` filter — its results are inherently fresh
+    # (the site only lists currently-open roles). We bypass filter_api_jobs for it.
     for name, fetch_fn in [
         ("Remotive", fetch_remotive_jobs),
         ("Arbeitnow", fetch_arbeitnow_jobs),
@@ -112,6 +119,20 @@ def run_pipeline(config, tracker):
         print(f"  {name}: {len(raw)} raw -> {len(filtered)} after role+recency filter (last {API_HOURS_OLD}h).")
         if not filtered.empty:
             all_jobs_dfs.append(filtered)
+
+    # YC Work at a Startup — needs Gemini key for the tiered extraction step.
+    # If the key isn't set or extraction fails, the fetcher returns an empty
+    # DataFrame and the rest of the pipeline continues normally.
+    yc_key = os.environ.get("GEMINI_API_KEY", "")
+    if yc_key:
+        print("Fetching from YC Work at a Startup...")
+        yc_raw = fetch_yc_workatastartup_jobs(gemini_api_key=yc_key)
+        if not yc_raw.empty:
+            # No recency filter — YC's site only lists currently-open roles.
+            print(f"  YC Work at a Startup: {len(yc_raw)} jobs.")
+            all_jobs_dfs.append(yc_raw)
+        else:
+            print("  YC Work at a Startup: returned 0 jobs.")
             
     # 3. Compile and Filter
     if all_jobs_dfs:

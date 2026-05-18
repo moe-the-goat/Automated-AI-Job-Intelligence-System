@@ -5,13 +5,24 @@ Pre-rank jobs by semantic similarity against the candidate's CV before deciding
 which ones deserve a full Gemini verdict. The CV embedding is content-hashed
 and cached so we only re-embed when cv_text.txt actually changes.
 
+Ranking key (since 2026-05-17):
+  weighted_score = similarity * region_weight * trust_weight
+
+where region_weight is in [0.50, 1.30] (heavy deweight on India / sanctioned
+regions, boost on EU / Americas / Middle East / fully-remote) and trust_weight
+is 1.25 for `pre_flagged_trusted=True` rows, 1.00 otherwise. The raw
+`similarity` column is kept for visibility/debug; `weighted_score` drives the
+sort order and the top-N cutoff for AI evaluation.
+
 Public API:
 - get_cv_embedding(cv_text, api_key)         -> list[float]
 - embed_jobs(rows, api_key)                  -> list[list[float] | None]
 - cosine_similarity(a, b)                    -> float
 - rank_by_similarity(cv_vec, job_vecs)       -> list[float]
 - attach_similarity(combined_jobs, cv_text, api_key, throttle_seconds=0.05)
-                                             -> dataframe with 'similarity' column
+                                             -> dataframe with `similarity`
+                                                AND `weighted_score` columns,
+                                                sorted by `weighted_score` DESC
 
 Heavy SDK + numpy imports are lazy so the parser/renderer tests can import this
 module without the full runtime stack installed.
@@ -140,26 +151,42 @@ def rank_by_similarity(cv_vec, job_vecs):
 
 
 def attach_similarity(combined_jobs, cv_text, api_key, throttle_seconds=EMBED_THROTTLE_SECONDS):
-    """Add a `similarity` column to `combined_jobs` and return it sorted DESC.
+    """Add `similarity` + `weighted_score` columns and return sorted by weighted DESC.
+
+    `similarity`     — raw cosine sim against the CV embedding (for debugging /
+                       email visibility).
+    `weighted_score` — similarity * region_weight * trust_weight. Used for the
+                       top-N cutoff that decides which jobs reach the AI.
 
     Best-effort: if embedding fails entirely (no API key, no network), every
-    row gets similarity=0.0 and the original order is preserved — callers can
-    still take the top-N and fall through to full AI eval on everyone.
+    row gets similarity=0.0 and weighted_score gets the weight × 0.0 = 0.0,
+    so the region/trust ordering still helps tie-break which jobs the caller
+    might choose to send to the AI anyway.
     """
     if combined_jobs.empty:
         return combined_jobs
 
+    from pipeline.region_weighting import compute_combined_weight
+
     cv_vec = get_cv_embedding(cv_text, api_key)
     if cv_vec is None:
-        combined_jobs = combined_jobs.copy()
-        combined_jobs["similarity"] = 0.0
-        return combined_jobs
+        out = combined_jobs.copy()
+        out["similarity"] = 0.0
+        # Even without similarity, we can compute weights so the rest of the
+        # pipeline isn't surprised by missing columns.
+        weights = [compute_combined_weight(r) for r in out.to_dict("records")]
+        out["weighted_score"] = [0.0 for _ in weights]
+        return out
 
     rows = combined_jobs.to_dict("records")
     job_vecs = embed_jobs(rows, api_key, throttle_seconds=throttle_seconds)
     sims = rank_by_similarity(cv_vec, job_vecs)
+    weights = [compute_combined_weight(r) for r in rows]
+    weighted = [s * w for s, w in zip(sims, weights)]
 
     out = combined_jobs.copy()
     out["similarity"] = sims
-    out = out.sort_values("similarity", ascending=False).reset_index(drop=True)
+    out["weighted_score"] = weighted
+    # Sort by weighted_score so the region/trust biases drive the top-N cutoff.
+    out = out.sort_values("weighted_score", ascending=False).reset_index(drop=True)
     return out
