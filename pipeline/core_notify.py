@@ -7,6 +7,10 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timezone
 
+from pipeline.logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 
 def _normalize_repo(repo):
     """Coerce a repo value into `owner/name` form.
@@ -259,7 +263,7 @@ def send_email(subject, html_content, email_settings):
     app_password = os.environ.get("EMAIL_APP_PASSWORD")
     
     if not sender_email or not app_password:
-        print("Error: SENDER_EMAIL or EMAIL_APP_PASSWORD environment variables are not set.")
+        logger.error("SENDER_EMAIL or EMAIL_APP_PASSWORD environment variables are not set.")
         return
 
     msg = MIMEMultipart("alternative")
@@ -273,9 +277,9 @@ def send_email(subject, html_content, email_settings):
         with smtplib.SMTP_SSL(email_settings["smtp_server"], email_settings["smtp_port"]) as server:
             server.login(sender_email, app_password)
             server.send_message(msg)
-        print("Email sent successfully!")
+        logger.info("Email sent successfully.")
     except Exception as e:
-        print(f"Failed to send email: {e}")
+        logger.error("Failed to send email: %s", e)
 
 def _render_md_table(df):
     """Render one section's table in Markdown with the rich schema."""
@@ -341,7 +345,7 @@ def create_github_issue(title, body, repo=None, token=None):
     repo = _normalize_repo(repo or os.environ.get("GITHUB_REPOSITORY"))
 
     if not token or not repo:
-        print("Error: no GitHub token/repo available for issue creation.")
+        logger.error("No GitHub token/repo available for issue creation.")
         return
 
     url = f"https://api.github.com/repos/{repo}/issues"
@@ -354,9 +358,9 @@ def create_github_issue(title, body, repo=None, token=None):
     try:
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
-        print(f"GitHub Issue created in {repo}: {response.json().get('html_url')}")
+        logger.info("GitHub Issue created in %s: %s", repo, response.json().get('html_url'))
     except Exception as e:
-        print(f"Failed to create GitHub Issue in {repo}: {e}")
+        logger.error("Failed to create GitHub Issue in %s: %s", repo, e)
 
 def cleanup_old_github_issues(days_old=5, repo=None, token=None):
     """Closes managed bot-issues older than `days_old` calendar days.
@@ -398,11 +402,11 @@ def cleanup_old_github_issues(days_old=5, repo=None, token=None):
             age_days = (now.date() - created_at.date()).days
             if age_days >= days_old:
                 issue_num = issue.get("number")
-                print(f"Closing old issue #{issue_num} '{title}' in {repo} (Age: {age_days} days)")
+                logger.info("Closing old issue #%s '%s' in %s (Age: %d days)", issue_num, title, repo, age_days)
                 patch_url = f"https://api.github.com/repos/{repo}/issues/{issue_num}"
                 requests.patch(patch_url, headers=headers, json={"state": "closed"})
                 closed_count += 1
-        print(f"GitHub cleanup done in {repo}. Closed {closed_count} stale issue(s).")
+        logger.info("GitHub cleanup done in %s. Closed %d stale issue(s).", repo, closed_count)
 
     except Exception as e:
-        print(f"Failed to cleanup old GitHub issues: {e}")
+        logger.error("Failed to cleanup old GitHub issues: %s", e)

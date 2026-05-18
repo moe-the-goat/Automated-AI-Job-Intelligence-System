@@ -2,6 +2,10 @@ import requests
 import pandas as pd
 from jobspy import scrape_jobs
 
+from pipeline.logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 """
 CORE SEARCH MODULE
 ------------------
@@ -42,7 +46,7 @@ def fetch_remotive_jobs():
             })
         return pd.DataFrame(parsed_jobs)
     except Exception as e:
-        print(f"Failed to fetch Remotive jobs: {e}")
+        logger.warning("Failed to fetch Remotive jobs: %s", e)
         return pd.DataFrame()
 
 def fetch_arbeitnow_jobs():
@@ -65,7 +69,7 @@ def fetch_arbeitnow_jobs():
                 })
         return pd.DataFrame(parsed_jobs)
     except Exception as e:
-        print(f"Failed to fetch Arbeitnow jobs: {e}")
+        logger.warning("Failed to fetch Arbeitnow jobs: %s", e)
         return pd.DataFrame()
 
 def fetch_jobicy_jobs():
@@ -96,7 +100,7 @@ def fetch_jobicy_jobs():
             })
         return pd.DataFrame(parsed_jobs)
     except Exception as e:
-        print(f"Failed to fetch Jobicy jobs: {e}")
+        logger.warning("Failed to fetch Jobicy jobs: %s", e)
         return pd.DataFrame()
 
 def fetch_remoteok_jobs():
@@ -122,7 +126,7 @@ def fetch_remoteok_jobs():
             })
         return pd.DataFrame(parsed_jobs)
     except Exception as e:
-        print(f"Failed to fetch RemoteOK jobs: {e}")
+        logger.warning("Failed to fetch RemoteOK jobs: %s", e)
         return pd.DataFrame()
 
 
@@ -146,7 +150,7 @@ def fetch_himalayas_jobs(limit=100):
         payload = response.json()
         return parse_himalayas_payload(payload)
     except Exception as e:
-        print(f"Failed to fetch Himalayas jobs: {e}")
+        logger.warning("Failed to fetch Himalayas jobs: %s", e)
         return pd.DataFrame()
 
 
@@ -189,7 +193,7 @@ def fetch_themuse_jobs(page=0, category=None):
         payload = response.json()
         return parse_themuse_payload(payload)
     except Exception as e:
-        print(f"Failed to fetch The Muse jobs: {e}")
+        logger.warning("Failed to fetch The Muse jobs: %s", e)
         return pd.DataFrame()
 
 
@@ -226,14 +230,14 @@ def fetch_wwr_jobs():
     try:
         import feedparser  # lazy import — keeps QA imports cheap
     except ImportError:
-        print("Failed to fetch WWR jobs: feedparser not installed")
+        logger.warning("Failed to fetch WWR jobs: feedparser not installed")
         return pd.DataFrame()
     try:
         url = "https://weworkremotely.com/categories/remote-programming-jobs.rss"
         feed = feedparser.parse(url)
         return parse_wwr_feed(feed)
     except Exception as e:
-        print(f"Failed to fetch WWR jobs: {e}")
+        logger.warning("Failed to fetch WWR jobs: %s", e)
         return pd.DataFrame()
 
 
@@ -300,7 +304,7 @@ def fetch_yc_workatastartup_jobs(query="software engineer", remote=True, gemini_
     import os
     api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
-        print("YC Work at a Startup: GEMINI_API_KEY missing, skipping.")
+        logger.info("YC Work at a Startup: GEMINI_API_KEY missing, skipping.")
         return pd.DataFrame()
     try:
         from urllib.parse import urlencode
@@ -309,10 +313,10 @@ def fetch_yc_workatastartup_jobs(query="software engineer", remote=True, gemini_
         if remote:
             params["remote"] = "yes"
         url = f"{YC_WAAS_BASE_URL}?{urlencode(params)}"
-        print(f"Fetching YC Work at a Startup: {url}")
+        logger.info("Fetching YC Work at a Startup: %s", url)
         jobs = extract_jobs_from_careers_page(url, "YC Startup Network", api_key)
         if not jobs:
-            print("YC Work at a Startup: no jobs extracted.")
+            logger.info("YC Work at a Startup: no jobs extracted.")
             return pd.DataFrame()
         # Normalize the field set so the rest of the pipeline can concat
         # without surprises. The extractor returns dicts with title/company/
@@ -329,5 +333,5 @@ def fetch_yc_workatastartup_jobs(query="software engineer", remote=True, gemini_
             })
         return pd.DataFrame(out)
     except Exception as e:
-        print(f"Failed to fetch YC Work at a Startup jobs: {str(e)[:200]}")
+        logger.warning("Failed to fetch YC Work at a Startup jobs: %s", str(e)[:200])
         return pd.DataFrame()

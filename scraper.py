@@ -4,6 +4,10 @@ import pandas as pd
 from datetime import datetime
 from jobspy import scrape_jobs
 
+from pipeline.logging_setup import configure_logging, get_logger
+
+logger = get_logger(__name__)
+
 from pipeline.core_search import (
     fetch_remotive_jobs,
     fetch_arbeitnow_jobs,
@@ -34,6 +38,7 @@ def load_config(config_path="config.json"):
         return json.load(f)
 
 def main():
+    configure_logging()
     config = load_config()
     tracker = JobTracker()
     try:
@@ -46,7 +51,7 @@ def main():
         # pre-existing issues there fade out within 2 days.
         logs_repo = os.environ.get("LOGS_REPO")
         logs_token = os.environ.get("LOGS_REPO_TOKEN")
-        print("Running GitHub Issue cleanup...")
+        logger.info("Running GitHub Issue cleanup...")
         if logs_repo and logs_token:
             cleanup_old_github_issues(days_old=2, repo=logs_repo, token=logs_token)
         cleanup_old_github_issues(days_old=2)
@@ -68,14 +73,14 @@ WILDCARD_COUNT = 5
 def run_pipeline(config, tracker):
     all_jobs_dfs = []
 
-    print("Starting job scrape...")
+    logger.info("Starting job scrape...")
     
     # Track statistics for the daily email header (Tier 3 Item 14)
     stats = {"scraped": 0, "filtered": 0, "approved": 0}
     
     # 1. JobSpy Scrapes (LinkedIn, Glassdoor, Indeed)
     for search in config.get("searches", []):
-        print(f"Scraping for: {search.get('search_term')} in {search.get('location')}...")
+        logger.info("Scraping for: %s in %s...", search.get('search_term'), search.get('location'))
         try:
             jobs = scrape_jobs(
                 site_name=search.get("site_name", ["linkedin", "indeed", "glassdoor"]),
@@ -88,10 +93,10 @@ def run_pipeline(config, tracker):
                 hours_old=search.get("hours_old", 24),
                 country_indeed=search.get("country_indeed", "USA")
             )
-            print(f"Found {len(jobs)} jobs for this search.")
+            logger.info("Found %d jobs for this search.", len(jobs))
             all_jobs_dfs.append(jobs)
         except Exception as e:
-            print(f"Error scraping for {search.get('search_term')}: {e}")
+            logger.warning("Error scraping for %s: %s", search.get('search_term'), e)
             
     # Determine the maximum hours_old from config to use for APIs
     max_hours = 24
@@ -110,13 +115,13 @@ def run_pipeline(config, tracker):
         ("TheMuse", fetch_themuse_jobs),
         ("WWR", fetch_wwr_jobs),
     ]:
-        print(f"Fetching from {name} API...")
+        logger.info("Fetching from %s API...", name)
         raw = fetch_fn()
         if raw.empty:
-            print(f"  {name}: returned 0 jobs.")
+            logger.info("%s: returned 0 jobs.", name)
             continue
         filtered = filter_api_jobs(raw, hours_old=API_HOURS_OLD)
-        print(f"  {name}: {len(raw)} raw -> {len(filtered)} after role+recency filter (last {API_HOURS_OLD}h).")
+        logger.info("%s: %d raw -> %d after role+recency filter (last %dh).", name, len(raw), len(filtered), API_HOURS_OLD)
         if not filtered.empty:
             all_jobs_dfs.append(filtered)
 
@@ -125,14 +130,14 @@ def run_pipeline(config, tracker):
     # DataFrame and the rest of the pipeline continues normally.
     yc_key = os.environ.get("GEMINI_API_KEY", "")
     if yc_key:
-        print("Fetching from YC Work at a Startup...")
+        logger.info("Fetching from YC Work at a Startup...")
         yc_raw = fetch_yc_workatastartup_jobs(gemini_api_key=yc_key)
         if not yc_raw.empty:
             # No recency filter — YC's site only lists currently-open roles.
-            print(f"  YC Work at a Startup: {len(yc_raw)} jobs.")
+            logger.info("YC Work at a Startup: %d jobs.", len(yc_raw))
             all_jobs_dfs.append(yc_raw)
         else:
-            print("  YC Work at a Startup: returned 0 jobs.")
+            logger.info("YC Work at a Startup: returned 0 jobs.")
             
     # 3. Compile and Filter
     if all_jobs_dfs:
@@ -142,7 +147,7 @@ def run_pipeline(config, tracker):
         # Apply the gauntlet of deterministic filters (tracker drops seen URLs first)
         combined_jobs = apply_pipeline_filters(combined_jobs, tracker=tracker)
         stats['filtered'] = len(combined_jobs)
-        print(f"Total unique, unseen jobs surviving the pre-filters: {stats['filtered']}")
+        logger.info("Total unique, unseen jobs surviving the pre-filters: %d", stats['filtered'])
         
         if not combined_jobs.empty:
             # 4. AI Evaluation
@@ -163,17 +168,17 @@ def run_pipeline(config, tracker):
                 wildcards = rest.sample(n_wild, random_state=42) if n_wild > 0 else rest.iloc[:0]
                 ai_eval_set = pd.concat([top_n, wildcards]).reset_index(drop=True)
                 lower_ranked = rest.drop(wildcards.index).reset_index(drop=True)
-                print(
-                    f"Embedding pre-rank: {len(ai_eval_set)} jobs to AI "
-                    f"(top {AI_EVAL_TOP_N} + {n_wild} wildcards); {len(lower_ranked)} lower-ranked deferred."
+                logger.info(
+                    "Embedding pre-rank: %d jobs to AI (top %d + %d wildcards); %d lower-ranked deferred.",
+                    len(ai_eval_set), AI_EVAL_TOP_N, n_wild, len(lower_ranked),
                 )
             else:
                 ai_eval_set = combined_jobs
                 lower_ranked = pd.DataFrame()
-                print(f"Embedding pre-rank: {len(ai_eval_set)} jobs (under threshold, evaluating all).")
+                logger.info("Embedding pre-rank: %d jobs (under threshold, evaluating all).", len(ai_eval_set))
             combined_jobs = ai_eval_set
 
-            print("Running AI Job Validation 1-by-1 (this may take a while)...")
+            logger.info("Running AI Job Validation 1-by-1 (this may take a while)...")
             verdicts, valid_mask, match_pcts = [], [], []
             tech_fits, exp_fits, log_fits = [], [], []
             comps, efforts, suspiciouses, scams = [], [], [], []
@@ -184,7 +189,7 @@ def run_pipeline(config, tracker):
                 is_viable, reason = quick_viability_check(row)
                 if not is_viable:
                     prescreen_skipped += 1
-                    print(f"  [SKIP] {str(row.get('title', ''))[:55]:<55} -> {reason}")
+                    logger.info("[SKIP] %-55s -> %s", str(row.get('title', ''))[:55], reason)
                     result = skipped_result(reason)
                     evaluated = True  # deterministic skip — mark seen
                 else:
@@ -205,7 +210,7 @@ def run_pipeline(config, tracker):
                 if evaluated:
                     tracker.mark_seen(str(row.get("job_url", "")))
 
-            print(f"Pre-screen summary: skipped {prescreen_skipped} / {len(combined_jobs)} jobs before AI eval.")
+            logger.info("Pre-screen summary: skipped %d / %d jobs before AI eval.", prescreen_skipped, len(combined_jobs))
             combined_jobs['ai_verdict'] = verdicts
             combined_jobs['match_percentage'] = match_pcts
             combined_jobs['tech_fit'] = tech_fits
@@ -220,7 +225,7 @@ def run_pipeline(config, tracker):
             # Filter down to only AI-approved jobs
             combined_jobs = combined_jobs[valid_mask]
             stats['approved'] = len(combined_jobs)
-            print(f"Total jobs remaining after AI validation: {stats['approved']}")
+            logger.info("Total jobs remaining after AI validation: %d", stats['approved'])
             
             # 5. Output and Notification
             # Split into internships and jobs
@@ -246,9 +251,9 @@ def run_pipeline(config, tracker):
                     token=os.environ.get("LOGS_REPO_TOKEN"),
                 )
         else:
-            print("No new jobs survived the filters today.")
+            logger.info("No new jobs survived the filters today.")
     else:
-        print("No job data collected from any sources.")
+        logger.warning("No job data collected from any sources.")
 
 if __name__ == "__main__":
     main()

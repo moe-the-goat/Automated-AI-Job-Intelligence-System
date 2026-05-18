@@ -27,6 +27,12 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
+    # Gate the daily run on a fresh QA pass. If a subtle regression slipped
+    # through code review (or a non-code change like the IT Companies xlsx
+    # broke an assumption), abort BEFORE dispatching a garbage email.
+    - name: QA gate
+      run: python QA/run_all.py
+
     - name: Restore seen-jobs cache
       uses: actions/cache@v4
       with:

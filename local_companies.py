@@ -9,6 +9,10 @@ from urllib.parse import urlparse
 # actually need them so the pure helpers (linkedin_post_date, handle matcher)
 # can be unit-tested without those packages installed.
 
+from pipeline.logging_setup import configure_logging, get_logger
+
+logger = get_logger(__name__)
+
 from pipeline.core_filter import apply_pipeline_filters, JobTracker
 from pipeline.core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
 from pipeline.core_ats import (
@@ -97,10 +101,10 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
     try:
         if linkedin_handle:
             q1 = f'site:linkedin.com/company/{linkedin_handle}/posts (hiring OR vacancy OR "looking for" OR job)'
-            print(f"Searching LinkedIn Posts (handle '{linkedin_handle}') for: {company_name}...")
+            logger.info("Searching LinkedIn Posts (handle '%s') for: %s...", linkedin_handle, company_name)
         else:
             q1 = f'site:linkedin.com/posts {short_name} (hiring OR vacancy OR "looking for" OR job)'
-            print(f"Searching LinkedIn Posts for: {company_name} (using '{short_name}')...")
+            logger.info("Searching LinkedIn Posts for: %s (using '%s')...", company_name, short_name)
         res1 = ddgs.text(q1, max_results=3, timelimit="w") # past week
         cutoff = datetime.now(timezone.utc) - timedelta(days=LOCAL_LOOKBACK_DAYS)
         for r in res1:
@@ -112,12 +116,12 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
             # from the activity ID itself and drop anything older than the lookback window.
             post_date = linkedin_post_date(link)
             if post_date and post_date < cutoff:
-                print(f"  Skipping old post for {company_name}: posted {post_date.date()}")
+                logger.info("Skipping old post for %s: posted %s", company_name, post_date.date())
                 continue
             # Drop unrelated companies that match only because the first word is generic
             # (e.g. 'Future' matching 'pankh-workforce-solution' on a post mentioning FIS).
             if not linkedin_handle_matches(link, company_name):
-                print(f"  Skipping unrelated post for {company_name}: handle mismatch ({link[:80]})")
+                logger.info("Skipping unrelated post for %s: handle mismatch (%s)", company_name, link[:80])
                 continue
 
             jobs_found.append({
@@ -129,13 +133,13 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
                 "job_type": "fulltime"
             })
     except Exception as e:
-        print(f"DDG LinkedIn search failed for {company_name}: {e}")
+        logger.warning("DDG LinkedIn search failed for %s: %s", company_name, e)
 
     # 2. Search Company Website
     if domain:
         try:
             q2 = f'site:{domain} (hiring OR careers OR jobs OR vacancy)'
-            print(f"Searching Website ({domain}) for: {company_name}...")
+            logger.info("Searching Website (%s) for: %s...", domain, company_name)
             res2 = ddgs.text(q2, max_results=3, timelimit="w") # past week
             for r in res2:
                 title = r.get('title', '')
@@ -149,7 +153,7 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
                 # logistics, not a job. is_job_url_like requires the path to
                 # look like an actual job-posting page.
                 if not is_job_url_like(link):
-                    print(f"  Skipping non-job URL for {company_name}: {link[:80]}")
+                    logger.info("Skipping non-job URL for %s: %s", company_name, link[:80])
                     continue
 
                 jobs_found.append({
@@ -161,7 +165,7 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
                     "job_type": "fulltime"
                 })
         except Exception as e:
-            print(f"DDG Website search failed for {company_name}: {e}")
+            logger.warning("DDG Website search failed for %s: %s", company_name, e)
             
     time.sleep(1) # Be nice to DDG API
     return jobs_found
@@ -183,12 +187,13 @@ def load_local_companies():
                 df.columns = [str(c).strip().lower() for c in df.columns]
                 dfs.append(df)
             except Exception as e:
-                print(f"Error loading {f}: {e}")
+                logger.warning("Error loading %s: %s", f, e)
     if dfs:
         return pd.concat(dfs, ignore_index=True)
     return pd.DataFrame()
 
 def main():
+    configure_logging()
     tracker = JobTracker()
     try:
         run_local_pipeline(tracker)
@@ -199,16 +204,16 @@ def main():
         # (default token) so historical issues there also fade out in 2 days.
         logs_repo = os.environ.get("LOGS_REPO")
         logs_token = os.environ.get("LOGS_REPO_TOKEN")
-        print("Running GitHub Issue cleanup...")
+        logger.info("Running GitHub Issue cleanup...")
         if logs_repo and logs_token:
             cleanup_old_github_issues(days_old=2, repo=logs_repo, token=logs_token)
         cleanup_old_github_issues(days_old=2)
 
 def run_local_pipeline(tracker):
-    print("Starting Local Companies Scrape...")
+    logger.info("Starting Local Companies Scrape...")
     companies_df = load_local_companies()
     if companies_df.empty:
-        print("No companies loaded. Ensure the Excel files exist.")
+        logger.warning("No companies loaded. Ensure the Excel files exist.")
         return
         
     all_raw_jobs = []
@@ -248,11 +253,11 @@ def run_local_pipeline(tracker):
                     jina_fallback=bool(gemini_key),
                 )
                 if ats_jobs:
-                    print(f"  ATS yielded {len(ats_jobs)} job(s) for {company_name}")
+                    logger.info("ATS yielded %d job(s) for %s", len(ats_jobs), company_name)
                     stats["ats_jobs"] += len(ats_jobs)
                     all_raw_jobs.extend(ats_jobs)
             except Exception as e:
-                print(f"ATS scrape failed for {company_name}: {str(e)[:120]}")
+                logger.warning("ATS scrape failed for %s: %s", company_name, str(e)[:120])
 
         # DuckDuckGo Scrapes (now precision-boosted with linkedin_handle when available)
         ddg_jobs = ddg_search_for_jobs(company_name, domain, linkedin_handle=linkedin_handle)
@@ -261,7 +266,7 @@ def run_local_pipeline(tracker):
         # JobSpy Scrape (Jobs Section)
         try:
             from jobspy import scrape_jobs  # lazy import
-            print(f"Running JobSpy for {company_name}...")
+            logger.info("Running JobSpy for %s...", company_name)
             jobspy_res = scrape_jobs(
                 site_name=["linkedin"],
                 search_term=company_name,
@@ -276,12 +281,12 @@ def run_local_pipeline(tracker):
                 if company_name.lower() in found_company or found_company in company_name.lower():
                     all_raw_jobs.append(j_row.to_dict())
         except Exception as e:
-            print(f"JobSpy failed for {company_name}: {e}")
+            logger.warning("JobSpy failed for %s: %s", company_name, e)
 
     # Persist ATS cache for future runs (so re-detection is rare).
     ats_cache.save()
     if stats["ats_jobs"]:
-        print(f"ATS sweep contributed {stats['ats_jobs']} job(s) this run.")
+        logger.info("ATS sweep contributed %d job(s) this run.", stats['ats_jobs'])
 
     # Ghost-listing check: DDG/Bing index stale URLs for weeks after a company
     # removes a job. Batch HEAD-probe every DDG-sourced URL and drop the dead
@@ -296,7 +301,7 @@ def run_local_pipeline(tracker):
     ]
     if ddg_urls:
         unique_urls = list(set(ddg_urls))
-        print(f"Verifying {len(unique_urls)} DDG-sourced URL(s) via HEAD probe...")
+        logger.info("Verifying %d DDG-sourced URL(s) via HEAD probe...", len(unique_urls))
         alive_map = probe_urls_alive_batch(unique_urls)
         before = len(all_raw_jobs)
         all_raw_jobs = [
@@ -306,20 +311,20 @@ def run_local_pipeline(tracker):
         ]
         dropped = before - len(all_raw_jobs)
         if dropped:
-            print(f"Ghost-listing filter: dropped {dropped} dead URL(s).")
+            logger.info("Ghost-listing filter: dropped %d dead URL(s).", dropped)
 
     if not all_raw_jobs:
-        print("No jobs found at all. Shutting down quietly.")
+        logger.info("No jobs found at all. Shutting down quietly.")
         return
         
     combined_jobs = pd.DataFrame(all_raw_jobs)
     stats['scraped'] = len(combined_jobs)
-    print(f"Total raw jobs found: {stats['scraped']}")
+    logger.info("Total raw jobs found: %d", stats['scraped'])
     
     # 2. Filter Jobs (tracker drops previously-seen URLs first)
     combined_jobs = apply_pipeline_filters(combined_jobs, tracker=tracker)
     stats['filtered'] = len(combined_jobs)
-    print(f"Total jobs surviving pre-filters: {stats['filtered']}")
+    logger.info("Total jobs surviving pre-filters: %d", stats['filtered'])
     
     # 3. AI Evaluation (gemini_key was loaded earlier for the Jina fallback)
     try:
@@ -335,12 +340,12 @@ def run_local_pipeline(tracker):
     prescreen_skipped = 0
 
     if not combined_jobs.empty:
-        print("Running AI Job Validation...")
+        logger.info("Running AI Job Validation...")
         for idx, row in combined_jobs.iterrows():
             is_viable, reason = quick_viability_check(row)
             if not is_viable:
                 prescreen_skipped += 1
-                print(f"  [SKIP] {str(row.get('title', ''))[:55]:<55} -> {reason}")
+                logger.info("[SKIP] %-55s -> %s", str(row.get('title', ''))[:55], reason)
                 result = skipped_result(reason)
                 evaluated = True
             else:
@@ -360,7 +365,7 @@ def run_local_pipeline(tracker):
             if evaluated:
                 tracker.mark_seen(str(row.get("job_url", "")))
 
-        print(f"Pre-screen summary: skipped {prescreen_skipped} / {len(combined_jobs)} jobs before AI eval.")
+        logger.info("Pre-screen summary: skipped %d / %d jobs before AI eval.", prescreen_skipped, len(combined_jobs))
         combined_jobs['ai_verdict'] = verdicts
         combined_jobs['match_percentage'] = match_pcts
         combined_jobs['tech_fit'] = tech_fits
@@ -379,7 +384,7 @@ def run_local_pipeline(tracker):
         approved_jobs = combined_jobs
         stats['approved'] = 0
 
-    print(f"Total jobs approved by AI: {stats['approved']}")
+    logger.info("Total jobs approved by AI: %d", stats['approved'])
     
     # Load config for email settings
     with open("config.json", "r") as f:

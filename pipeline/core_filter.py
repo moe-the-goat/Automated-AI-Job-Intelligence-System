@@ -3,6 +3,10 @@ import re
 import json
 import os
 
+from pipeline.logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 # --- Reputation modifier rules (A1) ---
 # Loaded once at import time. A blacklisted company name (or post URL handle)
 # tags the row so downstream rendering shows a 🚫 badge and core_ai.py caps
@@ -20,7 +24,7 @@ def _load_reputation():
                 "trust_boost":      [p.lower() for p in data.get("trust_boost", [])],
             }
     except Exception as e:
-        print(f"Reputation file load failed (using empty): {e}")
+        logger.warning("Reputation file load failed (using empty): %s", e)
     return {"blacklist_name": [], "blacklist_handle": [], "trust_boost": []}
 
 _REPUTATION = _load_reputation()
@@ -51,7 +55,7 @@ def _pre_flag_reputation(df):
     df["pre_flagged_trusted"] = trusted
     flagged = int(low_q.sum())
     if flagged:
-        print(f"Reputation filter: flagged {flagged} row(s) as low-quality.")
+        logger.info("Reputation filter: flagged %d row(s) as low-quality.", flagged)
     return df
 
 # langdetect catches non-English titles (Italian "Posizioni", German "Entwickler", etc.)
@@ -147,14 +151,14 @@ class JobTracker:
                     data = json.load(f)
                     self.seen_urls = set(data.get("urls", []))
             except Exception as e:
-                print(f"Error loading seen jobs: {e}")
+                logger.warning("Error loading seen jobs: %s", e)
 
     def save(self):
         try:
             with open(self.filepath, "w") as f:
                 json.dump({"urls": list(self.seen_urls)}, f)
         except Exception as e:
-            print(f"Error saving seen jobs: {e}")
+            logger.warning("Error saving seen jobs: %s", e)
 
     def is_seen(self, url):
         return url in self.seen_urls
@@ -187,7 +191,7 @@ def filter_api_jobs(df, hours_old):
         df = df[df['date_posted_dt'].isna() | (df['date_posted_dt'] >= cutoff)]
         df = df.drop(columns=['date_posted_dt'])
     except Exception as e:
-        print(f"Date filtering error: {e}")
+        logger.warning("Date filtering error: %s", e)
         
     return df
 
@@ -206,7 +210,7 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
     if tracker is not None and "job_url" in combined_jobs.columns:
         before = len(combined_jobs)
         combined_jobs = combined_jobs[~combined_jobs['job_url'].astype(str).apply(tracker.is_seen)]
-        print(f"Seen-jobs filter: dropped {before - len(combined_jobs)} previously-evaluated jobs.")
+        logger.info("Seen-jobs filter: dropped %d previously-evaluated jobs.", before - len(combined_jobs))
 
     # 0b. Tag rows against the reputation list (flag, don't drop).
     combined_jobs = _pre_flag_reputation(combined_jobs)
@@ -232,7 +236,7 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
         combined_jobs = combined_jobs[combined_jobs['title'].apply(_is_english_title)]
         dropped = before - len(combined_jobs)
         if dropped:
-            print(f"Language filter (title): dropped {dropped} non-English titles.")
+            logger.info("Language filter (title): dropped %d non-English titles.", dropped)
 
     # 3c. Catch non-English DESCRIPTIONS even when the title looks English.
     # Real failure mode: a job titled "Software Engineer (m/w/d)" passes the
@@ -244,7 +248,7 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
         combined_jobs = combined_jobs[combined_jobs['description'].apply(_is_english_description)]
         dropped = before - len(combined_jobs)
         if dropped:
-            print(f"Language filter (description): dropped {dropped} non-English descriptions.")
+            logger.info("Language filter (description): dropped %d non-English descriptions.", dropped)
 
     # 4. Location Pre-filter: Drop clearly location-locked jobs that don't say remote
     if "location" in combined_jobs.columns:
@@ -338,6 +342,6 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
         combined_jobs = combined_jobs[~(has_intern & has_blocker)]
         dropped = before - len(combined_jobs)
         if dropped:
-            print(f"Non-tech intern filter: dropped {dropped} title(s) (biology / business / etc.).")
+            logger.info("Non-tech intern filter: dropped %d title(s) (biology / business / etc.).", dropped)
 
     return combined_jobs

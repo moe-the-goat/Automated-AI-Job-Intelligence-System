@@ -1,4 +1,4 @@
-"""
+﻿"""
 CORE ATS MODULE — boost local-jobs discovery by hitting structured hiring APIs.
 
 Background:
@@ -42,6 +42,10 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+
+from pipeline.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 
 ATS_CACHE_FILE = "data/ats_cache.json"
@@ -160,7 +164,7 @@ def fetch_careers_page(url):
         if r.status_code == 200:
             return r.text
     except Exception as e:
-        print(f"  ATS detect: fetch failed for {url}: {str(e)[:120]}")
+        logger.warning("ATS detect: fetch failed for %s: %s", url, str(e)[:120])
     return ""
 
 
@@ -197,7 +201,7 @@ def fetch_greenhouse_jobs(token, company_name):
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
-        print(f"  ATS greenhouse: {company_name} fetch failed: {str(e)[:120]}")
+        logger.warning("ATS greenhouse: %s fetch failed: %s", company_name, str(e)[:120])
         return []
     return parse_greenhouse_payload(payload, company_name)
 
@@ -254,7 +258,7 @@ def fetch_lever_jobs(token, company_name):
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
-        print(f"  ATS lever: {company_name} fetch failed: {str(e)[:120]}")
+        logger.warning("ATS lever: %s fetch failed: %s", company_name, str(e)[:120])
         return []
     return parse_lever_payload(payload, company_name)
 
@@ -294,7 +298,7 @@ def fetch_workable_jobs(token, company_name):
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
-        print(f"  ATS workable: {company_name} fetch failed: {str(e)[:120]}")
+        logger.warning("ATS workable: %s fetch failed: %s", company_name, str(e)[:120])
         return []
     return parse_workable_payload(payload, company_name, token)
 
@@ -332,7 +336,7 @@ def fetch_ashby_jobs(token, company_name):
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
-        print(f"  ATS ashby: {company_name} fetch failed: {str(e)[:120]}")
+        logger.warning("ATS ashby: %s fetch failed: %s", company_name, str(e)[:120])
         return []
     return parse_ashby_payload(payload, company_name)
 
@@ -378,7 +382,7 @@ def fetch_workday_jobs(token, company_name):
     import requests
     tenant, cluster, site = _parse_workday_token(token)
     if not tenant or not cluster or not site:
-        print(f"  ATS workday: {company_name} skipped: malformed token {token!r}")
+        logger.warning("ATS workday: %s skipped: malformed token %r", company_name, token)
         return []
     url = f"https://{tenant}.{cluster}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
     body = {"limit": 20, "offset": 0, "searchText": ""}
@@ -390,7 +394,7 @@ def fetch_workday_jobs(token, company_name):
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
-        print(f"  ATS workday: {company_name} fetch failed: {str(e)[:120]}")
+        logger.warning("ATS workday: %s fetch failed: %s", company_name, str(e)[:120])
         return []
     return parse_workday_payload(payload, company_name, tenant=tenant, cluster=cluster, site=site)
 
@@ -443,7 +447,7 @@ def fetch_factorialhr_jobs(token, company_name):
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
-        print(f"  ATS factorialhr: {company_name} fetch failed: {str(e)[:120]}")
+        logger.warning("ATS factorialhr: %s fetch failed: %s", company_name, str(e)[:120])
         return []
     return parse_factorialhr_payload(payload, company_name, token=token)
 
@@ -549,7 +553,7 @@ class AtsCache:
             with open(self.filepath, "r", encoding="utf-8") as f:
                 self.data = json.load(f) or {}
         except Exception as e:
-            print(f"AtsCache load failed: {e}")
+            logger.warning("AtsCache load failed: %s", e)
             self.data = {}
 
     def save(self):
@@ -560,7 +564,7 @@ class AtsCache:
             with open(self.filepath, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2)
         except Exception as e:
-            print(f"AtsCache save failed: {e}")
+            logger.warning("AtsCache save failed: %s", e)
 
     def get(self, company_name):
         entry = self.data.get(company_name)
@@ -659,7 +663,7 @@ def extract_text_from_html(html):
             tag.decompose()
         text = soup.get_text(separator=" ")
     except Exception as e:
-        print(f"  BS4 extraction failed: {str(e)[:120]}")
+        logger.warning("BS4 extraction failed: %s", str(e)[:120])
         return ""
     return re.sub(r"\s+", " ", text).strip()
 
@@ -674,9 +678,9 @@ def fetch_jina_markdown(careers_url):
         r = requests.get(url, timeout=JINA_TIMEOUT, headers={"User-Agent": USER_AGENT, "Accept": "text/plain"})
         if r.status_code == 200:
             return r.text or ""
-        print(f"  Jina: {careers_url} returned HTTP {r.status_code}")
+        logger.warning("Jina: %s returned HTTP %s", careers_url, r.status_code)
     except Exception as e:
-        print(f"  Jina: fetch failed for {careers_url}: {str(e)[:120]}")
+        logger.warning("Jina: fetch failed for %s: %s", careers_url, str(e)[:120])
     return ""
 
 
@@ -741,11 +745,11 @@ def _gemini_structure_jobs(text_content, careers_url, company_name, gemini_api_k
         response = client.models.generate_content(model=model, contents=prompt)
         text = getattr(response, "text", "") or ""
     except Exception as e:
-        print(f"  {source_label}+Gemini extraction failed for {company_name}: {str(e)[:120]}")
+        logger.warning("%s+Gemini extraction failed for %s: %s", source_label, company_name, str(e)[:120])
         return []
     jobs = parse_jina_jobs_response(text, company_name)
     if jobs:
-        print(f"  {source_label} fallback: extracted {len(jobs)} job(s) for {company_name}")
+        logger.info("%s fallback: extracted %d job(s) for %s", source_label, len(jobs), company_name)
     return jobs
 
 
@@ -789,7 +793,7 @@ def extract_jobs_from_careers_page(careers_url, company_name, gemini_api_key,
         # BS extraction yielded text but no jobs — could be the model missed them,
         # or the page legitimately has no openings. Fall through to Jina anyway
         # because Jina sometimes surfaces JS-injected job links the SSR markup hid.
-        print(f"  BS4 extraction returned 0 jobs for {company_name}; trying Jina")
+        logger.info("BS4 extraction returned 0 jobs for %s; trying Jina", company_name)
 
     return extract_jobs_via_jina(careers_url, company_name, gemini_api_key, model=model)
 
@@ -830,13 +834,16 @@ def get_jobs_for_company(company_name, careers_url, cache=None,
         ats, token = detect_ats_from_html(html)
         cache.set(company_name, ats, token)
         if not ats:
-            print(f"  ATS not detected for {company_name}; trying tiered fallback" if jina_fallback else f"  ATS not detected for {company_name}")
+            if jina_fallback:
+                logger.info("ATS not detected for %s; trying tiered fallback", company_name)
+            else:
+                logger.info("ATS not detected for %s", company_name)
             # Pass the already-fetched HTML so Tier 1 (BS4) is free of an
             # extra HTTP call. Tier 2 (Jina) only fires for true SPAs.
             if jina_fallback and gemini_api_key:
                 return extract_jobs_from_careers_page(careers_url, company_name, gemini_api_key, html=html)
             return []
-        print(f"  ATS detected for {company_name}: {ats}/{token}")
+        logger.info("ATS detected for %s: %s/%s", company_name, ats, token)
 
     fetcher = _ATS_FETCHERS.get(ats)
     if not fetcher:

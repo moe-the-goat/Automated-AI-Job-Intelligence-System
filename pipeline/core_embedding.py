@@ -33,6 +33,10 @@ import hashlib
 import time
 import math
 
+from pipeline.logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 
 CV_EMBEDDING_CACHE = "data/cv_embedding.json"
 EMBED_MODEL = "gemini-embedding-001"     # Gemini embeddings, free tier, ~1500 RPM
@@ -55,7 +59,7 @@ def _read_cached_embedding(text):
         if cached.get("cv_hash") == _cv_hash(text):
             return cached.get("embedding")
     except Exception as e:
-        print(f"CV embedding cache read failed: {e}")
+        logger.warning("CV embedding cache read failed: %s", e)
     return None
 
 
@@ -68,7 +72,7 @@ def _write_cached_embedding(text, embedding):
         with open(CV_EMBEDDING_CACHE, "w", encoding="utf-8") as f:
             json.dump({"cv_hash": _cv_hash(text), "embedding": list(embedding)}, f)
     except Exception as e:
-        print(f"CV embedding cache write failed: {e}")
+        logger.warning("CV embedding cache write failed: %s", e)
 
 
 def _embed_text(client, text):
@@ -81,7 +85,7 @@ def _embed_text(client, text):
         # google-genai's response shape: response.embeddings[0].values
         return list(response.embeddings[0].values)
     except Exception as e:
-        print(f"Embedding call failed: {str(e)[:200]}")
+        logger.warning("Embedding call failed: %s", str(e)[:200])
         return None
 
 
@@ -89,16 +93,16 @@ def get_cv_embedding(cv_text, api_key):
     """Return the CV embedding vector, reading from disk cache when the hash matches."""
     cached = _read_cached_embedding(cv_text)
     if cached:
-        print("CV embedding: cache hit.")
+        logger.info("CV embedding: cache hit.")
         return cached
 
     if not api_key:
-        print("CV embedding: no API key, returning None.")
+        logger.warning("CV embedding: no API key, returning None.")
         return None
 
     from google import genai  # lazy: don't require this at import time
     client = genai.Client(api_key=api_key)
-    print("CV embedding: regenerating (CV changed or first run).")
+    logger.info("CV embedding: regenerating (CV changed or first run).")
     vec = _embed_text(client, cv_text)
     if vec is not None:
         _write_cached_embedding(cv_text, vec)

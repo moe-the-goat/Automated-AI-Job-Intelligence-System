@@ -4,6 +4,10 @@ from bs4 import BeautifulSoup
 import time
 import re
 import json
+
+from pipeline.logging_setup import get_logger
+
+logger = get_logger(__name__)
 # Heavy deps (`google.genai`, `ddgs`) are lazy-imported inside the functions that
 # actually need them so the parser/renderer helpers can be unit-tested without
 # requiring the full runtime stack to be installed.
@@ -234,10 +238,10 @@ def _ddg_text(query, max_results=2):
             err = str(e)[:120]
             if attempt < len(_DDG_BACKOFF_SECONDS):
                 wait = _DDG_BACKOFF_SECONDS[attempt]
-                print(f"  DDG attempt {attempt + 1}/{max_retries} failed ({err}), retrying in {wait}s...")
+                logger.warning("DDG attempt %d/%d failed (%s), retrying in %ds...", attempt + 1, max_retries, err, wait)
                 time.sleep(wait)
             else:
-                print(f"  DDG exhausted retries for query: {query[:80]!r} ({err})")
+                logger.warning("DDG exhausted retries for query: %r (%s)", query[:80], err)
     return []
 
 
@@ -266,7 +270,7 @@ def get_full_job_description(url):
 
 def search_company_remote_policy(company_name, job_title):
     """Dual DuckDuckGo search for specific geographic restrictions tied to this role."""
-    print(f"Deep web search triggered for {company_name} ({job_title}) remote policy...")
+    logger.info("Deep web search triggered for %s (%s) remote policy...", company_name, job_title)
     snippets = []
     q1 = f"{company_name} \"{job_title}\" remote eligible countries"
     snippets.extend(r.get('body', '') for r in _ddg_text(q1, max_results=2))
@@ -577,7 +581,7 @@ Reply with VALID JSON ONLY (no markdown, no comments):
                 time.sleep(4)  # standard throttle to stay under 15 RPM
             else:
                 backoff = 10 * (2 ** (attempt - 1))  # 10s, 20s
-                print(f"  [AI RETRY {attempt}/2] backing off {backoff}s for {title[:55]}")
+                logger.warning("[AI RETRY %d/2] backing off %ds for %s", attempt, backoff, title[:55])
                 time.sleep(backoff)
 
             response = client.models.generate_content(
@@ -606,9 +610,11 @@ Reply with VALID JSON ONLY (no markdown, no comments):
 
             badge = " SCAM" if result["scam"] else (" SUSPICIOUS" if result["suspicious"] else "")
             badge += " BLACKLISTED" if bool(row.get("pre_flagged_low_quality", False)) else ""
-            print(
-                f"  [AI] {title[:55]:<55} -> match={result['match_percentage']}% "
-                f"(T:{result['tech_fit']} E:{result['experience_fit']} L:{result['logistics_fit']}){badge}"
+            logger.info(
+                "[AI] %-55s -> match=%d%% (T:%d E:%d L:%d)%s",
+                title[:55], result['match_percentage'],
+                result['tech_fit'], result['experience_fit'], result['logistics_fit'],
+                badge,
             )
             return result, True
         except Exception as e:
@@ -618,6 +624,6 @@ Reply with VALID JSON ONLY (no markdown, no comments):
                 break
 
     # All attempts exhausted (or non-retryable error).
-    print(f"  [AI ERROR] {title[:55]}: {str(last_exception)[:300]}")
+    logger.error("[AI ERROR] %s: %s", title[:55], str(last_exception)[:300])
     error_msg = str(last_exception).replace('"', "'")
     return _error_result(f"AI Error: {error_msg[:100]}..."), False
