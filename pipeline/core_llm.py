@@ -22,8 +22,21 @@ from pipeline.logging_setup import get_logger
 logger = get_logger(__name__)
 
 
-_CEREBRAS_MODEL = "llama-3.3-70b"
-_GROQ_MODEL = "llama-3.3-70b-versatile"
+# Model picks based on the actual free-tier menus on each provider (2026-05-19):
+#
+# Cerebras free tier: gpt-oss-120b is the most capable PRODUCTION model on offer.
+#   * 65K context, 5 RPM, 150 RPH, 2400 RPD, 30K TPM, 1M TPH, 1M TPD.
+#   * llama-3.3-70b (used previously) does NOT exist on Cerebras free tier — every
+#     call silently fell through to Groq.
+#
+# Groq free tier: meta-llama/llama-4-scout-17b-16e-instruct.
+#   * 30 RPM, 1K RPD, 30K TPM, 500K TPD.
+#   * llama-3.3-70b-versatile (used previously) caps at only 100K TPD — too small
+#     for ~60 evals/day at 3.5K tokens each (we exhausted it after ~28 jobs).
+#   * llama-4-scout is Meta's newer 17B instruction-tuned model with 5x the daily
+#     token quota of llama-3.3-70b-versatile.
+_CEREBRAS_MODEL = "gpt-oss-120b"
+_GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 # Short backoff between fallback attempts. The user wants "immediate" switching
 # between providers — long exponential backoff would defeat the point of having

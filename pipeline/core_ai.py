@@ -672,9 +672,12 @@ Reply with VALID JSON ONLY (no markdown, no comments):
 {{"is_valid": true|false, "verdict": "...", "tech_fit": 0-100, "experience_fit": 0-100, "logistics_fit": 0-100, "match_percentage": 0-100, "compensation": "...", "effort": "low|medium|high", "suspicious": true|false}}
 """
 
-    # Pacing — Cerebras/Groq free tiers cap around 30 RPM. 2s between calls
-    # keeps us comfortably under that with headroom for the occasional burst.
-    time.sleep(2)
+    # Pacing — Cerebras free tier caps at 5 RPM on gpt-oss-120b (12s/call minimum).
+    # Groq fallback (llama-4-scout) is faster at 30 RPM but the throttle has to
+    # be safe for whichever provider succeeds. 13s gives a 1s buffer above the
+    # 5 RPM Cerebras floor. With 60 AI evals/run this adds ~13 min of pacing,
+    # which is fine for a daily cron.
+    time.sleep(13)
 
     try:
         response_text = call_llm_with_fallback(
