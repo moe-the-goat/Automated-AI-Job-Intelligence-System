@@ -344,6 +344,93 @@ _HARD_DISQUALIFIER_PATTERNS = (
     (r"\bpublic\s+trust\s+clearance\b",                           "public trust clearance"),
 )
 
+# Specific country / region names that, when a job is exclusively locked to
+# them, mean a Palestine-based candidate can't apply. Deliberately omits MENA
+# / Middle East / Worldwide / Global since those would include Palestine.
+# US has its own dedicated patterns in _HARD_DISQUALIFIER_PATTERNS above.
+_GEO_LOCK_LOCATIONS = (
+    # Anglosphere
+    "canada", "canadian",
+    "australia", "australian", "australasia",
+    "new zealand",
+    "united kingdom", "uk", "britain", "british", "england", "scotland", "wales", "ireland",
+    # Europe / EU
+    "germany", "german", "austria", "austrian", "switzerland", "swiss",
+    "france", "french", "italy", "italian", "spain", "spanish",
+    "portugal", "portuguese", "greece", "greek",
+    "netherlands", "dutch", "belgium", "belgian",
+    "sweden", "swedish", "norway", "norwegian", "denmark", "danish",
+    "finland", "finnish", "poland", "polish",
+    "romania", "romanian", "hungary", "hungarian",
+    "bulgaria", "bulgarian", "ukraine", "ukrainian",
+    # Latin America
+    "brazil", "brazilian", "argentina", "argentine",
+    "mexico", "mexican", "chile", "chilean",
+    "colombia", "colombian", "peru", "peruvian",
+    # Asia
+    "india", "indian", "china", "chinese",
+    "japan", "japanese", "south korea", "korean",
+    "singapore", "thailand", "thai", "vietnam", "vietnamese",
+    "philippines", "filipino", "indonesia", "indonesian",
+    "malaysia", "malaysian",
+    # Africa
+    "south africa", "south african",
+    "nigeria", "nigerian", "kenya", "kenyan",
+    # Russia / Turkey / Israel
+    "russia", "russian",
+    "turkey", "türkiye", "turkish",
+    "israel", "israeli",
+    # Gulf (Palestine doesn't share Gulf work-permit reciprocity)
+    "saudi arabia", "uae", "united arab emirates",
+    "qatar", "kuwait", "bahrain", "oman",
+    # Regional collective locks that exclude Palestine
+    "eu", "european union", "eea",
+    "latam", "latin america", "apac", "asia pacific", "asia-pacific",
+    "anz",
+)
+
+
+def _build_geo_lock_regex():
+    """Compile a single regex catching '<non-Palestine geo>-only' restrictions.
+
+    One compiled regex is ~80x faster than iterating per-country patterns when
+    quick_viability_check() runs on every filtered job. The location list
+    omits MENA / Middle East / Worldwide / Global since those include Palestine
+    and shouldn't disqualify.
+    """
+    geos = "|".join(re.escape(g) for g in _GEO_LOCK_LOCATIONS)
+    templates = [
+        # "Canadian residents only", "Brazil citizens only"
+        rf"\b(?:{geos})\s+(?:citizens?|residents?|nationals?)\s+only\b",
+        # "must be based in Germany", "must reside in Canada"
+        rf"\bmust\s+(?:be\s+)?(?:a\s+|legal\s+)?(?:located|based|reside|residing|resident|citizen)\s+(?:in|of)\s+(?:the\s+)?(?:{geos})\b",
+        # "only open to candidates in India", "only available for applicants based in UK"
+        rf"\bonly\s+(?:open|available|hiring)\s+(?:to|for)\s+(?:candidates?|applicants?)\s+(?:in|from|based\s+in|located\s+in|residing\s+in)\s+(?:the\s+)?(?:{geos})\b",
+        # "role is only available to candidates in Mexico"
+        rf"\b(?:role|position|opportunity|opening|job)\s+(?:is\s+)?(?:only\s+)?(?:open\s+to|available\s+(?:to|in|for))\s+(?:candidates?\s+in\s+)?(?:the\s+)?(?:{geos})\b",
+        # "must have the right to work in Australia"
+        rf"\bmust\s+(?:have|hold|possess|be\s+able)\s+(?:the\s+)?(?:right|legal\s+right|authorization|work\s+permit)\s+to\s+work\s+in\s+(?:the\s+)?(?:{geos})\b",
+        # "authorized to work in <country>" / "<country> work authorization required"
+        rf"\bmust\s+be\s+authorized\s+to\s+work\s+in\s+(?:the\s+)?(?:{geos})\b",
+        rf"\b(?:{geos})\s+work\s+authorization\s+required\b",
+        # "remote within Canada only", "remote in EU only"
+        rf"\bremote(?:\s+(?:work|role|position))?\s+(?:in|within)\s+(?:the\s+)?(?:{geos})\s+only\b",
+        # "candidates must be located in Brazil only"
+        rf"\bcandidates?\s+(?:must\s+)?(?:be\s+)?(?:from|based\s+in|located\s+in|residing\s+in)\s+(?:the\s+)?(?:{geos})\s+only\b",
+        # "Canada-based candidates only" / "Canada based hires only"
+        rf"\b(?:{geos})[\-\s]based\s+(?:candidates?|applicants?|hires?|employees?)\s+only\b",
+        # "APAC candidates only" / "Brazil applicants only" (no "-based" between)
+        rf"\b(?:{geos})\s+(?:candidates?|applicants?|workers?|hires?|employees?)\s+only\b",
+        # "hiring APAC candidates only" / "hiring Brazil workers only"
+        rf"\bhiring\s+(?:{geos})\s+(?:candidates?|applicants?|workers?|hires?|employees?)\s+only\b",
+        # "<country>-only role" / "<country>-only remote"
+        rf"\b(?:{geos})[\-\s]only\s+(?:role|position|remote|hiring)\b",
+    ]
+    return re.compile("|".join(templates))
+
+
+_GEO_LOCK_REGEX = _build_geo_lock_regex()
+
 _MIN_DESCRIPTION_CHARS = 150
 
 
@@ -397,23 +484,35 @@ def quick_viability_check(row):
         if re.search(pat, description):
             return False, f"hard disqualifier: {reason}"
 
+    # 6. Generalized geo-lock to a non-Palestine country/region (added 2026-05-19).
+    # Catches phrases like "Canadian residents only", "must reside in Australia",
+    # "EU candidates only", "Brazil-based hires only". One compiled regex covers
+    # ~80 countries × 10 phrase patterns. MENA / Middle East / Worldwide / Global
+    # are intentionally absent from the geo list since they include Palestine.
+    m = _GEO_LOCK_REGEX.search(description)
+    if m:
+        return False, f"hard disqualifier: geo-locked ({m.group(0)[:60].strip()})"
+
     return True, "viable"
 
-def evaluate_job_with_ai(row, cv_text, api_key):
+def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key):
     """
-    Evaluate a single job posting against the candidate's CV using Gemini 3.1 Flash Lite.
+    Evaluate a single job posting against the candidate's CV using llama-3.3-70b
+    via Cerebras (primary) with Groq as fallback. Both run the same model.
 
     Returns a 2-tuple: (result_dict, evaluated_bool).
     - result_dict follows DEFAULT_AI_RESULT schema.
-    - evaluated_bool is True ONLY when the AI returned a real verdict; callers should
+    - evaluated_bool is True ONLY when the LLM returned a real verdict; callers should
       use this to decide whether to mark the URL as "seen" (so transient API errors
       don't lose jobs forever — see core_filter.JobTracker).
-    """
-    if not api_key:
-        return _error_result("No API Key provided"), False
 
-    from google import genai  # lazy import — see comment near top of file
-    client = genai.Client(api_key=api_key)
+    Fallback behavior lives in pipeline.core_llm.call_llm_with_fallback:
+    Cerebras -> Groq -> Cerebras -> Groq (min 4 attempts on transient errors).
+    """
+    if not cerebras_key and not groq_key:
+        return _error_result("No LLM API Key provided (CEREBRAS_API_KEY or GROQ_API_KEY)"), False
+
+    from pipeline.core_llm import call_llm_with_fallback  # lazy import — SDK only loaded when needed
 
     title = str(row.get("title", ""))
     company = str(row.get("company", ""))
@@ -573,57 +672,49 @@ Reply with VALID JSON ONLY (no markdown, no comments):
 {{"is_valid": true|false, "verdict": "...", "tech_fit": 0-100, "experience_fit": 0-100, "logistics_fit": 0-100, "match_percentage": 0-100, "compensation": "...", "effort": "low|medium|high", "suspicious": true|false}}
 """
 
-    # Retry up to 3 attempts on transient 5xx errors (Gemini gets demand spikes).
-    last_exception = None
-    for attempt in range(3):
-        try:
-            if attempt == 0:
-                time.sleep(4)  # standard throttle to stay under 15 RPM
-            else:
-                backoff = 10 * (2 ** (attempt - 1))  # 10s, 20s
-                logger.warning("[AI RETRY %d/2] backing off %ds for %s", attempt, backoff, title[:55])
-                time.sleep(backoff)
+    # Pacing — Cerebras/Groq free tiers cap around 30 RPM. 2s between calls
+    # keeps us comfortably under that with headroom for the occasional burst.
+    time.sleep(2)
 
-            response = client.models.generate_content(
-                model='gemini-3.1-flash-lite',
-                contents=prompt
-            )
-            result = _parse_ai_response(response.text)
+    try:
+        response_text = call_llm_with_fallback(
+            prompt,
+            cerebras_key=cerebras_key,
+            groq_key=groq_key,
+            max_attempts=4,
+            label=title,
+        )
+        result = _parse_ai_response(response_text)
 
-            # Apply deterministic caps before the (optional) network-based scam
-            # check. Both caps are pure functions of the AI's verdict + the row's
-            # pre-screening flags, so we extract them so tests can lock them down
-            # without mocking the Gemini client.
-            result = apply_post_ai_caps(result, row)
+        # Apply deterministic caps before the (optional) network-based scam
+        # check. Both caps are pure functions of the AI's verdict + the row's
+        # pre-screening flags, so we extract them so tests can lock them down
+        # without mocking the LLM client.
+        result = apply_post_ai_caps(result, row)
 
-            # India-suspicious -> open-web scam check. Only fires when both signals
-            # hold, keeping DDG calls cheap. Confirmed scams get a hard cap + tag.
-            location_text = str(row.get("location", ""))
-            if result["suspicious"] and looks_like_india_employer(location_text, company):
-                if detect_company_scam(company):
-                    result["scam"] = True
-                    result["is_valid"] = False
-                    if result["match_percentage"] > 30:
-                        result["match_percentage"] = 30
-                    if not result["verdict"].startswith("[SCAM]"):
-                        result["verdict"] = "[SCAM] " + result["verdict"]
+        # India-suspicious -> open-web scam check. Only fires when both signals
+        # hold, keeping DDG calls cheap. Confirmed scams get a hard cap + tag.
+        location_text = str(row.get("location", ""))
+        if result["suspicious"] and looks_like_india_employer(location_text, company):
+            if detect_company_scam(company):
+                result["scam"] = True
+                result["is_valid"] = False
+                if result["match_percentage"] > 30:
+                    result["match_percentage"] = 30
+                if not result["verdict"].startswith("[SCAM]"):
+                    result["verdict"] = "[SCAM] " + result["verdict"]
 
-            badge = " SCAM" if result["scam"] else (" SUSPICIOUS" if result["suspicious"] else "")
-            badge += " BLACKLISTED" if bool(row.get("pre_flagged_low_quality", False)) else ""
-            logger.info(
-                "[AI] %-55s -> match=%d%% (T:%d E:%d L:%d)%s",
-                title[:55], result['match_percentage'],
-                result['tech_fit'], result['experience_fit'], result['logistics_fit'],
-                badge,
-            )
-            return result, True
-        except Exception as e:
-            last_exception = e
-            msg = str(e)
-            if not any(t in msg for t in ("503", "500", "UNAVAILABLE", "INTERNAL")):
-                break
+        badge = " SCAM" if result["scam"] else (" SUSPICIOUS" if result["suspicious"] else "")
+        badge += " BLACKLISTED" if bool(row.get("pre_flagged_low_quality", False)) else ""
+        logger.info(
+            "[AI] %-55s -> match=%d%% (T:%d E:%d L:%d)%s",
+            title[:55], result['match_percentage'],
+            result['tech_fit'], result['experience_fit'], result['logistics_fit'],
+            badge,
+        )
+        return result, True
 
-    # All attempts exhausted (or non-retryable error).
-    logger.error("[AI ERROR] %s: %s", title[:55], str(last_exception)[:300])
-    error_msg = str(last_exception).replace('"', "'")
-    return _error_result(f"AI Error: {error_msg[:100]}..."), False
+    except Exception as e:
+        logger.error("[AI ERROR] %s: %s", title[:55], str(e)[:300])
+        error_msg = str(e).replace('"', "'")
+        return _error_result(f"AI Error: {error_msg[:100]}..."), False

@@ -218,9 +218,13 @@ def run_local_pipeline(tracker):
         
     all_raw_jobs = []
     ats_cache = AtsCache()
-    # Load Gemini key early so the Jina-fallback branch in the ATS sweep can
-    # use it. The AI evaluation loop further down reads it again — harmless.
+    # Load API keys early. Gemini stays for the Jina-fallback branch in the ATS
+    # sweep. The main AI verdict now runs on Cerebras (primary) + Groq (fallback).
+    # local_companies.py does NOT run Layer 3 geo-checks — Palestinian companies
+    # don't have non-Palestine geo-restriction concerns.
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
+    groq_key = os.environ.get("GROQ_API_KEY", "")
 
     # Track statistics
     stats = {"scraped": 0, "filtered": 0, "approved": 0, "ats_jobs": 0, "jina_jobs": 0}
@@ -349,7 +353,7 @@ def run_local_pipeline(tracker):
                 result = skipped_result(reason)
                 evaluated = True
             else:
-                result, evaluated = evaluate_job_with_ai(row, cv_text, gemini_key)
+                result, evaluated = evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key)
             verdicts.append(result["verdict"])
             valid_mask.append(result["is_valid"])
             match_pcts.append(result["match_percentage"])

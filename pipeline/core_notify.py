@@ -175,6 +175,19 @@ def _render_html_table(df):
     out += "</table>"
     return out
 
+def _geo_title_prefix(row):
+    """Return a small prefix indicating geo-eligibility status for the lower-ranked section.
+
+    Only the "uncertain" state gets a visible warning marker — "open" and unchecked
+    jobs render cleanly so the section stays scannable. "restricted" rows never
+    reach the renderer (scraper.py drops them before sending the lower_ranked_df in).
+    """
+    status = (row.get("geo_status") or "").lower()
+    if status == "uncertain":
+        return "⚠️ "
+    return ""
+
+
 def _render_lower_ranked_html(df, limit=25):
     """Compact table for jobs that didn't make the AI top-N: title, company, sim score, link."""
     df = df.copy()
@@ -184,7 +197,8 @@ def _render_lower_ranked_html(df, limit=25):
     out = "<table border='1' style='border-collapse: collapse; width: 100%;'>"
     out += "<tr><th>Title</th><th>Company</th><th>Location</th><th>Similarity</th><th>Link</th></tr>"
     for _, row in df.iterrows():
-        title = row.get("title", "N/A")
+        title_prefix = _geo_title_prefix(row)
+        title = f"{title_prefix}{row.get('title', 'N/A')}"
         company = row.get("company", "N/A")
         location = row.get("location", "Remote/Unspecified")
         sim = row.get("similarity", 0.0)
@@ -206,7 +220,8 @@ def _render_lower_ranked_md(df, limit=25):
     out = "| Title | Company | Location | Similarity | Link |\n"
     out += "|---|---|---|---|---|\n"
     for _, row in df.iterrows():
-        title = row.get("title", "N/A")
+        title_prefix = _geo_title_prefix(row)
+        title = f"{title_prefix}{row.get('title', 'N/A')}"
         company = row.get("company", "N/A")
         location = row.get("location", "Remote/Unspecified")
         sim = row.get("similarity", 0.0)
