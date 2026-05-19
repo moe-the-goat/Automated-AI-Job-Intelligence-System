@@ -6,7 +6,6 @@ alternation, retry budget, and error classification. No real network calls.
 (We avoid pytest's `monkeypatch` fixture because the project's QA runner calls
 test functions directly rather than via pytest, so fixtures aren't injected.)
 """
-import pytest
 from unittest.mock import patch
 
 from pipeline import core_llm
@@ -14,8 +13,11 @@ from pipeline.core_llm import call_llm_with_fallback, _is_retryable_error
 
 
 def test_raises_when_no_keys_provided():
-    with pytest.raises(ValueError, match="CEREBRAS_API_KEY|GROQ_API_KEY"):
+    try:
         call_llm_with_fallback("any prompt", "", "")
+        assert False, "Expected ValueError when no keys provided"
+    except ValueError as e:
+        assert "CEREBRAS_API_KEY" in str(e) or "GROQ_API_KEY" in str(e)
 
 
 def test_uses_cerebras_on_first_attempt_when_both_keys_present():
@@ -73,8 +75,11 @@ def test_ping_pong_alternation_4_attempts():
     with patch.object(core_llm, "_call_cerebras", fake_cerebras), \
          patch.object(core_llm, "_call_groq", fake_groq), \
          patch.object(core_llm, "_INTER_ATTEMPT_BACKOFF_SECONDS", 0):
-        with pytest.raises(Exception, match="503"):
+        try:
             call_llm_with_fallback("p", cerebras_key="csk-xxx", groq_key="gsk-yyy", max_attempts=4)
+            assert False, "Expected exception after all attempts exhausted"
+        except Exception as e:
+            assert "503" in str(e)
 
     assert calls == ["cerebras", "groq", "cerebras", "groq"], (
         f"Expected ping-pong cerebras/groq alternation, got {calls}"

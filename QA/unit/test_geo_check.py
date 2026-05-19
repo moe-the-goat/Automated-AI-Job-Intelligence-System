@@ -3,8 +3,6 @@
 The actual Gemini call is mocked out — we test the trigger function, the
 response parser, and the result-application logic without touching the network.
 """
-import pytest
-
 from pipeline.core_geo import (
     should_geo_check,
     _parse_geo_response,
