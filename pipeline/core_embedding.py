@@ -39,8 +39,12 @@ logger = get_logger(__name__)
 
 
 CV_EMBEDDING_CACHE = "data/cv_embedding.json"
-EMBED_MODEL = "gemini-embedding-001"     # Gemini embeddings, free tier, ~1500 RPM
-EMBED_THROTTLE_SECONDS = 0.05            # ~20 RPS — well under the limit
+EMBED_MODEL = "gemini-embedding-001"     # Gemini embeddings, free tier: 100 RPM / 30K TPM / 1K RPD
+# 100 RPM means 1 call per 0.6s minimum. Set to 0.65s for a small safety
+# buffer. The previous value of 0.05s (~20 RPS = 1200 RPM) burst past the
+# 100 RPM cap on every run and triggered ~60 429 errors per peak. The 1500
+# RPM figure in the old comment was wrong (probably the paid-tier limit).
+EMBED_THROTTLE_SECONDS = 0.65            # ~92 RPM — just under the 100 RPM free-tier cap
 JOB_TEXT_MAX_CHARS = 7000                # include full requirements section, not just HR intro
 
 
