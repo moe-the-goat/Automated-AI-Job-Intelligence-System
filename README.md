@@ -1,6 +1,6 @@
 # Automated AI Job Intelligence System
 
-A daily, fully-autonomous pipeline that scrapes the global remote job market, filters out the noise, evaluates each surviving role against a candidate CV with a Gemini-powered recruiter heuristic, and delivers a short, honest shortlist by email every morning.
+A daily, fully-autonomous pipeline that scrapes the global remote job market, filters out the noise, evaluates each surviving role against a candidate CV with a multi-LLM recruiter heuristic, and delivers a short, honest shortlist by email every morning.
 
 The system is the answer to a specific problem: existing job aggregators assume geographic centrality and a default candidate profile. Their idea of "best fit for you" is calibrated for that profile. I built a sifter that injects explicit constraints into an unoptimized search market — replacing manual triage with a deterministic, observable, tested pipeline that runs on free infrastructure and costs nothing to operate.
 
@@ -12,9 +12,9 @@ This repository is what I built.
 
 Every day at 06:55 UTC (09:55 Jerusalem), a GitHub Actions workflow runs [scraper.py](scraper.py). Roughly five to seven minutes later, a single HTML email lands in my inbox: a stats header, two ranked tables (internships and full-time roles), and an optional "lower-ranked" section. A second workflow at 08:50 UTC (11:50 Jerusalem) runs [local_companies.py](local_companies.py) against a curated list of Palestinian IT companies pulled from two Excel sheets in this repo. Both share the same brain. Both share a seen-jobs cache, so a job evaluated by one is automatically skipped by the other. Neither runs unless the test suite passes first.
 
-The pipeline talks to nine external job sources, six ATS platforms, a free LLM (Gemini 3.1 Flash Lite), a free embedding API (also Gemini), DuckDuckGo for occasional fact-checks, and Jina Reader as a fallback for careers pages no scraper can parse alone. It runs entirely on free tiers. The total monthly cost of operating it is zero.
+The pipeline talks to nine external job sources, six ATS platforms, three LLM providers (Cerebras and Groq for job verdicts, Gemini for geo-eligibility checks), a free embedding API (Gemini), DuckDuckGo for occasional fact-checks, and Jina Reader as a fallback for careers pages no scraper can parse alone. It runs entirely on free tiers. The total monthly cost of operating it is zero.
 
-Inside, there are nine modules under [pipeline/](pipeline/), two thin orchestrators at the repo root, a curated reputation list, **408 tests across 26 files**, and three GitHub Actions workflows that wire the whole thing into a self-managing loop. The rest of this document is a tour of why each piece is shaped the way it is.
+Inside, there are eleven modules under [pipeline/](pipeline/), two thin orchestrators at the repo root, a curated reputation list, **463 tests across 29 files**, and three GitHub Actions workflows that wire the whole thing into a self-managing loop. The rest of this document is a tour of why each piece is shaped the way it is.
 
 ---
 
@@ -37,12 +37,16 @@ At the highest level, the pipeline is a five-stage funnel:
           |
           v
    deterministic filter gauntlet
+   (incl. geo-lock pattern matching ~80 countries)
           |
           v
    embedding pre-rank with region & trust weighting
           |
           v
-   AI evaluation (top 45 + 5 wildcards)
+   AI evaluation (top 55 + 5 wildcards)
+          |
+          v
+   Layer 3 geo-eligibility check (Gemini + Google Search)
           |
           v
    final dispatch (email + private GitHub Issue)
@@ -56,9 +60,11 @@ Each stage exists for a reason and was added in response to a specific failure m
 
 **Stage 3 — Embedding pre-rank.** Survivors are embedded against the CV, then sorted by `weighted_score = cosine_similarity * region_weight * trust_weight`. The weights inject the inductive bias the embedding model lacks: EU and Americas roles get 1.15x, fully-remote and Middle East roles get 1.30x, India gets 0.70x, sanctioned regions get 0.50x. Trusted companies stack a 1.25x multiplier.
 
-**Stage 4 — AI evaluation.** Top 45 plus 5 wildcards reach a heuristic pre-screen, then Gemini. The model returns a structured verdict with sub-scores, an opinionated text verdict in a recruiter's voice, and a `suspicious` flag. Deterministic caps post-process the result before it reaches the user.
+**Stage 4 — AI evaluation.** Top 55 plus 5 wildcards reach a heuristic pre-screen, then the verdict LLM — Cerebras `qwen-3-235b-a22b-instruct-2507` (primary) with Groq `llama-3.3-70b-versatile` as a ping-pong fallback. The model returns a structured verdict with sub-scores, an opinionated text verdict in a recruiter's voice, and a `suspicious` flag. Deterministic caps post-process the result before it reaches the user.
 
-**Stage 5 — Dispatch.** Color-coded match badges, bolded `MATCH:` and `GAP:` markers in each verdict, severity badges on titles, and a compact lower-ranked table at the bottom. Same data renders as Markdown into a GitHub Issue in a private logs repo. Cleanup runs in a `finally` so even crashes don't leak orphaned issues.
+**Stage 5 — Layer 3 geo-eligibility check.** After AI evaluation, any job that looks ambiguously regional — a "Remote, Country" title pattern, a specific-country location field, or no global confirmer ("worldwide", "globally remote") in the description — is sent to Gemini with Google Search grounding. Gemini issues live web queries to determine whether a Palestine-based candidate can legally apply. Jobs are classified `open / uncertain / restricted`: restricted are dropped from the email entirely; uncertain are capped at 50% match with a `[GEO-UNVERIFIED]` badge. This layer runs on both the AI-evaluated top section and the lower-ranked section.
+
+**Stage 6 — Dispatch.** Color-coded match badges, bolded `MATCH:` and `GAP:` markers in each verdict, severity badges on titles, and a compact lower-ranked table at the bottom. Same data renders as Markdown into a GitHub Issue in a private logs repo. Cleanup runs in a `finally` so even crashes don't leak orphaned issues.
 
 That is the system, end to end. The next section is the deep tour.
 
@@ -121,20 +127,45 @@ Then the inductive bias. [pipeline/region_weighting.py](pipeline/region_weightin
 
 A second multiplier (1.25x) stacks on top for the 81 trusted companies in [data/reputation.json](data/reputation.json). The final `weighted_score` drives the ranking; the raw `similarity` is preserved for visibility. The result: a 0.57 raw-similarity "Junior Software Engineer — Remote, Brazil" now sorts well above a 0.57 raw-similarity Indian sus-internship, because Brazil's 1.15x beats India's 0.70x.
 
-Top 45 jobs by weighted score plus 5 deterministically-sampled wildcards reach the AI. The rest appear in the email under a "Lower-Ranked Matches" section with their similarity scores but no AI verdict — a hedge against the ranker being wrong about something the AI would catch.
+Top 55 jobs by weighted score plus 5 deterministically-sampled wildcards reach the AI. The rest appear in the email under a "Lower-Ranked Matches" section with their similarity scores but no AI verdict — a hedge against the ranker being wrong about something the AI would catch. The lower-ranked section also goes through the Layer 3 geo-check, so a job that avoided AI evaluation can still be dropped if Gemini confirms it is restricted to a specific country.
 
 </details>
 
 <details>
-<summary><strong>AI — the recruiter</strong></summary>
+<summary><strong>AI — the verdict LLM (Cerebras + Groq)</strong></summary>
 
-Gemini 3.1 Flash Lite was chosen because it is free, fast, and accurate enough for this task. The prompt is engineered to make the model think like a senior recruiter, not a friendly career-coach AI. It is forbidden from using the word "strong" or any other generic praise. Every match claim must cite a specific CV asset by name, and every gap claim must name the missing requirement specifically. The verdict structure is anchored: `MATCH:`, optionally `SECOND MATCH/GAP:`, then `GAP:`, optionally `CLOSING REASON:` when the model decides to disqualify outright.
+Job verdicts are generated by **Cerebras `qwen-3-235b-a22b-instruct-2507`** (primary) with **Groq `llama-3.3-70b-versatile`** as a hot fallback — both free-tier instruction-tuned models that produce clean JSON without burning tokens on internal reasoning. The fallback logic in [pipeline/core_llm.py](pipeline/core_llm.py) alternates providers in a ping-pong pattern: Cerebras → Groq → Cerebras → Groq, with at least four attempts and a 1.5-second inter-attempt pause before giving up on a job. Transient 5xx / rate-limit / timeout errors are retried; 4xx auth errors still trigger a provider switch in case the failure is model-specific rather than credential-specific.
+
+Why not Gemini for verdicts? Gemini's free tier caps at 500 RPD. After the embedding pre-rank and geo-checks also use Gemini, dedicating the quota to geo-verification rather than verdicts produces better signal for zero additional cost. Cerebras's `qwen-3-235b-a22b-instruct-2507` is a 235B-param Qwen 3 instruct model with 1M TPD — essentially unbounded for this use case.
+
+A critical lesson from the provider search: **avoid reasoning models**. Both Cerebras's `gpt-oss-120b` and Groq's `llama-4-scout` consume the entire `max_completion_tokens` budget on hidden internal chain-of-thought before emitting visible text, leaving the actual JSON response empty or truncated. The `instruct` suffix in the model name is the reliable indicator of a non-thinking variant.
+
+The prompt is engineered to make the model think like a senior recruiter, not a friendly career-coach AI. It is forbidden from using the word "strong" or any other generic praise. Every match claim must cite a specific CV asset by name, and every gap claim must name the missing requirement specifically. The verdict structure is anchored: `MATCH:`, optionally `SECOND MATCH/GAP:`, then `GAP:`, optionally `CLOSING REASON:` when the model decides to disqualify outright.
 
 The prompt also demands explicit math. The model is told that `match_percentage = 0.5 * tech_fit + 0.3 * experience_fit + 0.2 * logistics_fit`, capped at 60 if `suspicious=True`. This makes the verdict auditable: a 92% match should be inspectable as roughly 100% tech, 80% experience, 90% logistics. When the math doesn't add up, I know the model lied about its sub-scores.
 
 Two failure modes shaped the post-processing. First, when a job description is missing or truncated by LinkedIn's authwall, the model used to invent confidence it didn't have. The "Limited Info Protocol" — a paragraph in the prompt that instructs the model to deduct ten from each sub-score and explicitly note the missing description — fixed it. Second, the model sometimes flagged a posting as `suspicious=True` and then proceeded to give it 80%. [apply_post_ai_caps](pipeline/core_ai.py) is the deterministic guard: any AI-self-flagged suspicious result above 55% gets clamped, and the verdict gets an `[AI-SUSPICIOUS]` prefix.
 
 For India-located suspicious companies, a third layer fires: [detect_company_scam](pipeline/core_ai.py) runs three short DuckDuckGo queries against the company name (scam, fake job complaints, reddit review). Two or more scam keywords across the combined snippets, and the match drops to 30% with a `[SCAM]` tag. The check is conservative because false positives here would damage real Indian companies; the threshold was tuned by examining historical reviews of known job mills.
+
+</details>
+
+<details>
+<summary><strong>Geo-eligibility — Layer 3 live verification (Gemini + Google Search)</strong></summary>
+
+Gemini 3.1 Flash Lite is used exclusively for two roles after the verdict model switch: CV embedding (via `gemini-embedding-001`) and **Layer 3 geo-eligibility verification**.
+
+The geo problem had two forms. The deterministic form — explicit phrases like "must reside in Germany", "Canadian residents only", "EU-based candidates only", "open to UK applicants only" — is caught in Stage 2's `quick_viability_check` before any AI call fires. A compiled regex covers 80+ countries/regions across eleven phrase templates, so a job with an explicit restriction never reaches the verdict model in the first place.
+
+The ambiguous form — a job that says "Remote" but whose company or posting pattern suggests a specific country without stating it — is harder. For these, [pipeline/core_geo.py](pipeline/core_geo.py) fires after the AI verdict. It constructs two targeted web queries (company remote-work policy for the role + the role's geographic eligibility from Palestine), passes them to Gemini with a `google_search` grounding tool, and parses the response into a tri-state:
+
+- **`open`** — no geo restriction found; job passes unchanged.
+- **`uncertain`** — evidence is mixed or missing; `match_percentage` is capped at 50% and the title gets a `[GEO-UNVERIFIED]` badge.
+- **`restricted`** — clear restriction for Palestine-based applicants; `is_valid=False`, logistics≤15, match≤30. The job is dropped from the email entirely.
+
+`[BLACKLISTED]` and `[SCAM]` tags take precedence — if a job is already flagged for those reasons, no geo tag is prepended and the geo verdict doesn't override them.
+
+The check fires on both the AI-evaluated top section and the lower-ranked section, on any job that matches at least one trigger: "Remote, CountryName" in the title, a specific country in the location field, or no global-remote confirmer ("worldwide", "globally remote", "work from anywhere", etc.) anywhere in the description. Gemini's free-tier RPD is dedicated to this layer; the verdict models (Cerebras and Groq) have their own quotas and don't touch it.
 
 </details>
 
@@ -183,7 +214,7 @@ The GitHub Issue version uses Markdown with the same structure. It exists for tw
 <details>
 <summary><strong>Two-tier evaluation: heuristic pre-screen before the LLM</strong></summary>
 
-The heuristic pre-screen in `quick_viability_check` saves roughly 30-40% of AI calls. It runs five gates in sequence: reputation blacklist, non-tech title signal, description-length sanity check (with bypasses for legitimate cases like LinkedIn-radar snippets and authwall placeholders), explicit senior-experience requirement, and a hard work-authorization disqualifier. Cost of the heuristic: microseconds per job. Cost of the AI call it replaces: 4-6 seconds plus one of 500 daily quota slots. The asymmetry justified the work.
+The heuristic pre-screen in `quick_viability_check` saves roughly 30-40% of AI calls. It runs six gates in sequence: reputation blacklist, non-tech title signal, description-length sanity check (with bypasses for legitimate cases like LinkedIn-radar snippets and authwall placeholders), explicit senior-experience requirement, a hard work-authorization disqualifier, and now a **generalized geo-lock pattern check** that covers explicit restrictions for 80+ individual countries and regions. The geo-lock gate compiles eleven phrase templates at startup — patterns like "must reside in {country}", "{country} residents only", "open to {country} applicants", "legally authorized to work in {country}" — against a list that includes every major employment market. A description that contains any of these phrases is rejected before the AI ever sees the job. Cost of the heuristic: microseconds per job. Cost of the AI call it replaces: multiple seconds plus one of the daily quota slots. The asymmetry justified the work.
 
 </details>
 
@@ -235,7 +266,7 @@ The CV used to be committed as `cv_text.txt`. Once the repo went public, that be
 
 Everything above describes what the system does. This section describes how I made sure it keeps working — and is the part of the project I would point a hiring manager toward first.
 
-**408 tests across three tiers.** The suite in [QA/](QA/) follows the testing pyramid. Most tests are unit tests in `QA/unit/` (pure functions, deterministic, sub-millisecond). Some are integration tests in `QA/integration/` (multi-module flows with external services mocked). The rest are regression tests in `QA/regression/`. The test runner at [QA/run_all.py](QA/run_all.py) is pure stdlib — no pytest dependency required to run it — though every test is pytest-compatible too, so you can run `pytest QA/` if you prefer. The whole suite executes in roughly twenty-three seconds locally.
+**463 tests across three tiers.** The suite in [QA/](QA/) follows the testing pyramid. Most tests are unit tests in `QA/unit/` (pure functions, deterministic, sub-millisecond). Some are integration tests in `QA/integration/` (multi-module flows with external services mocked). The rest are regression tests in `QA/regression/`. The test runner at [QA/run_all.py](QA/run_all.py) is pure stdlib — no pytest dependency required to run it — though every test is pytest-compatible too, so you can run `pytest QA/` if you prefer. The whole suite executes in roughly twenty-three seconds locally.
 
 **Regression tests named for production bugs.** Each file in `QA/regression/` freezes a specific failure that once made it into a real email — `test_date_decoder_ms_bug.py`, `test_logs_repo_url_normalization.py`, `test_short_description_bypass.py`, `test_zero_similarity_render.py`. When something breaks in production, the fix isn't complete until there's a regression test pinning it. This is the discipline that turns code into something you can maintain rather than something you have to babysit, and it's one of the things I'm most deliberate about in this repository.
 
@@ -258,8 +289,10 @@ Everything above describes what the system does. This section describes how I ma
 |   |-- core_search.py                fetchers for nine external sources
 |   |-- core_ats.py                   six ATS integrations + tiered Jina fallback
 |   |-- core_filter.py                deterministic filter gauntlet + JobTracker
-|   |-- core_embedding.py             CV-similarity pre-ranker
-|   |-- core_ai.py                    Gemini evaluation, pre-screen, scam check
+|   |-- core_embedding.py             CV-similarity pre-ranker (Gemini embeddings)
+|   |-- core_llm.py                   Cerebras + Groq ping-pong fallback verdict client
+|   |-- core_geo.py                   Layer 3 remote eligibility check (Gemini + Google Search)
+|   |-- core_ai.py                    verdict prompt, pre-screen, scam check, post-AI caps
 |   |-- core_notify.py                email + GitHub Issue rendering and dispatch
 |   |-- region_weighting.py           geographic + trust weighting for the ranker
 |   |-- url_validation.py             URL-pattern check + HEAD probe for ghost listings
@@ -305,7 +338,9 @@ pip install -r requirements.txt
 pip install -r requirements-qa.txt
 
 # Set the required secrets
-export GEMINI_API_KEY=...
+export GEMINI_API_KEY=...                        # for embeddings and geo-eligibility checks
+export CEREBRAS_API_KEY=...                      # primary verdict LLM (Cerebras free tier)
+export GROQ_API_KEY=...                          # fallback verdict LLM (Groq free tier)
 export SENDER_EMAIL=...
 export EMAIL_APP_PASSWORD=...                    # Gmail app password, not your account password
 export LOGS_REPO=owner/repo-name                 # optional — private logs repo
@@ -332,24 +367,25 @@ Both pipelines are designed to be safe to run repeatedly. The seen-jobs tracker 
 
 A snapshot of the current state:
 
-| Metric                                      | Value                          |
-| ------------------------------------------- | ------------------------------ |
-| External job sources integrated             | 9                              |
-| ATS platforms with direct API integration   | 6                              |
-| Region tiers in the weighting system        | 5                              |
-| Companies in the trust-boost list           | 81                             |
-| Companies in the reputation blacklist       | 12                             |
-| Total tests in the QA suite                 | 408                            |
-| Test files                                  | 26                             |
-| QA suite runtime (local, sequential)        | ~23 seconds                    |
-| Daily pipeline runtime (GitHub Actions)     | ~5-7 minutes                   |
-| LLM provider                                | Gemini 3.1 Flash Lite          |
-| LLM quota used per day (typical)            | ~50 / 500 RPD                  |
-| Embedding model                             | gemini-embedding-001           |
-| Embedding throttle                          | 50ms (~20 RPS)                 |
-| AI evaluation top-N                         | 45 + 5 wildcards               |
-| Email frequency                             | once per day per pipeline      |
-| Monthly cost                                | $0                             |
+| Metric                                      | Value                                            |
+| ------------------------------------------- | ------------------------------------------------ |
+| External job sources integrated             | 9                                                |
+| ATS platforms with direct API integration   | 6                                                |
+| Region tiers in the weighting system        | 5                                                |
+| Companies in the trust-boost list           | 81                                               |
+| Companies in the reputation blacklist       | 12                                               |
+| Geo-lock countries covered (pre-screen)     | 80+                                              |
+| Total tests in the QA suite                 | 463                                              |
+| Test files                                  | 29                                               |
+| QA suite runtime (local, sequential)        | ~23 seconds                                      |
+| Daily pipeline runtime (GitHub Actions)     | ~5-7 minutes                                     |
+| Verdict LLM (primary)                       | Cerebras qwen-3-235b-a22b-instruct-2507 (free)   |
+| Verdict LLM (fallback)                      | Groq llama-3.3-70b-versatile (free)              |
+| Geo-check + embeddings                      | Gemini 3.1 Flash Lite + gemini-embedding-001     |
+| Embedding throttle                          | 650ms (~92 RPM, under 100 RPM free-tier cap)     |
+| AI evaluation top-N                         | 55 + 5 wildcards                                 |
+| Email frequency                             | once per day per pipeline                        |
+| Monthly cost                                | $0                                               |
 
 ---
 
@@ -357,7 +393,7 @@ A snapshot of the current state:
 
 The single-user version of this system is mature. The path forward is making it serve other people, which is fundamentally a different architecture: a Next.js front end on Vercel, a Supabase Postgres back end with row-level security so each user's data is isolated, the existing `pipeline/` package as the worker (run via the same GitHub Actions cron, just looping over users from the database), and Resend for transactional email. The current pipeline is being shaped so that this transition is straightforward — the package is import-clean, the entry points are thin orchestrators, the configuration is data not code. When the multi-user variant ships, the single-user version will still work; it will just be one user in the database.
 
-A few smaller items also remain on the list. A user-feedback loop ("I applied to this; I got an interview"; "I rejected this") that biases future rankings is a natural follow-on but requires the database. A logging upgrade to ship structured JSON logs to an aggregator like Better Stack or Grafana Loki is appropriate when multiple users are running concurrently. A Cerebras-as-fallback LLM for when Gemini quota is exhausted is a safety net I have not yet needed.
+A few smaller items also remain on the list. A user-feedback loop ("I applied to this; I got an interview"; "I rejected this") that biases future rankings is a natural follow-on but requires the database. A logging upgrade to ship structured JSON logs to an aggregator like Better Stack or Grafana Loki is appropriate when multiple users are running concurrently.
 
 For now, the system runs every morning and tells me the truth about that day's market. That was the goal.
 
