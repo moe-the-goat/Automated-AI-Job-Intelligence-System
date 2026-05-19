@@ -22,21 +22,29 @@ from pipeline.logging_setup import get_logger
 logger = get_logger(__name__)
 
 
-# Model picks based on the actual free-tier menus on each provider (2026-05-19):
+# Model picks based on the actual free-tier menus on each provider (2026-05-19).
 #
-# Cerebras free tier: gpt-oss-120b is the most capable PRODUCTION model on offer.
+# CRITICAL gotcha: avoid REASONING models like gpt-oss-120b. They burn most of
+# the `max_completion_tokens` budget on hidden internal reasoning tokens BEFORE
+# emitting any visible content, leaving the actual JSON response truncated or
+# entirely empty. Both Cerebras's gpt-oss-120b and Groq's llama-4-scout share
+# this behavior — we got "Empty AI response" and "Unterminated JSON" errors on
+# every call during the first attempt at non-Gemini verdicts.
+#
+# Cerebras free tier: qwen-3-235b-a22b-instruct-2507 is a 235B-param Qwen 3
+# instruction-tuned model with NO reasoning overhead.
 #   * 65K context, 5 RPM, 150 RPH, 2400 RPD, 30K TPM, 1M TPH, 1M TPD.
-#   * llama-3.3-70b (used previously) does NOT exist on Cerebras free tier — every
-#     call silently fell through to Groq.
+#   * "Instruct" suffix => non-thinking variant => responses go straight to
+#     the requested JSON without burning tokens on internal CoT.
 #
-# Groq free tier: meta-llama/llama-4-scout-17b-16e-instruct.
-#   * 30 RPM, 1K RPD, 30K TPM, 500K TPD.
-#   * llama-3.3-70b-versatile (used previously) caps at only 100K TPD — too small
-#     for ~60 evals/day at 3.5K tokens each (we exhausted it after ~28 jobs).
-#   * llama-4-scout is Meta's newer 17B instruction-tuned model with 5x the daily
-#     token quota of llama-3.3-70b-versatile.
-_CEREBRAS_MODEL = "gpt-oss-120b"
-_GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+# Groq free tier: llama-3.3-70b-versatile.
+#   * 30 RPM, 1K RPD, 12K TPM, 100K TPD.
+#   * Smaller TPD than llama-4-scout (500K) but Llama 3.3 is a standard
+#     non-reasoning instruction model that reliably produces clean JSON.
+#     The TPD cap is enough as long as Cerebras takes the bulk of the calls;
+#     Groq only fires on Cerebras failures.
+_CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507"
+_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # Short backoff between fallback attempts. The user wants "immediate" switching
 # between providers — long exponential backoff would defeat the point of having
@@ -68,6 +76,12 @@ def _is_retryable_error(exc):
     return any(marker in msg for marker in _RETRYABLE_MARKERS)
 
 
+# Output budget: 2048 tokens. The actual JSON verdict is ~500 tokens (200-token
+# "verdict" string + ~8 numeric/short fields), but we keep headroom so the model
+# can preface with a brief preamble before the JSON without truncating it.
+_MAX_OUTPUT_TOKENS = 2048
+
+
 def _call_cerebras(prompt, api_key):
     """Single Cerebras call. Raises on any error (caller decides retry policy)."""
     from cerebras.cloud.sdk import Cerebras
@@ -76,7 +90,7 @@ def _call_cerebras(prompt, api_key):
         model=_CEREBRAS_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
-        max_completion_tokens=800,
+        max_completion_tokens=_MAX_OUTPUT_TOKENS,
     )
     return response.choices[0].message.content
 
@@ -89,7 +103,7 @@ def _call_groq(prompt, api_key):
         model=_GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
-        max_tokens=800,
+        max_tokens=_MAX_OUTPUT_TOKENS,
     )
     return response.choices[0].message.content
 
