@@ -9,7 +9,10 @@ from pipeline.region_weighting import (
     compute_region_weight,
     compute_trust_weight,
     compute_combined_weight,
+    infer_role_tier,
+    compute_role_weight,
     REGION_WEIGHTS,
+    ROLE_WEIGHTS,
     TRUST_BOOST_MULTIPLIER,
 )
 
@@ -246,3 +249,118 @@ def test_india_with_trust_boost_still_below_eu():
     india_trusted = {"location": "Bangalore", "pre_flagged_trusted": True}
     eu_plain = {"location": "Berlin", "pre_flagged_trusted": False}
     assert compute_combined_weight(india_trusted) < compute_combined_weight(eu_plain)
+
+
+# ---------------------------------------------------------------------------
+# Role-tier weighting — AI > SWE > Other (added 2026-05-20)
+# ---------------------------------------------------------------------------
+
+def test_role_weight_ordering_ai_above_swe_above_other():
+    """AI roles outweigh SWE roles, which outweigh everything else."""
+    assert ROLE_WEIGHTS["ai"] > ROLE_WEIGHTS["swe"] > ROLE_WEIGHTS["other"]
+
+
+def test_role_tier_ai_engineer():
+    row = {"title": "AI Engineer"}
+    assert infer_role_tier(row) == "ai"
+
+
+def test_role_tier_ml_engineer():
+    row = {"title": "Machine Learning Engineer"}
+    assert infer_role_tier(row) == "ai"
+
+
+def test_role_tier_data_scientist():
+    row = {"title": "Junior Data Scientist"}
+    assert infer_role_tier(row) == "ai"
+
+
+def test_role_tier_nlp_engineer():
+    row = {"title": "NLP Engineer (Remote)"}
+    assert infer_role_tier(row) == "ai"
+
+
+def test_role_tier_genai_engineer():
+    row = {"title": "Generative AI Engineer"}
+    assert infer_role_tier(row) == "ai"
+
+
+def test_role_tier_llm_engineer():
+    row = {"title": "LLM Engineer"}
+    assert infer_role_tier(row) == "ai"
+
+
+def test_role_tier_software_engineer():
+    row = {"title": "Software Engineer"}
+    assert infer_role_tier(row) == "swe"
+
+
+def test_role_tier_backend_developer():
+    row = {"title": "Backend Developer"}
+    assert infer_role_tier(row) == "swe"
+
+
+def test_role_tier_full_stack_engineer():
+    row = {"title": "Full-Stack Engineer"}
+    assert infer_role_tier(row) == "swe"
+
+
+def test_role_tier_web_developer():
+    row = {"title": "Web Developer (Remote)"}
+    assert infer_role_tier(row) == "swe"
+
+
+def test_role_tier_devops_is_other():
+    """DevOps / SRE / Platform roles deliberately land in 'other' — not negative,
+    just unboosted relative to AI/SWE."""
+    row = {"title": "DevOps Engineer"}
+    assert infer_role_tier(row) == "other"
+
+
+def test_role_tier_data_analyst_is_other():
+    row = {"title": "Data Analyst"}
+    assert infer_role_tier(row) == "other"
+
+
+def test_role_tier_ai_wins_over_swe_in_compound_title():
+    """A title that matches both AI and SWE keywords should land in AI tier —
+    e.g. 'Machine Learning Software Engineer' is fundamentally an AI role."""
+    row = {"title": "Machine Learning Software Engineer"}
+    assert infer_role_tier(row) == "ai"
+
+
+def test_role_tier_empty_title_is_other():
+    assert infer_role_tier({"title": ""}) == "other"
+    assert infer_role_tier({}) == "other"
+
+
+def test_compute_role_weight_matches_table():
+    assert compute_role_weight({"title": "AI Engineer"}) == ROLE_WEIGHTS["ai"]
+    assert compute_role_weight({"title": "Software Engineer"}) == ROLE_WEIGHTS["swe"]
+    assert compute_role_weight({"title": "DevOps"}) == ROLE_WEIGHTS["other"]
+
+
+def test_combined_weight_now_includes_role():
+    """compute_combined_weight = region * trust * role.
+
+    An AI engineer in Berlin (trusted) should beat the equivalent untitled
+    row by the AI role multiplier alone — proving role is in the product.
+    """
+    ai_eu_trusted = {"location": "Berlin", "title": "AI Engineer", "pre_flagged_trusted": True}
+    untitled_eu_trusted = {"location": "Berlin", "title": "", "pre_flagged_trusted": True}
+    ratio = compute_combined_weight(ai_eu_trusted) / compute_combined_weight(untitled_eu_trusted)
+    assert abs(ratio - ROLE_WEIGHTS["ai"] / ROLE_WEIGHTS["other"]) < 1e-9
+
+
+def test_ai_role_beats_swe_role_at_equal_geography_and_trust():
+    """The whole point of role-tier weighting: AI roles outrank SWE roles
+    at otherwise-identical regional and trust weighting."""
+    ai_role = {"location": "Berlin", "title": "AI Engineer", "pre_flagged_trusted": False}
+    swe_role = {"location": "Berlin", "title": "Software Engineer", "pre_flagged_trusted": False}
+    assert compute_combined_weight(ai_role) > compute_combined_weight(swe_role)
+
+
+def test_swe_role_beats_other_role_at_equal_geography():
+    swe = {"location": "Berlin", "title": "Software Engineer"}
+    other = {"location": "Berlin", "title": "Data Analyst"}
+    assert compute_combined_weight(swe) > compute_combined_weight(other)

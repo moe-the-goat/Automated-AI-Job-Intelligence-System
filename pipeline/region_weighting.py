@@ -165,6 +165,107 @@ TRUST_BOOST_MULTIPLIER = 1.25
 NEUTRAL_TRUST_MULTIPLIER = 1.00
 
 
+# ---------------------------------------------------------------------------
+# Role-tier weighting (added 2026-05-20)
+# ---------------------------------------------------------------------------
+#
+# On top of region + trust, we now weight the role itself based on how
+# central it is to the candidate's profile. The CV centers on AI / GenAI /
+# RAG / LLM systems, with strong general software engineering as the
+# foundation. So we want:
+#   AI roles  > Software Engineering roles  > Everything else
+#
+# The role weight is applied AFTER region and trust in compute_combined_weight,
+# so the final multiplier is (region * trust * role). Maxed out: a trusted
+# EU AI Engineer role gets 1.15 * 1.25 * 1.20 = 1.725x — clearly ahead of
+# a US generic role at 1.00x.
+#
+# Why these tiers (not finer-grained):
+#  - AI (1.20x): The candidate's strongest, most differentiated experience.
+#    Anything matching ML/AI/NLP/CV/LLM/GenAI/Data Science deserves the lead.
+#  - SWE (1.10x): The candidate is a competent generalist. Strong fit for any
+#    software / backend / frontend / fullstack / web role even when AI isn't
+#    the explicit topic.
+#  - Other (1.00x): Everything else. DevOps, SRE, platform, analyst, etc. —
+#    not negative, just unboosted. Those roles still ride the region weight.
+_AI_ROLE_PATTERNS = (
+    r"\bai\s+(?:engineer|developer|scientist|intern|researcher|architect|lead)\b",
+    r"\bartificial\s+intelligence\b",
+    r"\bml\s+(?:engineer|ops|intern|developer|researcher|scientist)\b",
+    r"\bmlops\b",
+    r"\bmachine\s+learning\b",
+    r"\bdeep\s+learning\b",
+    r"\bneural\s+network\b",
+    r"\bnlp\b",
+    r"\bnatural\s+language\s+processing\b",
+    r"\bcomputer\s+vision\b",
+    r"\bllm\s+(?:engineer|intern|developer|researcher)\b",
+    r"\blarge\s+language\s+model\b",
+    r"\bgenerative\s+ai\b",
+    r"\bgen\s*ai\b",
+    r"\bdata\s+scien(?:tist|ce)\b",
+    r"\bresearch\s+(?:engineer|scientist)\b",
+    r"\bapplied\s+scientist\b",
+    r"\brag\s+(?:engineer|developer)\b",
+    r"\bai/ml\b", r"\bml/ai\b",
+)
+
+_SWE_ROLE_PATTERNS = (
+    r"\bsoftware\s+(?:engineer|developer)\b",
+    r"\b(?:backend|back[\-\s]end)\s+(?:engineer|developer)\b",
+    r"\b(?:frontend|front[\-\s]end)\s+(?:engineer|developer)\b",
+    r"\bfull[\-\s]?stack\s+(?:engineer|developer)\b",
+    r"\bfullstack\b",
+    r"\bweb\s+(?:developer|engineer)\b",
+    r"\bmobile\s+(?:developer|engineer)\b",
+    r"\bios\s+developer\b", r"\bandroid\s+developer\b",
+    r"\bjava\s+(?:developer|engineer)\b",
+    r"\bpython\s+developer\b",
+    r"\bjavascript\s+(?:developer|engineer)\b",
+    r"\btypescript\s+developer\b",
+    r"\breact\s+developer\b",
+    r"\bnode\.?js\s+developer\b",
+    r"\bdjango\s+developer\b",
+    r"\bmember\s+of\s+technical\s+staff\b",
+    r"\bsystems?\s+engineer\b",
+    r"\bembedded\s+(?:developer|engineer)\b",
+    # bare "developer" / "engineer" as fallback (least specific, last on the list)
+    r"\bjunior\s+(?:developer|engineer)\b",
+    r"\bentry[\-\s]level\s+(?:developer|engineer)\b",
+)
+
+_AI_ROLE_RE = re.compile("|".join(_AI_ROLE_PATTERNS), re.IGNORECASE)
+_SWE_ROLE_RE = re.compile("|".join(_SWE_ROLE_PATTERNS), re.IGNORECASE)
+
+ROLE_WEIGHTS = {
+    "ai":    1.20,
+    "swe":   1.10,
+    "other": 1.00,
+}
+
+
+def infer_role_tier(row):
+    """Categorize a job row into "ai", "swe", or "other" based on the title.
+
+    Order matters: AI is checked first so "Machine Learning Software Engineer"
+    correctly lands in the AI tier (not SWE) even though both keywords match.
+    """
+    title = str(row.get("title", "") or "")
+    if not title.strip():
+        return "other"
+
+    if _AI_ROLE_RE.search(title):
+        return "ai"
+    if _SWE_ROLE_RE.search(title):
+        return "swe"
+    return "other"
+
+
+def compute_role_weight(row):
+    """Multiplier for role tier, applied alongside region and trust weights."""
+    return ROLE_WEIGHTS[infer_role_tier(row)]
+
+
 def _row_text(row):
     """Pool the row fields most likely to carry geographic signal."""
     parts = [
@@ -234,5 +335,5 @@ def compute_trust_weight(row):
 
 
 def compute_combined_weight(row):
-    """Final multiplier = region * trust. Used by the embedding ranker."""
-    return compute_region_weight(row) * compute_trust_weight(row)
+    """Final multiplier = region * trust * role. Used by the embedding ranker."""
+    return compute_region_weight(row) * compute_trust_weight(row) * compute_role_weight(row)

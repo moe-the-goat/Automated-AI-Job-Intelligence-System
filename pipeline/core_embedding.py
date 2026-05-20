@@ -163,8 +163,14 @@ def attach_similarity(combined_jobs, cv_text, api_key, throttle_seconds=EMBED_TH
 
     `similarity`     — raw cosine sim against the CV embedding (for debugging /
                        email visibility).
-    `weighted_score` — similarity * region_weight * trust_weight. Used for the
-                       top-N cutoff that decides which jobs reach the AI.
+    `weighted_score` — similarity * region_weight * trust_weight * role_weight.
+                       Used for the top-N cutoff that decides which jobs reach
+                       the AI.
+
+    `api_key` should be the embedding-dedicated key (GEMINI_EMBED_API_KEY in
+    production) so the embedding burst (~100 RPM peak) doesn't poison the main
+    Gemini key's quota — which is reserved for geo-checks. Falls back to the
+    main GEMINI_API_KEY if the dedicated one isn't set.
 
     Best-effort: if embedding fails entirely (no API key, no network), every
     row gets similarity=0.0 and weighted_score gets the weight × 0.0 = 0.0,

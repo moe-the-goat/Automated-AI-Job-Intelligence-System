@@ -153,9 +153,15 @@ def run_pipeline(config, tracker):
         
         if not combined_jobs.empty:
             # 4. AI Evaluation
-            #  - Gemini key: used by embedding pre-rank AND by core_geo Layer 3 geo-check.
+            #  - Gemini main key: used by core_geo Layer 3 geo-check (Google Search grounded).
+            #  - Gemini EMBED key: dedicated to embedding-pre-rank only. We split keys
+            #    because the embedding burst (~100 RPM peak on ~120 jobs/day) was
+            #    poisoning the shared project quota and breaking the geo-check with
+            #    429 RESOURCE_EXHAUSTED. Two keys = two isolated quotas.
+            #    Falls back to the main key if EMBED_API_KEY isn't configured.
             #  - Cerebras/Groq keys: used by core_ai.evaluate_job_with_ai for the main verdict.
             gemini_key = os.environ.get("GEMINI_API_KEY", "")
+            gemini_embed_key = os.environ.get("GEMINI_EMBED_API_KEY", "") or gemini_key
             cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
             groq_key = os.environ.get("GROQ_API_KEY", "")
             try:
@@ -166,7 +172,9 @@ def run_pipeline(config, tracker):
 
             # A3: pre-rank by CV-embedding similarity. Top-N + wildcards go to AI;
             # the rest still appear in the email under a "Lower-ranked" section.
-            combined_jobs = attach_similarity(combined_jobs, cv_text, gemini_key)
+            # Uses the dedicated embed key so the embedding burst doesn't share
+            # quota with the geo-check key.
+            combined_jobs = attach_similarity(combined_jobs, cv_text, gemini_embed_key)
             if len(combined_jobs) > AI_EVAL_TOP_N:
                 top_n = combined_jobs.head(AI_EVAL_TOP_N)
                 rest = combined_jobs.iloc[AI_EVAL_TOP_N:]
@@ -251,51 +259,12 @@ def run_pipeline(config, tracker):
             stats['approved'] = len(combined_jobs)
             logger.info("Total jobs remaining after AI validation: %d", stats['approved'])
 
-            # Lower-ranked geo-check loop. These jobs never got an AI verdict,
-            # so the geo-check is their primary geographic safety filter.
-            # We do the same deterministic should_geo_check trigger, then ask
-            # Gemini live whether a Palestine-based candidate can apply.
-            #   restricted -> dropped from the lower-ranked list silently
-            #   uncertain  -> kept, but flagged so the rendering shows a warning
-            #   open       -> kept, flagged as verified
-            if not lower_ranked.empty and gemini_key:
-                logger.info("Running geo-eligibility check on %d lower-ranked jobs...", len(lower_ranked))
-                geo_statuses = []
-                geo_evidences = []
-                keep_mask = []
-                lr_checked = 0
-                for _, lr_row in lower_ranked.iterrows():
-                    if should_geo_check(lr_row):
-                        geo = check_remote_eligibility(
-                            title=str(lr_row.get("title", "")),
-                            company=str(lr_row.get("company", "")),
-                            job_url=str(lr_row.get("job_url", "")),
-                            description=str(lr_row.get("description", "")),
-                            api_key=gemini_key,
-                        )
-                        lr_checked += 1
-                        eligibility = geo.get("eligibility", "uncertain")
-                        if eligibility == "restricted":
-                            keep_mask.append(False)
-                            geo_statuses.append("restricted")
-                            geo_evidences.append(geo.get("evidence", ""))
-                            continue
-                        keep_mask.append(True)
-                        geo_statuses.append(eligibility)
-                        geo_evidences.append(geo.get("evidence", ""))
-                    else:
-                        # No geo trigger fired — job already explicitly worldwide.
-                        keep_mask.append(True)
-                        geo_statuses.append("open")
-                        geo_evidences.append("")
-                lower_ranked = lower_ranked.copy()
-                lower_ranked['geo_status'] = geo_statuses
-                lower_ranked['geo_evidence'] = geo_evidences
-                lower_ranked = lower_ranked[keep_mask].reset_index(drop=True)
-                logger.info(
-                    "Lower-ranked geo-check: checked %d, dropped %d as restricted, %d remain.",
-                    lr_checked, sum(1 for s in geo_statuses if s == "restricted"), len(lower_ranked),
-                )
+            # Note: lower-ranked jobs do NOT get geo-checked anymore. Doing 58+
+            # Gemini grounded-search calls per run was burning the entire daily
+            # Flash Lite quota and returning 429 RESOURCE_EXHAUSTED on every
+            # attempt (including the top-section geo-check that actually matters).
+            # Geo-check is now reserved for the small handful of AI-approved
+            # top-section jobs where the answer materially affects the email.
 
             # 5. Output and Notification
             # Split into internships and jobs

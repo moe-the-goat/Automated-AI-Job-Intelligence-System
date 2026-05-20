@@ -112,27 +112,91 @@ def test_email_renders_scam_badge_outranks_others():
     assert "⚠️ Fake" not in html
 
 
-def test_email_renders_lower_ranked_section_when_provided():
+def test_email_renders_also_found_section_when_provided():
+    """Lower-ranked section renders as 'Also Found' with weighted_score as percentage."""
     main = pd.DataFrame([baseline_job_row()])
     lower = pd.DataFrame([
         {"title": "Low-sim 1", "company": "X", "location": "R",
-         "similarity": 0.45, "job_url": "https://example.com/lr1"},
+         "similarity": 0.45, "weighted_score": 0.45,
+         "job_url": "https://example.com/lr1"},
         {"title": "Low-sim 2", "company": "Y", "location": "R",
-         "similarity": 0.32, "job_url": "https://example.com/lr2"},
+         "similarity": 0.32, "weighted_score": 0.32,
+         "job_url": "https://example.com/lr2"},
     ])
     html = format_email_html(main, pd.DataFrame(), _stats(1), lower_ranked_df=lower)
-    assert "Lower-Ranked Matches" in html
+    assert "Also Found" in html
     assert "2 jobs" in html
     assert "Low-sim 1" in html
-    assert "0.45" in html
+    # weighted_score 0.45 -> "45%"
+    assert "45%" in html
 
 
-def test_email_omits_lower_ranked_section_when_empty_or_none():
+def test_email_omits_also_found_section_when_empty_or_none():
     main = pd.DataFrame([baseline_job_row()])
     html_none = format_email_html(main, pd.DataFrame(), _stats(1))
     html_empty = format_email_html(main, pd.DataFrame(), _stats(1), lower_ranked_df=pd.DataFrame())
-    assert "Lower-Ranked Matches" not in html_none
-    assert "Lower-Ranked Matches" not in html_empty
+    assert "Also Found" not in html_none
+    assert "Also Found" not in html_empty
+
+
+def test_email_also_found_filters_blacklisted_rows():
+    """Reputation-flagged rows should NOT appear in Also Found — they were already
+    flagged in the AI section (or pre-screen-skipped) and showing them twice clutters
+    the view with the same Inficore/Skillzenloop/Techskill spam."""
+    main = pd.DataFrame([baseline_job_row()])
+    lower = pd.DataFrame([
+        {"title": "Clean Job", "company": "RealCo", "location": "Berlin",
+         "similarity": 0.50, "weighted_score": 0.58,
+         "pre_flagged_low_quality": False,
+         "job_url": "https://example.com/clean"},
+        {"title": "Spam Job", "company": "Inficore Soft", "location": "Bangalore",
+         "similarity": 0.60, "weighted_score": 0.42,
+         "pre_flagged_low_quality": True,
+         "job_url": "https://example.com/spam"},
+    ])
+    html = format_email_html(main, pd.DataFrame(), _stats(1), lower_ranked_df=lower)
+    assert "Clean Job" in html
+    assert "Spam Job" not in html
+    # The count in the header should reflect the post-filter count (1, not 2)
+    assert "1 jobs" in html
+
+
+def test_email_also_found_caps_at_15_rows():
+    """Section should hard-cap at 15 rows even if many lower-ranked jobs survive filtering."""
+    main = pd.DataFrame([baseline_job_row()])
+    lower = pd.DataFrame([
+        {"title": f"Row {i:02d}", "company": "Co", "location": "Remote",
+         "similarity": 0.5 - i * 0.001, "weighted_score": 0.6 - i * 0.001,
+         "pre_flagged_low_quality": False,
+         "job_url": f"https://example.com/{i}"}
+        for i in range(30)
+    ])
+    html = format_email_html(main, pd.DataFrame(), _stats(1), lower_ranked_df=lower)
+    assert "15 jobs" in html
+    # First 15 should appear (sorted by weighted_score desc -> Row 00..14)
+    assert "Row 00" in html
+    assert "Row 14" in html
+    # Row 15+ should be dropped
+    assert "Row 15" not in html
+
+
+def test_email_also_found_sorts_by_weighted_score_not_similarity():
+    """A row with HIGHER similarity but LOWER weighted_score (e.g. India-deweighted)
+    should appear BELOW a row with lower similarity but higher weighted (e.g. EU-boosted)."""
+    main = pd.DataFrame([baseline_job_row()])
+    lower = pd.DataFrame([
+        {"title": "High Sim Low Weight", "company": "X", "location": "Bangalore",
+         "similarity": 0.65, "weighted_score": 0.46,
+         "pre_flagged_low_quality": False,
+         "job_url": "https://example.com/a"},
+        {"title": "Low Sim High Weight", "company": "Y", "location": "Berlin",
+         "similarity": 0.50, "weighted_score": 0.58,
+         "pre_flagged_low_quality": False,
+         "job_url": "https://example.com/b"},
+    ])
+    html = format_email_html(main, pd.DataFrame(), _stats(1), lower_ranked_df=lower)
+    # "Low Sim High Weight" should appear FIRST in the HTML (higher in the table)
+    assert html.index("Low Sim High Weight") < html.index("High Sim Low Weight")
 
 
 def test_email_uses_no_jobs_placeholders():
