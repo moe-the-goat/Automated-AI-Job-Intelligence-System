@@ -33,10 +33,12 @@ jobs:
     - name: QA gate
       run: python QA/run_all.py
 
-    - name: Restore seen-jobs cache
+    - name: Restore seen-jobs + embedding-history cache
       uses: actions/cache@v4
       with:
-        path: seen_jobs.json
+        path: |
+          seen_jobs.json
+          data/embedding_history.json
         key: seen-jobs-${{ github.run_id }}
         restore-keys: seen-jobs-
 

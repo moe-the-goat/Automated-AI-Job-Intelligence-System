@@ -199,6 +199,59 @@ def test_email_also_found_sorts_by_weighted_score_not_similarity():
     assert html.index("Low Sim High Weight") < html.index("High Sim Low Weight")
 
 
+def test_email_renders_also_found_with_ai_verdicts():
+    """When the lower-ranked frame carries AI eval columns, the Also Found
+    section uses the Match-badge + AI Verdict layout (not just the legacy
+    Score percentage)."""
+    main = pd.DataFrame([baseline_job_row()])
+    lower = pd.DataFrame([
+        {"title": "Gemini-eval job", "company": "EuCo", "location": "Berlin",
+         "similarity": 0.55, "weighted_score": 0.63,
+         "match_percentage": 78, "tech_fit": 80, "experience_fit": 70, "logistics_fit": 80,
+         "compensation": "Not stated", "effort": "medium",
+         "suspicious": False, "scam": False, "pre_flagged_low_quality": False,
+         "ai_verdict": "MATCH: Your RAG project is a direct fit.",
+         "job_url": "https://example.com/lr-ai"},
+    ])
+    html = format_email_html(main, pd.DataFrame(), _stats(1), lower_ranked_df=lower)
+    assert "Also Found" in html
+    assert "Gemini-evaluated" in html
+    assert "Gemini-eval job" in html
+    # Match badge with the score:
+    assert "78%" in html
+    # Sub-scores rendered like the top section:
+    assert "T:80" in html
+    # AI verdict text shows up with MATCH bolded:
+    assert "<strong>MATCH:</strong>" in html
+    # Match cell header used (not the legacy "Score" header):
+    assert "<th>Match</th>" in html
+    assert "<th>AI Verdict</th>" in html
+
+
+def test_email_also_found_sorts_by_match_percentage_when_ai_eval_present():
+    """With AI columns the sort key switches from weighted_score to match_percentage."""
+    main = pd.DataFrame([baseline_job_row()])
+    lower = pd.DataFrame([
+        {"title": "Lower match", "company": "X", "location": "R",
+         "similarity": 0.55, "weighted_score": 0.70,
+         "match_percentage": 60, "tech_fit": 60, "experience_fit": 60, "logistics_fit": 60,
+         "compensation": "n/a", "effort": "low",
+         "suspicious": False, "scam": False, "pre_flagged_low_quality": False,
+         "ai_verdict": "Generic fit.",
+         "job_url": "https://example.com/lower-match"},
+        {"title": "Higher match", "company": "Y", "location": "R",
+         "similarity": 0.50, "weighted_score": 0.58,
+         "match_percentage": 75, "tech_fit": 75, "experience_fit": 75, "logistics_fit": 75,
+         "compensation": "n/a", "effort": "low",
+         "suspicious": False, "scam": False, "pre_flagged_low_quality": False,
+         "ai_verdict": "Stronger fit.",
+         "job_url": "https://example.com/higher-match"},
+    ])
+    html = format_email_html(main, pd.DataFrame(), _stats(1), lower_ranked_df=lower)
+    # "Higher match" (75%) sorts above "Lower match" (60%) despite lower weighted_score.
+    assert html.index("Higher match") < html.index("Lower match")
+
+
 def test_email_uses_no_jobs_placeholders():
     """When both dataframes are empty, the email still renders with placeholder paragraphs."""
     html = format_email_html(pd.DataFrame(), pd.DataFrame(), _stats(0))

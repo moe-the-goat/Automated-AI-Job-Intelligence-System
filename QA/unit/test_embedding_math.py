@@ -95,29 +95,32 @@ from pipeline.core_embedding import attach_similarity
 def test_attach_similarity_no_api_key_yields_zero_similarity_but_weighted_column():
     """Without an API key we still need both columns present for downstream code."""
     df = pd.DataFrame([
-        {"title": "Engineer", "location": "Berlin, Germany", "description": "Build great stuff."},
-        {"title": "Engineer", "location": "Bangalore, India", "description": "Build great stuff."},
+        {"title": "Engineer", "location": "Berlin, Germany", "description": "Build great stuff.", "job_url": "u1"},
+        {"title": "Engineer", "location": "Bangalore, India", "description": "Build great stuff.", "job_url": "u2"},
     ])
-    out = attach_similarity(df, cv_text="some cv text", api_key="")
+    out, embeddings = attach_similarity(df, cv_text="some cv text", api_key="")
     assert "similarity" in out.columns
     assert "weighted_score" in out.columns
-    # No similarity computed -> all zeros.
+    # No similarity computed -> all zeros, and no embeddings collected.
     assert (out["similarity"] == 0.0).all()
     assert (out["weighted_score"] == 0.0).all()
+    assert embeddings == {}
 
 
 def test_attach_similarity_handles_empty_dataframe():
     """An empty input dataframe must come back empty (not crash)."""
-    out = attach_similarity(pd.DataFrame(), cv_text="x", api_key="")
+    out, embeddings = attach_similarity(pd.DataFrame(), cv_text="x", api_key="")
     assert out.empty
+    assert embeddings == {}
 
 
 def _patched_attach_similarity(df, fixed_vec=None):
     """Helper: run attach_similarity with the embedding calls stubbed to return
     a constant vector for every row, so cosine similarity is identical and
-    sort order is driven purely by region/trust weights.
+    sort order is driven purely by region/trust/role weights.
 
     Restores the originals in a finally so other tests aren't affected.
+    Returns just the dataframe (most tests don't need the embeddings dict).
     """
     import pipeline.core_embedding as ce
     if fixed_vec is None:
@@ -127,7 +130,8 @@ def _patched_attach_similarity(df, fixed_vec=None):
     try:
         ce.get_cv_embedding = lambda text, key: fixed_vec
         ce.embed_jobs = lambda rows, key, throttle_seconds=0: [fixed_vec] * len(rows)
-        return attach_similarity(df, cv_text="cv", api_key="fake-key")
+        df_out, _ = attach_similarity(df, cv_text="cv", api_key="fake-key")
+        return df_out
     finally:
         ce.get_cv_embedding = orig_get_cv
         ce.embed_jobs = orig_embed_jobs
@@ -173,8 +177,6 @@ def test_weighted_score_demotes_india_below_worldwide_even_with_higher_raw_simil
     """
     import pipeline.core_embedding as ce
     cv_vec = [1.0, 0.0]
-    # India embedding identical to CV (sim=1.0), Worldwide embedding partially
-    # aligned (sim=0.6).
     india_vec = [1.0, 0.0]
     world_vec = [0.6, 0.8]                # cos = 0.6
     orig_get = ce.get_cv_embedding
@@ -189,7 +191,7 @@ def test_weighted_score_demotes_india_below_worldwide_even_with_higher_raw_simil
             {"title": "Engineer", "location": "Bangalore, India", "description": "x"},
             {"title": "Engineer", "location": "Worldwide", "description": "x"},
         ])
-        out = attach_similarity(df, cv_text="cv", api_key="fake-key")
+        out, _ = attach_similarity(df, cv_text="cv", api_key="fake-key")
     finally:
         ce.get_cv_embedding = orig_get
         ce.embed_jobs = orig_embed
@@ -198,3 +200,43 @@ def test_weighted_score_demotes_india_below_worldwide_even_with_higher_raw_simil
     assert out.iloc[0]["location"] == "Worldwide"
     # And the similarity column should still reflect the raw 0.6 vs 1.0.
     assert out.iloc[0]["similarity"] < out.iloc[1]["similarity"]
+
+
+def test_attach_similarity_returns_url_to_embedding_dict():
+    """attach_similarity must yield {url: embedding} for callers doing semantic dedup."""
+    import pipeline.core_embedding as ce
+    orig_get = ce.get_cv_embedding
+    orig_embed = ce.embed_jobs
+    try:
+        ce.get_cv_embedding = lambda t, k: [1.0, 0.0]
+        ce.embed_jobs = lambda rows, k, throttle_seconds=0: [[0.1, 0.2]] * len(rows)
+        df = pd.DataFrame([
+            {"title": "Engineer", "job_url": "https://a/1", "description": "x"},
+            {"title": "Engineer", "job_url": "https://a/2", "description": "x"},
+        ])
+        _, embeddings = attach_similarity(df, cv_text="cv", api_key="fake-key")
+    finally:
+        ce.get_cv_embedding = orig_get
+        ce.embed_jobs = orig_embed
+    assert set(embeddings.keys()) == {"https://a/1", "https://a/2"}
+    assert embeddings["https://a/1"] == [0.1, 0.2]
+
+
+def test_attach_similarity_skips_urls_with_failed_embeddings():
+    """If the embedding API returns None for a row, that URL is omitted from the dict."""
+    import pipeline.core_embedding as ce
+    orig_get = ce.get_cv_embedding
+    orig_embed = ce.embed_jobs
+    try:
+        ce.get_cv_embedding = lambda t, k: [1.0, 0.0]
+        ce.embed_jobs = lambda rows, k, throttle_seconds=0: [[0.1, 0.2], None]
+        df = pd.DataFrame([
+            {"title": "Engineer", "job_url": "https://a/ok", "description": "x"},
+            {"title": "Engineer", "job_url": "https://a/fail", "description": "x"},
+        ])
+        _, embeddings = attach_similarity(df, cv_text="cv", api_key="fake-key")
+    finally:
+        ce.get_cv_embedding = orig_get
+        ce.embed_jobs = orig_embed
+    assert "https://a/ok" in embeddings
+    assert "https://a/fail" not in embeddings

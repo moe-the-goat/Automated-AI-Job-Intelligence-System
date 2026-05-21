@@ -175,41 +175,28 @@ def _render_html_table(df):
     out += "</table>"
     return out
 
-def _geo_title_prefix(row):
-    """Return a small prefix indicating geo-eligibility status (kept for back-compat).
-
-    The lower-ranked section no longer runs geo-checks, so this prefix only
-    appears if the upstream caller sets geo_status manually. Top-section AI
-    rows surface their geo flags through the verdict text instead.
-    """
-    status = (row.get("geo_status") or "").lower()
-    if status == "uncertain":
-        return "⚠️ "
-    return ""
-
-
-# Lower-ranked section presentation (2026-05-20 rewrite):
-#  - Filter out rows already flagged as low-quality reputation or AI-suspicious
-#    so we don't show the user the same Inficore Soft / Skillzenloop spam twice.
-#  - Sort by weighted_score (region * trust * role) — raw similarity alone
-#    surfaces too many India-located jobs with high cosine sim against generic
-#    tech keywords.
-#  - Show weighted_score as a friendly percentage instead of raw cosine.
-#  - Cap at 15 rows so the section is scannable, not a wall of noise.
-#  - Rename header from "Lower-Ranked Matches" (sounds like the reject pile)
-#    to "Also Found" (sounds like the long tail worth a glance).
+# Lower-ranked section ("Also Found") — now gets a cheap Gemini Flash Lite AI
+# verdict (since geo-check was removed and Gemini quota freed up). Rendered with
+# the same Match badge + AI Verdict layout as the top section, just slimmer
+# columns (no Pay/Effort) to keep the email scannable.
 LOWER_RANKED_LIMIT = 15
 
 
+def _has_ai_verdict(df):
+    """True if the dataframe carries AI-eval columns (match_percentage, ai_verdict)."""
+    return df is not None and "match_percentage" in df.columns and "ai_verdict" in df.columns
+
+
 def _prepare_lower_ranked(df, limit=LOWER_RANKED_LIMIT):
-    """Filter + sort + cap the lower-ranked frame for clean rendering.
+    """Filter, sort, and cap the lower-ranked frame for clean rendering.
 
     Drops:
       - pre_flagged_low_quality rows (reputation blacklist matches)
-      - suspicious / scam rows (rare here since these only fire after AI eval,
-        but defensive in case future callers attach the flag pre-rank).
+      - suspicious / scam rows (defensive — scraper.py already filters is_valid=False)
 
-    Sorts by weighted_score DESC (falls back to similarity if weighted is missing).
+    Sort order:
+      - When AI-evaluated: match_percentage DESC, weighted_score DESC as tiebreaker
+      - Otherwise: weighted_score DESC, falling back to similarity
     Caps to `limit` rows.
     """
     if df is None or df.empty:
@@ -225,8 +212,15 @@ def _prepare_lower_ranked(df, limit=LOWER_RANKED_LIMIT):
     if "scam" in out.columns:
         out = out[~out["scam"].fillna(False).astype(bool)]
 
-    # Sort by weighted_score; fall back to similarity if weighted absent.
-    if "weighted_score" in out.columns:
+    if "match_percentage" in out.columns:
+        out['_sort_pct'] = pd.to_numeric(out['match_percentage'].replace('N/A', -1), errors='coerce').fillna(-1)
+        if "weighted_score" in out.columns:
+            out['_sort_w'] = pd.to_numeric(out['weighted_score'], errors='coerce').fillna(0)
+            out = out.sort_values(by=['_sort_pct', '_sort_w'], ascending=[False, False])
+            out = out.drop(columns=['_sort_pct', '_sort_w'])
+        else:
+            out = out.sort_values('_sort_pct', ascending=False).drop(columns=['_sort_pct'])
+    elif "weighted_score" in out.columns:
         out = out.sort_values("weighted_score", ascending=False)
     elif "similarity" in out.columns:
         out = out.sort_values("similarity", ascending=False)
@@ -237,7 +231,8 @@ def _prepare_lower_ranked(df, limit=LOWER_RANKED_LIMIT):
 def _format_score_pct(row):
     """Render the row's weighted_score as a percentage string (e.g. '72%').
 
-    Falls back to raw similarity * 100 if weighted_score is missing.
+    Used only for legacy frames that lack AI eval columns. Falls back to raw
+    similarity * 100 if weighted_score is missing.
     """
     score = row.get("weighted_score")
     if score is None or (isinstance(score, float) and score != score):  # NaN
@@ -255,19 +250,35 @@ def _render_lower_ranked_html(df, limit=LOWER_RANKED_LIMIT):
     df = _prepare_lower_ranked(df, limit=limit)
     if df is None or df.empty:
         return ""
+    has_ai = _has_ai_verdict(df)
     out = "<table border='1' style='border-collapse: collapse; width: 100%;'>"
-    out += "<tr><th>Title</th><th>Company</th><th>Location</th><th>Score</th><th>Link</th></tr>"
+    if has_ai:
+        out += "<tr><th>Title</th><th>Company</th><th>Location</th><th>Match</th><th>AI Verdict</th><th>Link</th></tr>"
+    else:
+        out += "<tr><th>Title</th><th>Company</th><th>Location</th><th>Score</th><th>Link</th></tr>"
     for _, row in df.iterrows():
-        title_prefix = _geo_title_prefix(row)
-        title = f"{title_prefix}{row.get('title', 'N/A')}"
+        title = _suspicious_title(
+            row.get("title", "N/A"),
+            bool(row.get("suspicious", False)),
+            bool(row.get("pre_flagged_low_quality", False)),
+            bool(row.get("scam", False)),
+        )
         company = row.get("company", "N/A")
         location = row.get("location", "Remote/Unspecified")
-        score = _format_score_pct(row)
         job_url = row.get("job_url", "#")
-        out += (
-            f"<tr><td>{title}</td><td>{company}</td><td>{location}</td>"
-            f"<td>{score}</td><td><a href='{job_url}'>View</a></td></tr>"
-        )
+        if has_ai:
+            match_cell = _fmt_match_cell_html(row)
+            verdict = _bolden_verdict_html(row.get("ai_verdict", ""))
+            out += (
+                f"<tr><td>{title}</td><td>{company}</td><td>{location}</td>"
+                f"<td>{match_cell}</td><td>{verdict}</td><td><a href='{job_url}'>View</a></td></tr>"
+            )
+        else:
+            score = _format_score_pct(row)
+            out += (
+                f"<tr><td>{title}</td><td>{company}</td><td>{location}</td>"
+                f"<td>{score}</td><td><a href='{job_url}'>View</a></td></tr>"
+            )
     out += "</table>"
     return out
 
@@ -276,16 +287,31 @@ def _render_lower_ranked_md(df, limit=LOWER_RANKED_LIMIT):
     df = _prepare_lower_ranked(df, limit=limit)
     if df is None or df.empty:
         return ""
-    out = "| Title | Company | Location | Score | Link |\n"
-    out += "|---|---|---|---|---|\n"
+    has_ai = _has_ai_verdict(df)
+    if has_ai:
+        out = "| Title | Company | Location | Match | AI Verdict | Link |\n"
+        out += "|---|---|---|---|---|---|\n"
+    else:
+        out = "| Title | Company | Location | Score | Link |\n"
+        out += "|---|---|---|---|---|\n"
     for _, row in df.iterrows():
-        title_prefix = _geo_title_prefix(row)
-        title = f"{title_prefix}{row.get('title', 'N/A')}"
+        title = _suspicious_title(
+            row.get("title", "N/A"),
+            bool(row.get("suspicious", False)),
+            bool(row.get("pre_flagged_low_quality", False)),
+            bool(row.get("scam", False)),
+        )
         company = row.get("company", "N/A")
         location = row.get("location", "Remote/Unspecified")
-        score = _format_score_pct(row)
         job_url = row.get("job_url", "#")
-        out += f"| {title} | {company} | {location} | {score} | [View]({job_url}) |\n"
+        if has_ai:
+            match_cell = _fmt_match_cell_md(row)
+            verdict = _bolden_verdict_md(row.get("ai_verdict", ""))
+            verdict = str(verdict).replace("|", "\\|")
+            out += f"| {title} | {company} | {location} | {match_cell} | {verdict} | [View]({job_url}) |\n"
+        else:
+            score = _format_score_pct(row)
+            out += f"| {title} | {company} | {location} | {score} | [View]({job_url}) |\n"
     return out
 
 
@@ -330,8 +356,13 @@ def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None):
         # filtering (e.g. all lower-ranked rows were blacklisted spam).
         prepared = _prepare_lower_ranked(lower_ranked_df)
         if prepared is not None and not prepared.empty:
-            html += f"<br><h3>📋 Also Found ({len(prepared)} jobs — no AI verdict)</h3>"
-            html += "<div style='color: #666; font-size: 12px;'>Survived deterministic filters but ranked below the AI cutoff. Score = similarity weighted by region, trust, and role tier. Spam/suspicious companies are hidden here.</div>"
+            has_ai = _has_ai_verdict(prepared)
+            tag = "Gemini-evaluated" if has_ai else "no AI verdict"
+            html += f"<br><h3>📋 Also Found ({len(prepared)} jobs — {tag})</h3>"
+            if has_ai:
+                html += "<div style='color: #666; font-size: 12px;'>Ranked below the Cerebras/Groq cutoff so screened by Gemini Flash Lite instead. Spam/suspicious companies are hidden here.</div>"
+            else:
+                html += "<div style='color: #666; font-size: 12px;'>Survived deterministic filters but ranked below the AI cutoff. Score = similarity weighted by region, trust, and role tier. Spam/suspicious companies are hidden here.</div>"
             html += _render_lower_ranked_html(lower_ranked_df)
 
     return html
@@ -407,8 +438,13 @@ def format_github_markdown(internships_df, jobs_df, stats, lower_ranked_df=None)
     if lower_ranked_df is not None and not lower_ranked_df.empty:
         prepared = _prepare_lower_ranked(lower_ranked_df)
         if prepared is not None and not prepared.empty:
-            md += f"\n\n### 📋 Also Found ({len(prepared)} jobs — no AI verdict)\n\n"
-            md += "_Survived deterministic filters but ranked below the AI cutoff. Score = similarity weighted by region, trust, and role tier. Spam/suspicious companies are hidden here._\n\n"
+            has_ai = _has_ai_verdict(prepared)
+            tag = "Gemini-evaluated" if has_ai else "no AI verdict"
+            md += f"\n\n### 📋 Also Found ({len(prepared)} jobs — {tag})\n\n"
+            if has_ai:
+                md += "_Ranked below the Cerebras/Groq cutoff so screened by Gemini Flash Lite instead. Spam/suspicious companies are hidden here._\n\n"
+            else:
+                md += "_Survived deterministic filters but ranked below the AI cutoff. Score = similarity weighted by region, trust, and role tier. Spam/suspicious companies are hidden here._\n\n"
             md += _render_lower_ranked_md(lower_ranked_df)
 
     return md

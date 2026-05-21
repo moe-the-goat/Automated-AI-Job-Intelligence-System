@@ -11,6 +11,9 @@ data/cv_embedding.json
 data/feedback.json
 # ATS detection cache (Greenhouse/Lever/Workable tokens). Re-detected after 30d.
 data/ats_cache.json
+# Rolling 14-day embedding history for semantic dedup. Regenerates from the
+# Actions cache (alongside seen_jobs.json) — never commit.
+data/embedding_history.json
 # Local-only working files — never push to GitHub.
 CLAUDE.md
 CHAT_HISTORY.md

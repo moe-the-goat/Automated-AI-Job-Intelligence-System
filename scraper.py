@@ -19,9 +19,8 @@ from pipeline.core_search import (
     fetch_yc_workatastartup_jobs,
 )
 from pipeline.core_filter import filter_api_jobs, apply_pipeline_filters, JobTracker
-from pipeline.core_ai import evaluate_job_with_ai, quick_viability_check, skipped_result
-from pipeline.core_geo import should_geo_check, check_remote_eligibility, apply_geo_check_result
-from pipeline.core_embedding import attach_similarity
+from pipeline.core_ai import evaluate_job_with_ai, evaluate_job_with_gemini, quick_viability_check, skipped_result
+from pipeline.core_embedding import attach_similarity, drop_semantic_duplicates, update_embedding_history
 from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 
 """
@@ -61,16 +60,90 @@ def main():
 # than the 24h JobSpy window to surface more remote jobs from non-LinkedIn sources.
 API_HOURS_OLD = 72
 
-# A3: only the top N jobs (by weighted CV-embedding similarity) get the AI verdict.
-# Ranking multiplies raw similarity by region+trust weights so EU / Americas /
+# A3: only the top N jobs (by weighted CV-embedding similarity) get the
+# Cerebras+Groq verdict (slower, larger model, better verdicts). Ranking
+# multiplies raw similarity by region+trust+role weights so EU / Americas /
 # Middle East and trusted big-name companies sort above India-only postings at
 # equal raw similarity. A wildcard sample is also evaluated so an imperfectly-
 # tuned weighting doesn't permanently hide a long-tail match.
-# Top_N progression: 30 -> 45 -> 55 (2026-05-19, after moving main verdict to
-# Cerebras+Groq freed up Gemini's quota for Layer 3 geo-checking; we can now
-# afford to give the AI eval pass a wider field).
 AI_EVAL_TOP_N = 55
 WILDCARD_COUNT = 5
+
+# Lower-ranked jobs (the rest, after the top N+wildcards) get a cheaper Gemini
+# 3.1 Flash Lite verdict so they appear with real AI judgements in the email's
+# "Also Found" section instead of just a similarity score. We cap how many we
+# evaluate so the run doesn't balloon past the cron budget — Gemini Flash Lite
+# is throttled at 15 RPM (~4s/call), so 25 calls = ~1.7 min of throttle plus
+# response time. Display still caps at 15 after filtering is_valid=False rows.
+LOWER_RANKED_EVAL_LIMIT = 25
+
+
+def _run_ai_loop(df, cv_text, tracker, *, provider, cerebras_key=None, groq_key=None, gemini_key=None):
+    """Run quick_viability_check + AI verdict over a dataframe of jobs.
+
+    Returns the SAME dataframe with these columns attached:
+      ai_verdict, match_percentage, tech_fit, experience_fit, logistics_fit,
+      compensation, effort, suspicious, scam, is_valid, pre_flagged_low_quality
+
+    `provider` chooses which LLM:
+      "cerebras_groq" -> evaluate_job_with_ai (Qwen-3 + Llama-3.3 ping-pong)
+      "gemini"        -> evaluate_job_with_gemini (Flash Lite, single call + retries)
+
+    Tracker is marked seen only when the LLM actually returned a verdict, so
+    transient errors leave the job unmarked for next-run retry.
+    """
+    if df is None or df.empty:
+        return df
+
+    verdicts, valid_mask, match_pcts = [], [], []
+    tech_fits, exp_fits, log_fits = [], [], []
+    comps, efforts, suspiciouses, scams = [], [], [], []
+    blacklisteds = []
+    prescreen_skipped = 0
+
+    for _, row in df.iterrows():
+        is_viable, reason = quick_viability_check(row)
+        if not is_viable:
+            prescreen_skipped += 1
+            logger.info("[SKIP] %-55s -> %s", str(row.get('title', ''))[:55], reason)
+            result = skipped_result(reason)
+            evaluated = True  # deterministic skip — mark seen
+        else:
+            if provider == "gemini":
+                result, evaluated = evaluate_job_with_gemini(row, cv_text, gemini_key)
+            else:
+                result, evaluated = evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key)
+
+        verdicts.append(result["verdict"])
+        valid_mask.append(result["is_valid"])
+        match_pcts.append(result["match_percentage"])
+        tech_fits.append(result["tech_fit"])
+        exp_fits.append(result["experience_fit"])
+        log_fits.append(result["logistics_fit"])
+        comps.append(result["compensation"])
+        efforts.append(result["effort"])
+        suspiciouses.append(result["suspicious"])
+        scams.append(result.get("scam", False))
+        blacklisteds.append(bool(row.get("pre_flagged_low_quality", False)))
+        if evaluated:
+            tracker.mark_seen(str(row.get("job_url", "")))
+
+    logger.info("Pre-screen summary (%s): skipped %d / %d jobs before AI eval.",
+                provider, prescreen_skipped, len(df))
+    out = df.copy()
+    out['ai_verdict'] = verdicts
+    out['match_percentage'] = match_pcts
+    out['tech_fit'] = tech_fits
+    out['experience_fit'] = exp_fits
+    out['logistics_fit'] = log_fits
+    out['compensation'] = comps
+    out['effort'] = efforts
+    out['suspicious'] = suspiciouses
+    out['scam'] = scams
+    out['pre_flagged_low_quality'] = blacklisteds
+    out['is_valid'] = valid_mask
+    return out
+
 
 def run_pipeline(config, tracker):
     all_jobs_dfs = []
@@ -153,13 +226,14 @@ def run_pipeline(config, tracker):
         
         if not combined_jobs.empty:
             # 4. AI Evaluation
-            #  - Gemini main key: used by core_geo Layer 3 geo-check (Google Search grounded).
             #  - Gemini EMBED key: dedicated to embedding-pre-rank only. We split keys
             #    because the embedding burst (~100 RPM peak on ~120 jobs/day) was
-            #    poisoning the shared project quota and breaking the geo-check with
-            #    429 RESOURCE_EXHAUSTED. Two keys = two isolated quotas.
-            #    Falls back to the main key if EMBED_API_KEY isn't configured.
-            #  - Cerebras/Groq keys: used by core_ai.evaluate_job_with_ai for the main verdict.
+            #    poisoning the shared project quota. Falls back to the main key
+            #    if EMBED_API_KEY isn't configured.
+            #  - Gemini main key: used by core_ai.evaluate_job_with_gemini for the
+            #    lower-ranked "Also Found" verdicts (cheap second-pass AI).
+            #  - Cerebras/Groq keys: used by core_ai.evaluate_job_with_ai for the
+            #    top-section verdict (larger Qwen/Llama models, ping-pong fallback).
             gemini_key = os.environ.get("GEMINI_API_KEY", "")
             gemini_embed_key = os.environ.get("GEMINI_EMBED_API_KEY", "") or gemini_key
             cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
@@ -170,11 +244,21 @@ def run_pipeline(config, tracker):
             except:
                 cv_text = "Computer Engineering student specializing in AI systems engineering, building end-to-end pipelines that integrate LLMs, embeddings, and multi-source data into production-ready backend systems. Experienced deploying Python-based solutions with REST APIs, automated workflows, and real-world constraints. Growing focus on Generative AI, RAG architectures, and scalable intelligent systems."
 
-            # A3: pre-rank by CV-embedding similarity. Top-N + wildcards go to AI;
-            # the rest still appear in the email under a "Lower-ranked" section.
-            # Uses the dedicated embed key so the embedding burst doesn't share
-            # quota with the geo-check key.
-            combined_jobs = attach_similarity(combined_jobs, cv_text, gemini_embed_key)
+            # A3: pre-rank by CV-embedding similarity. Top-N + wildcards go to
+            # the Cerebras+Groq path; the rest get Gemini in the lower-ranked
+            # path. attach_similarity also returns the raw job embeddings so we
+            # can run semantic dedup against the rolling 14-day history cache.
+            combined_jobs, job_embeddings = attach_similarity(combined_jobs, cv_text, gemini_embed_key)
+
+            # Semantic dedup: drop jobs whose embedding is ≥0.97 cosine similar
+            # to anything in the embedding history (last 14 days). Catches the
+            # "same job reposted with a different URL" case that URL dedup misses.
+            before = len(combined_jobs)
+            combined_jobs = drop_semantic_duplicates(combined_jobs, job_embeddings)
+            dropped_semantic = before - len(combined_jobs)
+            if dropped_semantic:
+                logger.info("Semantic dedup: dropped %d job(s) ≥0.97 similar to recent history.", dropped_semantic)
+
             if len(combined_jobs) > AI_EVAL_TOP_N:
                 top_n = combined_jobs.head(AI_EVAL_TOP_N)
                 rest = combined_jobs.iloc[AI_EVAL_TOP_N:]
@@ -183,88 +267,48 @@ def run_pipeline(config, tracker):
                 ai_eval_set = pd.concat([top_n, wildcards]).reset_index(drop=True)
                 lower_ranked = rest.drop(wildcards.index).reset_index(drop=True)
                 logger.info(
-                    "Embedding pre-rank: %d jobs to AI (top %d + %d wildcards); %d lower-ranked deferred.",
+                    "Embedding pre-rank: %d jobs to Cerebras/Groq (top %d + %d wildcards); %d lower-ranked deferred to Gemini.",
                     len(ai_eval_set), AI_EVAL_TOP_N, n_wild, len(lower_ranked),
                 )
             else:
                 ai_eval_set = combined_jobs
                 lower_ranked = pd.DataFrame()
-                logger.info("Embedding pre-rank: %d jobs (under threshold, evaluating all).", len(ai_eval_set))
-            combined_jobs = ai_eval_set
+                logger.info("Embedding pre-rank: %d jobs (under threshold, evaluating all with Cerebras/Groq).", len(ai_eval_set))
 
-            logger.info("Running AI Job Validation 1-by-1 (this may take a while)...")
-            verdicts, valid_mask, match_pcts = [], [], []
-            tech_fits, exp_fits, log_fits = [], [], []
-            comps, efforts, suspiciouses, scams = [], [], [], []
-            blacklisteds = []
-            prescreen_skipped = 0
-            geo_checked = 0
+            # --- Top section: Cerebras+Groq verdicts ---
+            logger.info("Running top-section AI validation via Cerebras+Groq (this may take a while)...")
+            ai_eval_set = _run_ai_loop(ai_eval_set, cv_text, tracker,
+                                       provider="cerebras_groq",
+                                       cerebras_key=cerebras_key, groq_key=groq_key)
+            valid_top = ai_eval_set[ai_eval_set['is_valid']]
+            stats['approved'] = len(valid_top)
+            logger.info("Total top-section jobs remaining after AI validation: %d", stats['approved'])
 
-            for idx, row in combined_jobs.iterrows():
-                is_viable, reason = quick_viability_check(row)
-                if not is_viable:
-                    prescreen_skipped += 1
-                    logger.info("[SKIP] %-55s -> %s", str(row.get('title', ''))[:55], reason)
-                    result = skipped_result(reason)
-                    evaluated = True  # deterministic skip — mark seen
-                else:
-                    result, evaluated = evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key)
+            # --- Lower-ranked section: Gemini 3.1 Flash Lite verdicts ---
+            if not lower_ranked.empty and gemini_key:
+                eval_slice = lower_ranked.head(LOWER_RANKED_EVAL_LIMIT).reset_index(drop=True)
+                deferred_count = len(lower_ranked) - len(eval_slice)
+                logger.info(
+                    "Running lower-ranked AI validation via Gemini for %d job(s) (%d deferred over cap).",
+                    len(eval_slice), deferred_count,
+                )
+                eval_slice = _run_ai_loop(eval_slice, cv_text, tracker,
+                                          provider="gemini",
+                                          gemini_key=gemini_key)
+                lower_ranked = eval_slice[eval_slice['is_valid']].reset_index(drop=True)
+                logger.info("Lower-ranked jobs surviving Gemini validation: %d", len(lower_ranked))
+            else:
+                # No Gemini key, or no lower-ranked rows — skip the second pass.
+                lower_ranked = pd.DataFrame()
 
-                    # Layer 3: live remote-eligibility verification via Gemini + Google Search.
-                    # Only fires for AI-validated rows where the geo signals are ambiguous.
-                    # On "restricted" the verdict's is_valid is flipped to False, so the row
-                    # drops out of the email below at the valid_mask filter.
-                    if evaluated and result.get("is_valid") and should_geo_check(row):
-                        geo_result = check_remote_eligibility(
-                            title=str(row.get("title", "")),
-                            company=str(row.get("company", "")),
-                            job_url=str(row.get("job_url", "")),
-                            description=str(row.get("description", "")),
-                            api_key=gemini_key,
-                        )
-                        result = apply_geo_check_result(result, geo_result)
-                        geo_checked += 1
+            # Persist the embeddings we just computed (only for jobs that
+            # survived all filters) so the next run's semantic dedup has fresh
+            # history to compare against.
+            kept_urls = set(valid_top.get('job_url', pd.Series(dtype=str)).tolist()) | \
+                        set(lower_ranked.get('job_url', pd.Series(dtype=str)).tolist())
+            update_embedding_history({u: v for u, v in job_embeddings.items() if u in kept_urls})
 
-                verdicts.append(result["verdict"])
-                valid_mask.append(result["is_valid"])
-                match_pcts.append(result["match_percentage"])
-                tech_fits.append(result["tech_fit"])
-                exp_fits.append(result["experience_fit"])
-                log_fits.append(result["logistics_fit"])
-                comps.append(result["compensation"])
-                efforts.append(result["effort"])
-                suspiciouses.append(result["suspicious"])
-                scams.append(result.get("scam", False))
-                blacklisteds.append(bool(row.get("pre_flagged_low_quality", False)))
-                # Only mark seen when AI actually returned a verdict. Quota/timeout
-                # errors leave the job unmarked so we can retry it next run.
-                if evaluated:
-                    tracker.mark_seen(str(row.get("job_url", "")))
-
-            logger.info("Pre-screen summary: skipped %d / %d jobs before AI eval.", prescreen_skipped, len(combined_jobs))
-            logger.info("Geo-check summary (top section): %d / %d AI-validated jobs checked.", geo_checked, len(combined_jobs))
-            combined_jobs['ai_verdict'] = verdicts
-            combined_jobs['match_percentage'] = match_pcts
-            combined_jobs['tech_fit'] = tech_fits
-            combined_jobs['experience_fit'] = exp_fits
-            combined_jobs['logistics_fit'] = log_fits
-            combined_jobs['compensation'] = comps
-            combined_jobs['effort'] = efforts
-            combined_jobs['suspicious'] = suspiciouses
-            combined_jobs['scam'] = scams
-            combined_jobs['pre_flagged_low_quality'] = blacklisteds
-            
-            # Filter down to only AI-approved jobs
-            combined_jobs = combined_jobs[valid_mask]
-            stats['approved'] = len(combined_jobs)
-            logger.info("Total jobs remaining after AI validation: %d", stats['approved'])
-
-            # Note: lower-ranked jobs do NOT get geo-checked anymore. Doing 58+
-            # Gemini grounded-search calls per run was burning the entire daily
-            # Flash Lite quota and returning 429 RESOURCE_EXHAUSTED on every
-            # attempt (including the top-section geo-check that actually matters).
-            # Geo-check is now reserved for the small handful of AI-approved
-            # top-section jobs where the answer materially affects the email.
+            combined_jobs = valid_top
 
             # 5. Output and Notification
             # Split into internships and jobs

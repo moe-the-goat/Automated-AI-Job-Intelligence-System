@@ -46,6 +46,11 @@ logger = get_logger(__name__)
 _CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
 
+# Gemini Flash Lite handles the cheaper second-pass verdict for "Also Found"
+# lower-ranked jobs. 15 RPM / 500 RPD free-tier budget — plenty for ~25 calls
+# per run. Same JSON-output behavior as Cerebras/Groq, just smaller model.
+_GEMINI_VERDICT_MODEL = "gemini-3.1-flash-lite"
+
 # Short backoff between fallback attempts. The user wants "immediate" switching
 # between providers — long exponential backoff would defeat the point of having
 # a fallback. 1.5s gives the failing provider a moment to settle without
@@ -106,6 +111,52 @@ def _call_groq(prompt, api_key):
         max_tokens=_MAX_OUTPUT_TOKENS,
     )
     return response.choices[0].message.content
+
+
+def _call_gemini(prompt, api_key):
+    """Single Gemini Flash Lite call. Raises on any error (caller decides retry policy)."""
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=_GEMINI_VERDICT_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.3,
+            max_output_tokens=_MAX_OUTPUT_TOKENS,
+        ),
+    )
+    return response.text
+
+
+def call_gemini_verdict(prompt, api_key, max_attempts=3, label=""):
+    """Run a Gemini Flash Lite verdict call with simple retry on transient errors.
+
+    Used for the lower-ranked "Also Found" section verdicts. Only one provider
+    (no ping-pong), so we just sleep-and-retry on 5xx/429.
+    """
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set")
+
+    last_exc = None
+    for idx in range(max_attempts):
+        try:
+            if idx > 0:
+                backoff = _INTER_ATTEMPT_BACKOFF_SECONDS * (2 ** (idx - 1))
+                logger.warning("[LLM Gemini RETRY %d/%d] backing off %.1fs for %s",
+                               idx + 1, max_attempts, backoff, label[:55])
+                time.sleep(backoff)
+            return _call_gemini(prompt, api_key)
+        except Exception as e:
+            last_exc = e
+            err_str = str(e)[:200]
+            if _is_retryable_error(e):
+                logger.warning("[LLM Gemini] retryable error attempt %d: %s", idx + 1, err_str)
+            else:
+                logger.warning("[LLM Gemini] non-retryable error: %s", err_str)
+                break
+
+    raise last_exc if last_exc else RuntimeError("Gemini call exhausted with no exception")
 
 
 def call_llm_with_fallback(prompt, cerebras_key, groq_key, max_attempts=4, label=""):

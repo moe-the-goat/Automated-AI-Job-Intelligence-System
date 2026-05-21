@@ -495,67 +495,42 @@ def quick_viability_check(row):
 
     return True, "viable"
 
-def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key):
-    """
-    Evaluate a single job posting against the candidate's CV using llama-3.3-70b
-    via Cerebras (primary) with Groq as fallback. Both run the same model.
+_WEB_SEARCH_TRIGGER_PHRASES = (
+    "eligible countries", "selected countries", "certain countries",
+    "must be based", "candidates based", "residents of",
+    "remote in the", "must be located", "work authorization",
+    "within the united states", "us only", "us-based", "uk only", "eu only",
+)
+_EXPLICIT_GLOBAL_PHRASES = (
+    "worldwide", "globally remote", "anywhere in the world",
+    "no location restriction", "no geographic restriction",
+    "open to all locations", "global candidates", "emea welcome",
+    "middle east", "fully remote globally", "all countries", "global remote",
+)
+_AMBIGUITY_CONTEXT_PHRASES = (
+    "timezone", "country", "region", "office", "headquartered",
+    "headquarters", "based ", "located in",
+)
 
-    Returns a 2-tuple: (result_dict, evaluated_bool).
-    - result_dict follows DEFAULT_AI_RESULT schema.
-    - evaluated_bool is True ONLY when the LLM returned a real verdict; callers should
-      use this to decide whether to mark the URL as "seen" (so transient API errors
-      don't lose jobs forever — see core_filter.JobTracker).
 
-    Fallback behavior lives in pipeline.core_llm.call_llm_with_fallback:
-    Cerebras -> Groq -> Cerebras -> Groq (min 4 attempts on transient errors).
-    """
-    if not cerebras_key and not groq_key:
-        return _error_result("No LLM API Key provided (CEREBRAS_API_KEY or GROQ_API_KEY)"), False
-
-    from pipeline.core_llm import call_llm_with_fallback  # lazy import — SDK only loaded when needed
-
-    title = str(row.get("title", ""))
-    company = str(row.get("company", ""))
-    job_type = str(row.get("job_type", "")).lower()
+def _maybe_get_full_description(row):
+    """Pull a fuller description via the URL scraper when the API description is truncated."""
     description = str(row.get("description", ""))
-
     if pd.isna(description) or len(description) < 100:
         description = get_full_job_description(str(row.get("job_url", "")))
         if not description:
             description = "[NO DESCRIPTION AVAILABLE - SCRAPING BLOCKED]"
+    return description
 
+
+def _build_verdict_prompt(row, cv_text, description, web_search_context=""):
+    """Construct the canonical recruiter-screen prompt shared by Cerebras+Groq and Gemini paths."""
+    title = str(row.get("title", ""))
+    company = str(row.get("company", ""))
+    job_type = str(row.get("job_type", "")).lower()
     is_internship = 'intern' in title.lower() or 'internship' in job_type
 
-    # --- Web search trigger logic ---
-    web_search_triggers = [
-        "eligible countries", "selected countries", "certain countries",
-        "must be based", "candidates based", "residents of",
-        "remote in the", "must be located", "work authorization",
-        "within the united states", "us only", "us-based", "uk only", "eu only"
-    ]
-    explicit_global_phrases = [
-        "worldwide", "globally remote", "anywhere in the world",
-        "no location restriction", "no geographic restriction",
-        "open to all locations", "global candidates", "emea welcome",
-        "middle east", "fully remote globally", "all countries", "global remote",
-    ]
-    ambiguity_context_phrases = [
-        "timezone", "country", "region", "office", "headquartered",
-        "headquarters", "based ", "located in",
-    ]
-
-    desc_lower = description.lower()
-    has_restriction = any(t in desc_lower for t in web_search_triggers)
-    has_global_signal = any(p in desc_lower for p in explicit_global_phrases)
-    has_ambiguity_context = any(p in desc_lower for p in ambiguity_context_phrases)
-
-    web_search_context = ""
-    if has_restriction or (has_ambiguity_context and not has_global_signal):
-        search_data = search_company_remote_policy(company, title)
-        if search_data:
-            web_search_context = f"\n\n[LIVE WEB SEARCH RESULTS FOR '{company}' REMOTE POLICY]:\n{search_data}\n\nUse this live web data to determine if Palestine/Middle East is explicitly excluded from their remote eligible countries."
-
-    prompt = f"""You are a SKEPTICAL technical recruiter screening a candidate. Your job is to find
+    return f"""You are a SKEPTICAL technical recruiter screening a candidate. Your job is to find
 DISQUALIFYING reasons. Default to skepticism. A 90+ score is reserved for cases where
 you cannot reasonably imagine why the candidate would NOT be considered.
 
@@ -672,11 +647,77 @@ Reply with VALID JSON ONLY (no markdown, no comments):
 {{"is_valid": true|false, "verdict": "...", "tech_fit": 0-100, "experience_fit": 0-100, "logistics_fit": 0-100, "match_percentage": 0-100, "compensation": "...", "effort": "low|medium|high", "suspicious": true|false}}
 """
 
-    # Pacing — Cerebras free tier caps at 5 RPM on gpt-oss-120b (12s/call minimum).
-    # Groq fallback (llama-4-scout) is faster at 30 RPM but the throttle has to
-    # be safe for whichever provider succeeds. 13s gives a 1s buffer above the
-    # 5 RPM Cerebras floor. With 60 AI evals/run this adds ~13 min of pacing,
-    # which is fine for a daily cron.
+
+def _maybe_web_search_context(company, title, description):
+    """Build the optional `[LIVE WEB SEARCH RESULTS...]` block when the description
+    looks restriction-ambiguous. Returns empty string if no triggers fire (or if
+    the description has explicit-global signals)."""
+    desc_lower = description.lower()
+    has_restriction = any(t in desc_lower for t in _WEB_SEARCH_TRIGGER_PHRASES)
+    has_global_signal = any(p in desc_lower for p in _EXPLICIT_GLOBAL_PHRASES)
+    has_ambiguity_context = any(p in desc_lower for p in _AMBIGUITY_CONTEXT_PHRASES)
+
+    if has_restriction or (has_ambiguity_context and not has_global_signal):
+        search_data = search_company_remote_policy(company, title)
+        if search_data:
+            return (
+                f"\n\n[LIVE WEB SEARCH RESULTS FOR '{company}' REMOTE POLICY]:\n"
+                f"{search_data}\n\n"
+                f"Use this live web data to determine if Palestine/Middle East is "
+                f"explicitly excluded from their remote eligible countries."
+            )
+    return ""
+
+
+def _apply_india_scam_check(result, row, company):
+    """Run the DDG-based scam confirmation for India-flagged suspicious companies.
+
+    Mutates `result` in place when a scam is confirmed (sets scam=True, is_valid=False,
+    caps match_percentage at 30, prefixes verdict with [SCAM]). Pure no-op otherwise.
+    """
+    if not result.get("suspicious"):
+        return result
+    location_text = str(row.get("location", ""))
+    if not looks_like_india_employer(location_text, company):
+        return result
+    if detect_company_scam(company):
+        result["scam"] = True
+        result["is_valid"] = False
+        if result["match_percentage"] > 30:
+            result["match_percentage"] = 30
+        if not result["verdict"].startswith("[SCAM]"):
+            result["verdict"] = "[SCAM] " + result["verdict"]
+    return result
+
+
+def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key):
+    """
+    Evaluate a single job posting against the candidate's CV using qwen-3-235b
+    via Cerebras (primary) with llama-3.3-70b on Groq as fallback.
+
+    Returns a 2-tuple: (result_dict, evaluated_bool).
+    - result_dict follows DEFAULT_AI_RESULT schema.
+    - evaluated_bool is True ONLY when the LLM returned a real verdict; callers should
+      use this to decide whether to mark the URL as "seen" (so transient API errors
+      don't lose jobs forever — see core_filter.JobTracker).
+
+    Fallback behavior lives in pipeline.core_llm.call_llm_with_fallback:
+    Cerebras -> Groq -> Cerebras -> Groq (min 4 attempts on transient errors).
+    """
+    if not cerebras_key and not groq_key:
+        return _error_result("No LLM API Key provided (CEREBRAS_API_KEY or GROQ_API_KEY)"), False
+
+    from pipeline.core_llm import call_llm_with_fallback  # lazy import — SDK only loaded when needed
+
+    title = str(row.get("title", ""))
+    company = str(row.get("company", ""))
+    description = _maybe_get_full_description(row)
+    web_search_context = _maybe_web_search_context(company, title, description)
+    prompt = _build_verdict_prompt(row, cv_text, description, web_search_context=web_search_context)
+
+    # Pacing — Cerebras free tier caps at 5 RPM (12s/call minimum). 13s gives
+    # a 1s buffer. With 60 AI evals/run this adds ~13 min of pacing, fine
+    # for a daily cron.
     time.sleep(13)
 
     try:
@@ -688,24 +729,8 @@ Reply with VALID JSON ONLY (no markdown, no comments):
             label=title,
         )
         result = _parse_ai_response(response_text)
-
-        # Apply deterministic caps before the (optional) network-based scam
-        # check. Both caps are pure functions of the AI's verdict + the row's
-        # pre-screening flags, so we extract them so tests can lock them down
-        # without mocking the LLM client.
         result = apply_post_ai_caps(result, row)
-
-        # India-suspicious -> open-web scam check. Only fires when both signals
-        # hold, keeping DDG calls cheap. Confirmed scams get a hard cap + tag.
-        location_text = str(row.get("location", ""))
-        if result["suspicious"] and looks_like_india_employer(location_text, company):
-            if detect_company_scam(company):
-                result["scam"] = True
-                result["is_valid"] = False
-                if result["match_percentage"] > 30:
-                    result["match_percentage"] = 30
-                if not result["verdict"].startswith("[SCAM]"):
-                    result["verdict"] = "[SCAM] " + result["verdict"]
+        result = _apply_india_scam_check(result, row, company)
 
         badge = " SCAM" if result["scam"] else (" SUSPICIOUS" if result["suspicious"] else "")
         badge += " BLACKLISTED" if bool(row.get("pre_flagged_low_quality", False)) else ""
@@ -719,5 +744,53 @@ Reply with VALID JSON ONLY (no markdown, no comments):
 
     except Exception as e:
         logger.error("[AI ERROR] %s: %s", title[:55], str(e)[:300])
+        error_msg = str(e).replace('"', "'")
+        return _error_result(f"AI Error: {error_msg[:100]}..."), False
+
+
+def evaluate_job_with_gemini(row, cv_text, gemini_key):
+    """Cheap second-pass verdict for lower-ranked jobs via Gemini 3.1 Flash Lite.
+
+    Same prompt and post-processing as evaluate_job_with_ai, with two cost-saving
+    differences for the lower-ranked path:
+      - Skips the DDG web-search context (lower-ranked jobs already trail the
+        top set in similarity; we don't burn DDG quota verifying them).
+      - Skips the open-web scam check (reputation blacklist already handles
+        known offenders upstream; 25 extra runs of detect_company_scam would
+        cost ~75 DDG calls per pipeline tick).
+
+    Returns the same (result, evaluated_bool) shape so callers can treat both
+    paths uniformly. Pacing is 4s per call (15 RPM Gemini Flash Lite free tier).
+    """
+    if not gemini_key:
+        return _error_result("No GEMINI_API_KEY provided"), False
+
+    from pipeline.core_llm import call_gemini_verdict  # lazy import
+
+    title = str(row.get("title", ""))
+    description = _maybe_get_full_description(row)
+    prompt = _build_verdict_prompt(row, cv_text, description, web_search_context="")
+
+    # Pacing: Gemini Flash Lite free tier is 15 RPM = 4s/call minimum.
+    time.sleep(4)
+
+    try:
+        response_text = call_gemini_verdict(prompt, gemini_key, max_attempts=3, label=title)
+        result = _parse_ai_response(response_text)
+        result = apply_post_ai_caps(result, row)
+        # Intentionally NO india scam check here — keeps the cheap path cheap.
+
+        badge = " SUSPICIOUS" if result["suspicious"] else ""
+        badge += " BLACKLISTED" if bool(row.get("pre_flagged_low_quality", False)) else ""
+        logger.info(
+            "[AI-G] %-55s -> match=%d%% (T:%d E:%d L:%d)%s",
+            title[:55], result['match_percentage'],
+            result['tech_fit'], result['experience_fit'], result['logistics_fit'],
+            badge,
+        )
+        return result, True
+
+    except Exception as e:
+        logger.error("[AI-G ERROR] %s: %s", title[:55], str(e)[:300])
         error_msg = str(e).replace('"', "'")
         return _error_result(f"AI Error: {error_msg[:100]}..."), False
