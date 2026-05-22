@@ -22,6 +22,8 @@ from pipeline.core_filter import filter_api_jobs, apply_pipeline_filters, JobTra
 from pipeline.core_ai import evaluate_job_with_ai, evaluate_job_with_gemini, quick_viability_check, skipped_result
 from pipeline.core_embedding import attach_similarity, drop_semantic_duplicates, update_embedding_history
 from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
+from pipeline.core_feedback import ingest_pending_feedback, load_candidate_preferences
+from pipeline.core_feedback_page import render_feedback_page, write_feedback_page
 
 """
 MAIN SCRAPER EXECUTOR
@@ -78,7 +80,7 @@ WILDCARD_COUNT = 5
 LOWER_RANKED_EVAL_LIMIT = 25
 
 
-def _run_ai_loop(df, cv_text, tracker, *, provider, cerebras_key=None, groq_key=None, gemini_key=None):
+def _run_ai_loop(df, cv_text, tracker, *, provider, cerebras_key=None, groq_key=None, gemini_key=None, learned_preferences=""):
     """Run quick_viability_check + AI verdict over a dataframe of jobs.
 
     Returns the SAME dataframe with these columns attached:
@@ -110,9 +112,9 @@ def _run_ai_loop(df, cv_text, tracker, *, provider, cerebras_key=None, groq_key=
             evaluated = True  # deterministic skip — mark seen
         else:
             if provider == "gemini":
-                result, evaluated = evaluate_job_with_gemini(row, cv_text, gemini_key)
+                result, evaluated = evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences=learned_preferences)
             else:
-                result, evaluated = evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key)
+                result, evaluated = evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferences=learned_preferences)
 
         verdicts.append(result["verdict"])
         valid_mask.append(result["is_valid"])
@@ -148,8 +150,17 @@ def _run_ai_loop(df, cv_text, tracker, *, provider, cerebras_key=None, groq_key=
 def run_pipeline(config, tracker):
     all_jobs_dfs = []
 
+    # Drain yesterday's feedback before anything else: hard signals
+    # (block_company, applied) must influence today's run.
+    logs_repo = os.environ.get("LOGS_REPO")
+    logs_token = os.environ.get("LOGS_REPO_TOKEN")
+    ingest_pending_feedback(logs_repo, logs_token, tracker)
+    learned_preferences = load_candidate_preferences(logs_repo, logs_token)
+    if learned_preferences:
+        logger.info("Loaded candidate preferences (%d chars) for verdict context.", len(learned_preferences))
+
     logger.info("Starting job scrape...")
-    
+
     # Track statistics for the daily email header (Tier 3 Item 14)
     stats = {"scraped": 0, "filtered": 0, "approved": 0}
     
@@ -279,7 +290,8 @@ def run_pipeline(config, tracker):
             logger.info("Running top-section AI validation via Cerebras+Groq (this may take a while)...")
             ai_eval_set = _run_ai_loop(ai_eval_set, cv_text, tracker,
                                        provider="cerebras_groq",
-                                       cerebras_key=cerebras_key, groq_key=groq_key)
+                                       cerebras_key=cerebras_key, groq_key=groq_key,
+                                       learned_preferences=learned_preferences)
             valid_top = ai_eval_set[ai_eval_set['is_valid']]
             stats['approved'] = len(valid_top)
             logger.info("Total top-section jobs remaining after AI validation: %d", stats['approved'])
@@ -294,7 +306,8 @@ def run_pipeline(config, tracker):
                 )
                 eval_slice = _run_ai_loop(eval_slice, cv_text, tracker,
                                           provider="gemini",
-                                          gemini_key=gemini_key)
+                                          gemini_key=gemini_key,
+                                          learned_preferences=learned_preferences)
                 lower_ranked = eval_slice[eval_slice['is_valid']].reset_index(drop=True)
                 logger.info("Lower-ranked jobs surviving Gemini validation: %d", len(lower_ranked))
             else:
@@ -316,8 +329,26 @@ def run_pipeline(config, tracker):
             internships_df = combined_jobs[intern_mask]
             jobs_df = combined_jobs[~intern_mask]
             
+            # Generate the feedback page BEFORE dispatch so the email link
+            # always resolves to the freshly-rendered jobs of this run.
+            feedback_token = os.environ.get("FEEDBACK_WRITE_TOKEN", "")
+            feedback_path = os.environ.get("FEEDBACK_PAGE_PATH", "docs/feedback_global.html")
+            if feedback_token and logs_repo:
+                try:
+                    page_html = render_feedback_page(
+                        dfs=[internships_df, jobs_df, lower_ranked],
+                        logs_repo=logs_repo,
+                        write_token=feedback_token,
+                        page_title="Job Feedback — Global",
+                    )
+                    write_feedback_page(feedback_path, page_html)
+                except Exception as e:
+                    logger.warning("Feedback page generation failed: %s", e)
+            else:
+                logger.info("Feedback page skipped (FEEDBACK_WRITE_TOKEN or LOGS_REPO missing).")
+
             output_config = config.get("output", {"use_email": True, "use_github_issue": False})
-            
+
             if output_config.get("use_email"):
                 html_content = format_email_html(internships_df, jobs_df, stats, lower_ranked_df=lower_ranked)
                 send_email("Your Automated AI Job Alerts", html_content, config.get("email_settings", {}))

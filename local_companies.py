@@ -22,6 +22,8 @@ from pipeline.core_ats import (
 )
 from pipeline.url_validation import is_job_url_like, probe_urls_alive_batch
 from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
+from pipeline.core_feedback import ingest_pending_feedback, load_candidate_preferences
+from pipeline.core_feedback_page import render_feedback_page, write_feedback_page
 
 # How far back the local pipeline will accept LinkedIn posts (matches the JobSpy 6-day window).
 LOCAL_LOOKBACK_DAYS = 6
@@ -210,6 +212,15 @@ def main():
         cleanup_old_github_issues(days_old=2)
 
 def run_local_pipeline(tracker):
+    # Drain yesterday's feedback first so any hard signals (block_company,
+    # applied) shape today's pre-filter and verdict context.
+    logs_repo = os.environ.get("LOGS_REPO")
+    logs_token = os.environ.get("LOGS_REPO_TOKEN")
+    ingest_pending_feedback(logs_repo, logs_token, tracker)
+    learned_preferences = load_candidate_preferences(logs_repo, logs_token)
+    if learned_preferences:
+        logger.info("Loaded candidate preferences (%d chars) for verdict context.", len(learned_preferences))
+
     logger.info("Starting Local Companies Scrape...")
     companies_df = load_local_companies()
     if companies_df.empty:
@@ -353,7 +364,8 @@ def run_local_pipeline(tracker):
                 result = skipped_result(reason)
                 evaluated = True
             else:
-                result, evaluated = evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key)
+                result, evaluated = evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key,
+                                                          learned_preferences=learned_preferences)
             verdicts.append(result["verdict"])
             valid_mask.append(result["is_valid"])
             match_pcts.append(result["match_percentage"])
@@ -397,13 +409,29 @@ def run_local_pipeline(tracker):
     today = datetime.now().strftime("%Y-%m-%d")
     
     # 4. Routing Logic
-    logs_repo = os.environ.get("LOGS_REPO")
-    logs_token = os.environ.get("LOGS_REPO_TOKEN")
     if stats['approved'] > 0:
         # We have approved jobs. Send Email and create GitHub issue.
         intern_mask = approved_jobs['title'].str.lower().str.contains('intern')
         internships_df = approved_jobs[intern_mask]
         jobs_df = approved_jobs[~intern_mask]
+
+        # Generate the feedback page for the local-pipeline output before
+        # dispatch so the email's link resolves to this run's jobs.
+        feedback_token = os.environ.get("FEEDBACK_WRITE_TOKEN", "")
+        feedback_path = os.environ.get("FEEDBACK_PAGE_PATH", "docs/feedback_local.html")
+        if feedback_token and logs_repo:
+            try:
+                page_html = render_feedback_page(
+                    dfs=[internships_df, jobs_df],
+                    logs_repo=logs_repo,
+                    write_token=feedback_token,
+                    page_title="Job Feedback — Local Companies",
+                )
+                write_feedback_page(feedback_path, page_html)
+            except Exception as e:
+                logger.warning("Feedback page generation failed: %s", e)
+        else:
+            logger.info("Feedback page skipped (FEEDBACK_WRITE_TOKEN or LOGS_REPO missing).")
 
         html_content = format_email_html(internships_df, jobs_df, stats)
         send_email(f"Local Companies Job Alerts - {today}", html_content, config.get("email_settings", {}))

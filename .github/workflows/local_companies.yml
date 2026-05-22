@@ -12,7 +12,7 @@ jobs:
     env:
       ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node24
     permissions:
-      contents: read
+      contents: write
       issues: write
 
     steps:
@@ -57,5 +57,18 @@ jobs:
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         LOGS_REPO: ${{ vars.LOGS_REPO }}
         LOGS_REPO_TOKEN: ${{ secrets.LOGS_REPO_TOKEN }}
+        FEEDBACK_WRITE_TOKEN: ${{ secrets.FEEDBACK_WRITE_TOKEN }}
+        FEEDBACK_PAGE_URL: https://moe-the-goat.github.io/Automated-AI-Job-Intelligence-System/feedback_local.html
+        FEEDBACK_PAGE_PATH: docs/feedback_local.html
       run: |
         python local_companies.py
+
+    # Commit the freshly-rendered feedback page and any reputation list
+    # updates that came from ingested block_company signals.
+    - name: Commit feedback page and reputation updates
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add docs/feedback_local.html data/reputation.json
+        git diff --staged --quiet || git commit -m "Updated local feedback page and reputation list from daily run"
+        git push

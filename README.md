@@ -10,11 +10,13 @@ This repository is what I built.
 
 ## Overview
 
-Every day at 06:55 UTC (09:55 Jerusalem), a GitHub Actions workflow runs [scraper.py](scraper.py). Roughly five to seven minutes later, a single HTML email lands in my inbox: a stats header, two ranked tables (internships and full-time roles), and an optional "lower-ranked" section. A second workflow at 08:50 UTC (11:50 Jerusalem) runs [local_companies.py](local_companies.py) against a curated list of Palestinian IT companies pulled from two Excel sheets in this repo. Both share the same brain. Both share a seen-jobs cache, so a job evaluated by one is automatically skipped by the other. Neither runs unless the test suite passes first.
+Every day at 06:55 UTC (09:55 Jerusalem), a GitHub Actions workflow runs [scraper.py](scraper.py). Roughly five to seven minutes later, a single HTML email lands in my inbox: a stats header, a link to a feedback page for the jobs in that email, two ranked tables (internships and full-time roles), and an optional "lower-ranked" section. A second workflow at 08:50 UTC (11:50 Jerusalem) runs [local_companies.py](local_companies.py) against a curated list of Palestinian IT companies pulled from two Excel sheets in this repo. Both share the same brain. Both share a seen-jobs cache, so a job evaluated by one is automatically skipped by the other. Neither runs unless the test suite passes first.
 
-The pipeline talks to nine external job sources, six ATS platforms, three LLM providers (Cerebras and Groq for job verdicts, Gemini for geo-eligibility checks), a free embedding API (Gemini), DuckDuckGo for occasional fact-checks, and Jina Reader as a fallback for careers pages no scraper can parse alone. It runs entirely on free tiers. The total monthly cost of operating it is zero.
+The pipeline talks to nine external job sources, six ATS platforms, three LLM providers (Cerebras and Groq for job verdicts, Gemini for the lower-ranked second pass), a free embedding API (Gemini), DuckDuckGo for occasional fact-checks, and Jina Reader as a fallback for careers pages no scraper can parse alone. It runs entirely on free tiers. The total monthly cost of operating it is zero.
 
-Inside, there are eleven modules under [pipeline/](pipeline/), two thin orchestrators at the repo root, a curated reputation list, **463 tests across 29 files**, and three GitHub Actions workflows that wire the whole thing into a self-managing loop. The rest of this document is a tour of why each piece is shaped the way it is.
+A separate feedback loop closes the system end to end. Each daily email links to a static GitHub Pages page that lists the jobs from that run with a per-job dropdown and an optional note. Submissions land as a small JSON file in the private logs repo. The next morning's pipeline ingests the file, auto-blacklists any company the user marked as block_company, archives every entry to a rolling log, and injects the latest AI-summarized preference profile into the verdict prompt. A bi-weekly digest workflow compresses that log back into a fresh profile and trims it so it never grows unbounded.
+
+Inside, there are thirteen modules under [pipeline/](pipeline/), three thin orchestrators at the repo root, a curated reputation list, **504 tests across 30 files**, and four GitHub Actions workflows that wire the whole thing into a self-managing loop. The rest of this document is a tour of why each piece is shaped the way it is.
 
 ---
 
@@ -30,26 +32,30 @@ The system in this repository inverts that. It assumes nothing about the candida
 
 ## How It Works
 
-At the highest level, the pipeline is a five-stage funnel:
+At the highest level, the pipeline is a six-stage funnel that closes back on itself through a feedback loop:
 
 ```
    raw scrape (~150-300 jobs/day)
           |
           v
    deterministic filter gauntlet
-   (incl. geo-lock pattern matching ~80 countries)
+   (incl. geo-lock pattern matching ~80 countries
+    on description AND location fields)
           |
           v
-   embedding pre-rank with region & trust weighting
+   embedding pre-rank with region, trust, and role-tier weighting
           |
           v
-   AI evaluation (top 55 + 5 wildcards)
+   top-section AI evaluation (Cerebras + Groq, top 55 + 5 wildcards)
           |
           v
-   Layer 3 geo-eligibility check (Gemini + Google Search)
+   lower-ranked AI evaluation (Gemini Flash Lite, next ~25 jobs)
           |
           v
-   final dispatch (email + private GitHub Issue)
+   final dispatch (email + private GitHub Issue + feedback page)
+          |
+          v
+   user feedback loop (next-day ingest, bi-weekly digest)
 ```
 
 Each stage exists for a reason and was added in response to a specific failure mode I observed in production. The funnel is sequential and largely deterministic until the AI step, which is the only place a black-box model gets a voice — and even there, the verdicts are post-processed by deterministic caps before they reach the user.
@@ -60,11 +66,13 @@ Each stage exists for a reason and was added in response to a specific failure m
 
 **Stage 3 — Embedding pre-rank.** Survivors are embedded against the CV, then sorted by `weighted_score = cosine_similarity * region_weight * trust_weight`. The weights inject the inductive bias the embedding model lacks: EU and Americas roles get 1.15x, fully-remote and Middle East roles get 1.30x, India gets 0.70x, sanctioned regions get 0.50x. Trusted companies stack a 1.25x multiplier.
 
-**Stage 4 — AI evaluation.** Top 55 plus 5 wildcards reach a heuristic pre-screen, then the verdict LLM — Cerebras `qwen-3-235b-a22b-instruct-2507` (primary) with Groq `llama-3.3-70b-versatile` as a ping-pong fallback. The model returns a structured verdict with sub-scores, an opinionated text verdict in a recruiter's voice, and a `suspicious` flag. Deterministic caps post-process the result before it reaches the user.
+**Stage 4 — Top-section AI evaluation.** Top 55 plus 5 wildcards reach a heuristic pre-screen, then the verdict LLM. Cerebras `qwen-3-235b-a22b-instruct-2507` is the primary and Groq `llama-3.3-70b-versatile` is the ping-pong fallback. The model returns a structured verdict with sub-scores, an opinionated recruiter-voice text verdict, and a `suspicious` flag. The verdict prompt now requires every verdict to include a one-sentence `REMOTE:` line explaining why the role is geographically accessible to the candidate, so the email never surfaces a job whose remote eligibility is unstated. Deterministic caps post-process the result before it reaches the user.
 
-**Stage 5 — Layer 3 geo-eligibility check.** After AI evaluation, any job that looks ambiguously regional — a "Remote, Country" title pattern, a specific-country location field, or no global confirmer ("worldwide", "globally remote") in the description — is sent to Gemini with Google Search grounding. Gemini issues live web queries to determine whether a Palestine-based candidate can legally apply. Jobs are classified `open / uncertain / restricted`: restricted are dropped from the email entirely; uncertain are capped at 50% match with a `[GEO-UNVERIFIED]` badge. This layer runs on both the AI-evaluated top section and the lower-ranked section.
+**Stage 5 — Lower-ranked AI evaluation.** The next 25 jobs by weighted similarity are passed through a cheaper second-pass verdict on Gemini 3.1 Flash Lite. Same prompt, same post-processing, no DuckDuckGo and no scam check (those are reserved for the top section where the budget exists). The result is rendered under a compact "Also Found" table in the email so the long tail is visible without burning Cerebras quota.
 
-**Stage 6 — Dispatch.** Color-coded match badges, bolded `MATCH:` and `GAP:` markers in each verdict, severity badges on titles, and a compact lower-ranked table at the bottom. Same data renders as Markdown into a GitHub Issue in a private logs repo. Cleanup runs in a `finally` so even crashes don't leak orphaned issues.
+**Stage 6 — Dispatch and feedback page.** Color-coded match badges, bolded `MATCH:`, `REMOTE:`, `GAP:`, and `CLOSING-REASON:` markers in each verdict, severity badges on titles, and the lower-ranked table at the bottom. Same data renders as Markdown into a GitHub Issue in a private logs repo. Before the email is sent, the pipeline writes a static feedback page to `docs/` containing every job rendered with a per-job dropdown plus a note field. The email links to it. Cleanup runs in a `finally` so even crashes do not leak orphaned issues.
+
+**Stage 7 — Feedback loop.** The next morning's pipeline starts by reading any feedback the user submitted from the page. Hard signals are applied immediately (a `block_company` entry is appended to the reputation blacklist, `applied` URLs are confirmed seen). Every entry is archived to a rolling log in the private logs repo. A second workflow on a separate biweekly cron compresses that log into a fresh candidate preference profile using the same Cerebras and Groq fallback, and the next pipeline run injects that profile into every verdict prompt so the AI scores future jobs with the user's actual history in mind.
 
 That is the system, end to end. The next section is the deep tour.
 
@@ -151,21 +159,28 @@ For India-located suspicious companies, a third layer fires: [detect_company_sca
 </details>
 
 <details>
-<summary><strong>Geo-eligibility — Layer 3 live verification (Gemini + Google Search)</strong></summary>
+<summary><strong>Lower-ranked second pass — Gemini Flash Lite verdicts</strong></summary>
 
-Gemini 3.1 Flash Lite is used exclusively for two roles after the verdict model switch: CV embedding (via `gemini-embedding-001`) and **Layer 3 geo-eligibility verification**.
+After Cerebras and Groq finish scoring the top 55 plus 5 wildcards, the next 25 jobs by weighted similarity go through a cheaper second pass on **Gemini 3.1 Flash Lite**. The prompt is identical and the post-processing pipeline (suspicious cap, blacklist cap, schema normalization) is unchanged, so the lower-ranked rows are first-class citizens in the email rather than a similarity-only listing.
 
-The geo problem had two forms. The deterministic form — explicit phrases like "must reside in Germany", "Canadian residents only", "EU-based candidates only", "open to UK applicants only" — is caught in Stage 2's `quick_viability_check` before any AI call fires. A compiled regex covers 80+ countries/regions across eleven phrase templates, so a job with an explicit restriction never reaches the verdict model in the first place.
+Two cost-saving differences shape the second pass. DuckDuckGo enrichment is skipped (the top-section budget is reserved for jobs the ranker already thinks are best). The open-web scam check is skipped (the reputation blacklist upstream handles known offenders; running 25 extra Reddit lookups per pipeline tick is not worth it). Pacing is four seconds per call to stay under Gemini Flash Lite's 15 RPM free-tier ceiling.
 
-The ambiguous form — a job that says "Remote" but whose company or posting pattern suggests a specific country without stating it — is harder. For these, [pipeline/core_geo.py](pipeline/core_geo.py) fires after the AI verdict. It constructs two targeted web queries (company remote-work policy for the role + the role's geographic eligibility from Palestine), passes them to Gemini with a `google_search` grounding tool, and parses the response into a tri-state:
+The resulting jobs render under a compact "Also Found" table at the bottom of the email. The same `_prepare_lower_ranked` function strips out anything the verdict marked suspicious or that the reputation blacklist flagged, so the section never amplifies spam.
 
-- **`open`** — no geo restriction found; job passes unchanged.
-- **`uncertain`** — evidence is mixed or missing; `match_percentage` is capped at 50% and the title gets a `[GEO-UNVERIFIED]` badge.
-- **`restricted`** — clear restriction for Palestine-based applicants; `is_valid=False`, logistics≤15, match≤30. The job is dropped from the email entirely.
+</details>
 
-`[BLACKLISTED]` and `[SCAM]` tags take precedence — if a job is already flagged for those reasons, no geo tag is prepended and the geo verdict doesn't override them.
+<details>
+<summary><strong>Feedback loop — closing the system end to end</strong></summary>
 
-The check fires on both the AI-evaluated top section and the lower-ranked section, on any job that matches at least one trigger: "Remote, CountryName" in the title, a specific country in the location field, or no global-remote confirmer ("worldwide", "globally remote", "work from anywhere", etc.) anywhere in the description. Gemini's free-tier RPD is dedicated to this layer; the verdict models (Cerebras and Groq) have their own quotas and don't touch it.
+The system used to be one-directional. The pipeline guessed at what a good job looked like, sent the daily email, and waited. The feedback loop closes the gap.
+
+After every pipeline run, [pipeline/core_feedback_page.py](pipeline/core_feedback_page.py) writes a static HTML page to `docs/feedback_global.html` (and `docs/feedback_local.html` for the local pipeline). The page lists every job from that run with a small dropdown per row (`Applied`, `Bookmarked`, `Not relevant`, `Block company`, `Wrong location`, `Other`) and an optional note field. A single "Submit All" button at the bottom posts the selections directly to a private logs repo via a fine-grained PAT scoped to one file. GitHub Pages serves the page on the public repo; the email contains a single link to it.
+
+The next morning, [pipeline/core_feedback.py](pipeline/core_feedback.py) runs first thing in `run_pipeline`. It pulls `data/feedback_pending.json` from the logs repo, drops malformed entries, applies hard signals (a `block_company` row appends the company name to `data/reputation.json` in the public repo, which the workflow then commits back), and appends every sanitized entry to a rolling `data/feedback_log.json` in the logs repo. The pending file is then cleared so tomorrow starts empty.
+
+Soft signals do not act immediately. They feed the verdict prompt. A separate workflow at [.github/workflows/feedback_digest.yml](.github/workflows/feedback_digest.yml) fires on a biweekly cron, reads the rolling log, asks Cerebras (with Groq fallback) to compress every entry into a 5 to 8 sentence preference profile, and writes the result to `data/candidate_preferences.txt` in the logs repo. The log is then trimmed to a small tail so it never grows unbounded. Every pipeline run loads that profile and injects it as a new `CANDIDATE LEARNED PREFERENCES` block in the verdict prompt, alongside the existing `CANDIDATE FACTS`. The AI scores future jobs with the user's actual history in mind, not just the CV.
+
+The feedback page sits behind a token embedded directly in the HTML. The token is a fine-grained PAT scoped to write a single file path in a single private repo. If discovered, the worst case is a stranger overwriting the pending feedback file with garbage, which the ingestion sanitizer drops on the next run. No information is exposed by the page being publicly served.
 
 </details>
 
@@ -291,18 +306,25 @@ Everything above describes what the system does. This section describes how I ma
 |   |-- core_filter.py                deterministic filter gauntlet + JobTracker
 |   |-- core_embedding.py             CV-similarity pre-ranker (Gemini embeddings)
 |   |-- core_llm.py                   Cerebras + Groq ping-pong fallback verdict client
-|   |-- core_geo.py                   Layer 3 remote eligibility check (Gemini + Google Search)
 |   |-- core_ai.py                    verdict prompt, pre-screen, scam check, post-AI caps
+|   |-- core_feedback.py              feedback ingestion + hard signal application
+|   |-- core_feedback_page.py         static HTML page generator for daily feedback
 |   |-- core_notify.py                email + GitHub Issue rendering and dispatch
-|   |-- region_weighting.py           geographic + trust weighting for the ranker
+|   |-- region_weighting.py           geographic + trust + role-tier weighting for the ranker
 |   |-- url_validation.py             URL-pattern check + HEAD probe for ghost listings
 |   `-- logging_setup.py              configure_logging + get_logger helpers
 |
 |-- scraper.py                        global pipeline entry point (cron 06:55 UTC)
 |-- local_companies.py                Palestinian-companies pipeline (cron 08:50 UTC)
+|-- feedback_digest.py                biweekly preference-profile summarizer
 |
 |-- data/
 |   `-- reputation.json               curated blacklist + trust-boost list
+|
+|-- docs/                             served by GitHub Pages
+|   |-- index.html                    feedback landing page
+|   |-- feedback_global.html          regenerated by scraper.py every run
+|   `-- feedback_local.html           regenerated by local_companies.py every run
 |
 |-- IT Companies - Nablus.xlsx        target list (Palestinian local pipeline)
 |-- IT Companies - Ramallah.xlsx      target list (Palestinian local pipeline)
@@ -323,7 +345,8 @@ Everything above describes what the system does. This section describes how I ma
 `-- .github/workflows/
     |-- qa.yml                        runs QA on every push/PR
     |-- job_alert.yml                 daily global scraper (cron 06:55 UTC)
-    `-- local_companies.yml           daily local scraper (cron 08:50 UTC)
+    |-- local_companies.yml           daily local scraper (cron 08:50 UTC)
+    `-- feedback_digest.yml           biweekly feedback summarization
 ```
 
 </details>
@@ -338,13 +361,17 @@ pip install -r requirements.txt
 pip install -r requirements-qa.txt
 
 # Set the required secrets
-export GEMINI_API_KEY=...                        # for embeddings and geo-eligibility checks
+export GEMINI_API_KEY=...                        # embeddings + lower-ranked Gemini Flash Lite verdicts
+export GEMINI_EMBED_API_KEY=...                  # optional dedicated embedding key (recommended)
 export CEREBRAS_API_KEY=...                      # primary verdict LLM (Cerebras free tier)
 export GROQ_API_KEY=...                          # fallback verdict LLM (Groq free tier)
 export SENDER_EMAIL=...
 export EMAIL_APP_PASSWORD=...                    # Gmail app password, not your account password
-export LOGS_REPO=owner/repo-name                 # optional — private logs repo
-export LOGS_REPO_TOKEN=ghp_...                   # optional — fine-grained PAT
+export LOGS_REPO=owner/repo-name                 # private logs repo (issues + feedback files)
+export LOGS_REPO_TOKEN=ghp_...                   # fine-grained PAT for the logs repo
+export FEEDBACK_WRITE_TOKEN=ghp_...              # fine-grained PAT scoped to data/feedback_pending.json
+export FEEDBACK_PAGE_URL=https://<user>.github.io/<repo>/feedback_global.html
+export FEEDBACK_PAGE_PATH=docs/feedback_global.html
 
 # Provide CV text (gitignored)
 echo "..." > cv_text.txt
@@ -375,15 +402,18 @@ A snapshot of the current state:
 | Companies in the trust-boost list           | 81                                               |
 | Companies in the reputation blacklist       | 12                                               |
 | Geo-lock countries covered (pre-screen)     | 80+                                              |
-| Total tests in the QA suite                 | 463                                              |
-| Test files                                  | 29                                               |
-| QA suite runtime (local, sequential)        | ~23 seconds                                      |
+| Total tests in the QA suite                 | 504                                              |
+| Test files                                  | 30                                               |
+| QA suite runtime (local, sequential)        | ~24 seconds                                      |
 | Daily pipeline runtime (GitHub Actions)     | ~5-7 minutes                                     |
-| Verdict LLM (primary)                       | Cerebras qwen-3-235b-a22b-instruct-2507 (free)   |
-| Verdict LLM (fallback)                      | Groq llama-3.3-70b-versatile (free)              |
-| Geo-check + embeddings                      | Gemini 3.1 Flash Lite + gemini-embedding-001     |
+| Verdict LLM (primary, top section)          | Cerebras qwen-3-235b-a22b-instruct-2507 (free)   |
+| Verdict LLM (fallback, top section)         | Groq llama-3.3-70b-versatile (free)              |
+| Verdict LLM (lower-ranked second pass)      | Gemini 3.1 Flash Lite                            |
+| Embedding model                             | gemini-embedding-001 (dedicated key, free tier)  |
 | Embedding throttle                          | 650ms (~92 RPM, under 100 RPM free-tier cap)     |
 | AI evaluation top-N                         | 55 + 5 wildcards                                 |
+| Lower-ranked second-pass cap                | 25 jobs                                          |
+| Feedback digest cadence                     | every 2 weeks (1st and 15th of the month)        |
 | Email frequency                             | once per day per pipeline                        |
 | Monthly cost                                | $0                                               |
 
@@ -391,11 +421,9 @@ A snapshot of the current state:
 
 ## What's Next
 
-The single-user version of this system is mature. The path forward is making it serve other people, which is fundamentally a different architecture: a Next.js front end on Vercel, a Supabase Postgres back end with row-level security so each user's data is isolated, the existing `pipeline/` package as the worker (run via the same GitHub Actions cron, just looping over users from the database), and Resend for transactional email. The current pipeline is being shaped so that this transition is straightforward — the package is import-clean, the entry points are thin orchestrators, the configuration is data not code. When the multi-user variant ships, the single-user version will still work; it will just be one user in the database.
+The single-user version of this system is mature. The path forward is making it serve other people, which is fundamentally a different architecture: a Next.js front end on Vercel, a Supabase Postgres back end with row-level security so each user's data is isolated, the existing `pipeline/` package as the worker (run via the same GitHub Actions cron, just looping over users from the database), and Resend for transactional email. The current pipeline is being shaped so that this transition is straightforward. The package is import-clean, the entry points are thin orchestrators, the configuration is data not code, and the feedback loop is already storage-backed in a way that maps cleanly onto a per-user table when the multi-user variant ships.
 
-A few smaller items also remain on the list. A user-feedback loop ("I applied to this; I got an interview"; "I rejected this") that biases future rankings is a natural follow-on but requires the database. A logging upgrade to ship structured JSON logs to an aggregator like Better Stack or Grafana Loki is appropriate when multiple users are running concurrently.
-
-For now, the system runs every morning and tells me the truth about that day's market. That was the goal.
+A logging upgrade to ship structured JSON logs to an aggregator like Better Stack or Grafana Loki is appropriate when multiple users are running concurrently. Beyond that, the system runs every morning, tells me the truth about that day's market, and learns from the corrections I send back. That was the goal.
 
 ---
 

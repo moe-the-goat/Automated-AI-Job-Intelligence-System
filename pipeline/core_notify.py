@@ -315,6 +315,33 @@ def _render_lower_ranked_md(df, limit=LOWER_RANKED_LIMIT):
     return out
 
 
+def _feedback_link_html():
+    """Return the email's feedback-page link block, or empty string when unset.
+
+    Reads FEEDBACK_PAGE_URL from the environment so each workflow can point
+    at its own page (`feedback_global.html`, `feedback_local.html`) without
+    leaking the URL into module code.
+    """
+    url = os.environ.get("FEEDBACK_PAGE_URL", "").strip()
+    if not url:
+        return ""
+    return (
+        f'<p style="margin: 6px 0 14px;">'
+        f'<a href="{url}" style="color: #2563eb; font-weight: 600; text-decoration: none;">'
+        f"Give feedback on today's jobs &rarr;</a> "
+        f'<span style="color: #6b7280; font-size: 13px;">'
+        f'(steers tomorrow\'s scoring)</span></p>'
+    )
+
+
+def _feedback_link_md():
+    """Markdown equivalent of `_feedback_link_html` for the GitHub Issue body."""
+    url = os.environ.get("FEEDBACK_PAGE_URL", "").strip()
+    if not url:
+        return ""
+    return f"[Give feedback on today's jobs]({url}) — steers tomorrow's scoring.\n\n"
+
+
 def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None):
     """Generates the final HTML payload for the daily email.
 
@@ -326,6 +353,7 @@ def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None):
     jobs_df = sort_by_match_percentage(jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
 
     html = "<h2>Automated AI Job Alerts</h2>"
+    html += _feedback_link_html()
     html += f"<div><b>Pipeline Stats:</b> Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {stats['approved']}</div>"
     html += (
         "<div style='color: #666; font-size: 12px; margin-top:4px;'>"
@@ -420,6 +448,7 @@ def format_github_markdown(internships_df, jobs_df, stats, lower_ranked_df=None)
     jobs_df = sort_by_match_percentage(jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
 
     md = "## Automated AI Job Alerts\n\n"
+    md += _feedback_link_md()
     md += f"**Pipeline Stats:** Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {stats['approved']}\n\n"
     md += "_Match shows composite % with sub-scores Tech / Experience / Logistics. 🚨 = web-confirmed scam · 🚫 = blacklisted · ⚠️ = AI-suspicious._\n\n---\n\n"
 

@@ -542,12 +542,26 @@ def _maybe_get_full_description(row):
     return description
 
 
-def _build_verdict_prompt(row, cv_text, description, web_search_context=""):
-    """Construct the canonical recruiter-screen prompt shared by Cerebras+Groq and Gemini paths."""
+def _build_verdict_prompt(row, cv_text, description, web_search_context="", learned_preferences=""):
+    """Construct the canonical recruiter-screen prompt shared by Cerebras+Groq and Gemini paths.
+
+    `learned_preferences` is the AI-summarized profile derived from the user's
+    historical feedback (Applied / Bookmarked / Not relevant / etc.). When
+    non-empty it appears as its own section and is treated as candidate
+    context, not as a job-specific instruction.
+    """
     title = str(row.get("title", ""))
     company = str(row.get("company", ""))
     job_type = str(row.get("job_type", "")).lower()
     is_internship = 'intern' in title.lower() or 'internship' in job_type
+
+    preferences_block = ""
+    if learned_preferences and learned_preferences.strip():
+        preferences_block = (
+            "\nCANDIDATE LEARNED PREFERENCES (inferred from prior user feedback — "
+            "weight your scoring toward roles aligned with these, and away from the rejected patterns):\n"
+            f"{learned_preferences.strip()}\n"
+        )
 
     return f"""You are a SKEPTICAL technical recruiter screening a candidate. Your job is to find
 DISQUALIFYING reasons. Default to skepticism. A 90+ score is reserved for cases where
@@ -563,7 +577,7 @@ CANDIDATE FACTS (use directly when scoring):
 - Strongest specific assets: RAG (LangChain/FAISS/Ollama), FastAPI deployment,
   PyTorch computer vision, MSR-VTT text-to-video retrieval (Recall@10 60.5%),
   Arabic CNN (98.86% test accuracy)
-
+{preferences_block}
 JOB:
 - Title: {title}
 - Company: {company}
@@ -715,7 +729,7 @@ def _apply_india_scam_check(result, row, company):
     return result
 
 
-def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key):
+def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferences=""):
     """
     Evaluate a single job posting against the candidate's CV using qwen-3-235b
     via Cerebras (primary) with llama-3.3-70b on Groq as fallback.
@@ -725,6 +739,10 @@ def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key):
     - evaluated_bool is True ONLY when the LLM returned a real verdict; callers should
       use this to decide whether to mark the URL as "seen" (so transient API errors
       don't lose jobs forever — see core_filter.JobTracker).
+
+    `learned_preferences` is an optional AI-summarized profile from prior user
+    feedback; when present it gets injected into the prompt's candidate
+    context and steers scoring toward (or away from) historical patterns.
 
     Fallback behavior lives in pipeline.core_llm.call_llm_with_fallback:
     Cerebras -> Groq -> Cerebras -> Groq (min 4 attempts on transient errors).
@@ -738,7 +756,11 @@ def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key):
     company = str(row.get("company", ""))
     description = _maybe_get_full_description(row)
     web_search_context = _maybe_web_search_context(company, title, description)
-    prompt = _build_verdict_prompt(row, cv_text, description, web_search_context=web_search_context)
+    prompt = _build_verdict_prompt(
+        row, cv_text, description,
+        web_search_context=web_search_context,
+        learned_preferences=learned_preferences,
+    )
 
     # Pacing — Cerebras free tier caps at 5 RPM (12s/call minimum). 13s gives
     # a 1s buffer. With 60 AI evals/run this adds ~13 min of pacing, fine
@@ -773,7 +795,7 @@ def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key):
         return _error_result(f"AI Error: {error_msg[:100]}..."), False
 
 
-def evaluate_job_with_gemini(row, cv_text, gemini_key):
+def evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences=""):
     """Cheap second-pass verdict for lower-ranked jobs via Gemini 3.1 Flash Lite.
 
     Same prompt and post-processing as evaluate_job_with_ai, with two cost-saving
@@ -783,6 +805,9 @@ def evaluate_job_with_gemini(row, cv_text, gemini_key):
       - Skips the open-web scam check (reputation blacklist already handles
         known offenders upstream; 25 extra runs of detect_company_scam would
         cost ~75 DDG calls per pipeline tick).
+
+    `learned_preferences` is passed through to the prompt builder so the
+    lower-ranked path also benefits from the user's historical signals.
 
     Returns the same (result, evaluated_bool) shape so callers can treat both
     paths uniformly. Pacing is 4s per call (15 RPM Gemini Flash Lite free tier).
@@ -794,7 +819,11 @@ def evaluate_job_with_gemini(row, cv_text, gemini_key):
 
     title = str(row.get("title", ""))
     description = _maybe_get_full_description(row)
-    prompt = _build_verdict_prompt(row, cv_text, description, web_search_context="")
+    prompt = _build_verdict_prompt(
+        row, cv_text, description,
+        web_search_context="",
+        learned_preferences=learned_preferences,
+    )
 
     # Pacing: Gemini Flash Lite free tier is 15 RPM = 4s/call minimum.
     time.sleep(4)
