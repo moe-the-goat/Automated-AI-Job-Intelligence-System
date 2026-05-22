@@ -9,6 +9,8 @@ on:
 jobs:
   scrape-local:
     runs-on: ubuntu-latest
+    env:
+      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node24
     permissions:
       contents: read
       issues: write

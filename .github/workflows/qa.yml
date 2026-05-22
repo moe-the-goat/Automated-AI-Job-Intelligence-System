@@ -12,6 +12,8 @@ on:
 jobs:
   qa:
     runs-on: ubuntu-latest
+    env:
+      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node24
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

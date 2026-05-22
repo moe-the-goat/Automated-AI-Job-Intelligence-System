@@ -87,15 +87,12 @@ def _is_english_title(title):
         return True
 
 
-# Description-text langdetect threshold: deliberately higher than the title's
-# 30-char floor because descriptions can contain English boilerplate (job title
-# + buzzwords) ahead of a foreign-language requirements section. We need
-# enough body text to be confident a *non-English* verdict reflects the actual
-# job content. Lowered 400 -> 300 on 2026-05-17 after the user reported a few
-# short-description non-English jobs (incl. a German-mention "CHEFS CULINAR
-# Data Scientist (m/w/d)") slipping into lower-ranked. 300 still gives
-# langdetect enough text to be confident.
-_DESCRIPTION_LANGDETECT_MIN_CHARS = 300
+# Description-text langdetect threshold. Lowered 400 -> 300 (2026-05-17),
+# then 300 -> 100 (2026-05-22) after a Spanish-description job slipped
+# through. 100 chars gives langdetect enough signal for confident detection
+# of major languages while still avoiding false positives on very short
+# English boilerplate snippets.
+_DESCRIPTION_LANGDETECT_MIN_CHARS = 100
 
 # Strip HTML so descriptions like "<p>Wir suchen einen Entwickler...</p>" don't
 # get the tags confusing langdetect into "English" because of `<p>` / `<div>`.

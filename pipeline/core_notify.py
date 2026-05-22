@@ -112,7 +112,7 @@ def _fmt_match_cell_md(row):
 # Anchored markers the AI prompt instructs the model to use in its verdict.
 # Bolding them in the rendered output makes the structure scannable at a glance.
 _VERDICT_KEYWORD_RE = re.compile(
-    r"\b(MATCH:|GAP:|CLOSING[\s\-]REASON:|CLOSING:|REASON:)",
+    r"\b(MATCH:|REMOTE:|GAP:|CLOSING[\s\-]REASON:|CLOSING:|REASON:)",
     re.IGNORECASE,
 )
 

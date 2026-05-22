@@ -390,6 +390,9 @@ _GEO_LOCK_LOCATIONS = (
 )
 
 
+_GEO_LOCK_ALTERNATION = "|".join(re.escape(g) for g in _GEO_LOCK_LOCATIONS)
+
+
 def _build_geo_lock_regex():
     """Compile a single regex catching '<non-Palestine geo>-only' restrictions.
 
@@ -398,7 +401,7 @@ def _build_geo_lock_regex():
     omits MENA / Middle East / Worldwide / Global since those include Palestine
     and shouldn't disqualify.
     """
-    geos = "|".join(re.escape(g) for g in _GEO_LOCK_LOCATIONS)
+    geos = _GEO_LOCK_ALTERNATION
     templates = [
         # "Canadian residents only", "Brazil citizens only"
         rf"\b(?:{geos})\s+(?:citizens?|residents?|nationals?)\s+only\b",
@@ -430,6 +433,11 @@ def _build_geo_lock_regex():
 
 
 _GEO_LOCK_REGEX = _build_geo_lock_regex()
+
+_LOCATION_GEO_LOCK_RE = re.compile(
+    rf"\bremote\s+(?:in|from|[-–—])\s+(?:the\s+)?(?:{_GEO_LOCK_ALTERNATION})\b",
+    re.IGNORECASE,
+)
 
 _MIN_DESCRIPTION_CHARS = 150
 
@@ -492,6 +500,17 @@ def quick_viability_check(row):
     m = _GEO_LOCK_REGEX.search(description)
     if m:
         return False, f"hard disqualifier: geo-locked ({m.group(0)[:60].strip()})"
+
+    # 7. Location-field geo-lock (added 2026-05-22). Job boards often encode
+    # geo-restrictions directly in the location string: "Remote in Netherlands",
+    # "Remote - Germany". The description regex (step 6) requires an "only"
+    # suffix to avoid false positives in longer text, but a short location
+    # field like "Remote in Netherlands" is unambiguous.
+    location = str(row.get("location", "")).strip()
+    if location:
+        m = _LOCATION_GEO_LOCK_RE.search(location)
+        if m:
+            return False, f"location geo-locked ({location[:60].strip()})"
 
     return True, "viable"
 
@@ -619,16 +638,22 @@ EVALUATION RULES (apply rigorously, default to deducting points):
        0-39:   Should not apply.
 
 8. VERDICT — write as a senior recruiter would: structured, specific, no fluff.
-   Required structure (2-4 sentences, in this order):
+   Required structure (3-5 sentences, in this order):
    a) MATCH: name 1-2 SPECIFIC CV assets (projects or technologies, by name) that
       directly address what the job asks for. E.g.,
       "Your RAG project (LangChain + FAISS + Ollama) directly matches their stated
        need for LLM-integrated app development."
-   b) GAP: name the SPECIFIC missing requirement that the candidate doesn't have.
+   b) REMOTE: in ONE sentence, state WHY this role is geographically accessible to
+      the candidate in Palestine. This is MANDATORY for every verdict. Examples:
+      "Listed as worldwide remote with no country restrictions."
+      "Explicitly welcomes EMEA candidates."
+      "No geographic restriction mentioned — assumed open."
+      If the posting restricts to specific countries, name them.
+   c) GAP: name the SPECIFIC missing requirement that the candidate doesn't have.
       E.g., "Their stack also requires React/TypeScript frontend — your CV shows
       backend-only experience."
-   c) (Optional) SECOND MATCH/GAP: a secondary positive or concern.
-   d) (Required only if is_valid=false) CLOSING REASON: explicitly state the
+   d) (Optional) SECOND MATCH/GAP: a secondary positive or concern.
+   e) (Required only if is_valid=false) CLOSING REASON: explicitly state the
       disqualifier (work auth, geo exclusion, senior-only, scam suspicion).
 
    STRICT VOCABULARY RULES:
