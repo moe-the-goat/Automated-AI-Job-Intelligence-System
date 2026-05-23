@@ -320,6 +320,53 @@ def test_render_page_badge_color_classes():
     assert "match-red" in html  # 68
 
 
+def test_render_page_prepends_https_when_scheme_missing():
+    """If FEEDBACK_WORKER_URL is set without an `https://` prefix, the browser
+    treats the fetch target as a relative path and POSTs back to GitHub Pages,
+    which returns an nginx 405. Renderer must coerce to an absolute URL so the
+    submit button can't break silently because of a config typo."""
+    html_out = render_feedback_page(
+        dfs=[_sample_df()],
+        worker_url="job-feedback.mohaabuhijleh.workers.dev",
+    )
+    assert '"https://job-feedback.mohaabuhijleh.workers.dev"' in html_out
+
+
+def test_render_page_strips_trailing_slash_on_worker_url():
+    html_out = render_feedback_page(
+        dfs=[_sample_df()],
+        worker_url="https://feedback.example.workers.dev/",
+    )
+    assert '"https://feedback.example.workers.dev"' in html_out
+
+
+def test_render_page_preserves_http_scheme_if_explicit():
+    """Don't rewrite http:// to https:// — that would mask a deliberate
+    local-dev or staging config and surprise the operator."""
+    html_out = render_feedback_page(
+        dfs=[_sample_df()],
+        worker_url="http://localhost:8787",
+    )
+    assert '"http://localhost:8787"' in html_out
+
+
+def test_render_page_works_with_empty_worker_url():
+    """Pins the no-stale-page invariant. The entry points (scraper.py /
+    local_companies.py) call render_feedback_page even when
+    FEEDBACK_WORKER_URL isn't configured yet — the alternative is
+    silently leaving yesterday's jobs on the public page, which mis-
+    leads the user. The rendered page must contain today's jobs and
+    must embed an empty string as the JS WORKER_URL so the submit
+    handler's own "missing worker URL" branch fires gracefully."""
+    html = render_feedback_page(
+        dfs=[_sample_df()],
+        worker_url="",
+    )
+    assert "AI Engineer" in html
+    assert "Anthropic" in html
+    assert 'const WORKER_URL = "";' in html
+
+
 # ---------------------------------------------------------------------------
 # Verdict prompt with learned_preferences
 # ---------------------------------------------------------------------------

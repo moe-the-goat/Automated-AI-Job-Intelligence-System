@@ -330,21 +330,24 @@ def run_pipeline(config, tracker):
             jobs_df = combined_jobs[~intern_mask]
             
             # Generate the feedback page BEFORE dispatch so the email link
-            # always resolves to the freshly-rendered jobs of this run.
+            # always resolves to the freshly-rendered jobs of this run. The
+            # page is rendered unconditionally — a stale page showing yesterday's
+            # jobs is worse than a fresh page whose submit button is disabled,
+            # and the template already reports "missing worker URL" on submit
+            # when the env var hasn't been wired up yet.
             feedback_worker_url = os.environ.get("FEEDBACK_WORKER_URL", "")
             feedback_path = os.environ.get("FEEDBACK_PAGE_PATH", "docs/feedback_global.html")
-            if feedback_worker_url:
-                try:
-                    page_html = render_feedback_page(
-                        dfs=[internships_df, jobs_df, lower_ranked],
-                        worker_url=feedback_worker_url,
-                        page_title="Job Feedback (Global)",
-                    )
-                    write_feedback_page(feedback_path, page_html)
-                except Exception as e:
-                    logger.warning("Feedback page generation failed: %s", e)
-            else:
-                logger.info("Feedback page skipped (FEEDBACK_WORKER_URL missing).")
+            if not feedback_worker_url:
+                logger.warning("FEEDBACK_WORKER_URL missing — rendering page without a working submit button.")
+            try:
+                page_html = render_feedback_page(
+                    dfs=[internships_df, jobs_df, lower_ranked],
+                    worker_url=feedback_worker_url,
+                    page_title="Job Feedback (Global)",
+                )
+                write_feedback_page(feedback_path, page_html)
+            except Exception as e:
+                logger.warning("Feedback page generation failed: %s", e)
 
             output_config = config.get("output", {"use_email": True, "use_github_issue": False})
 

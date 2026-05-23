@@ -89,6 +89,29 @@ def _render_job_block(row, date_str):
     )
 
 
+def _normalize_worker_url(worker_url):
+    """Coerce the configured Cloudflare Worker URL into a safe form.
+
+    Empty or missing input round-trips as empty (the submit handler shows a
+    "not configured" message in that case). A non-empty URL without an
+    `https://` / `http://` scheme would be interpreted by the browser as a
+    relative path and POSTed back to GitHub Pages, returning an nginx 405 —
+    silently broken. We prepend `https://` and log so the next run reports
+    the misconfiguration loudly instead of dying at submit time.
+    """
+    s = (worker_url or "").strip()
+    if not s:
+        return ""
+    if not (s.startswith("https://") or s.startswith("http://")):
+        logger.warning(
+            "FEEDBACK_WORKER_URL %r is missing a scheme — prepending https://. "
+            "Update the repo Variable to silence this warning.",
+            s,
+        )
+        s = "https://" + s
+    return s.rstrip("/")
+
+
 def render_feedback_page(*, dfs, worker_url, page_title="Job Feedback", date_str=None):
     """Render the full feedback HTML page from one or more job DataFrames.
 
@@ -118,7 +141,7 @@ def render_feedback_page(*, dfs, worker_url, page_title="Job Feedback", date_str
         else '<p class="empty">No jobs in today\'s pipeline run.</p>'
     )
 
-    worker_url_safe = (worker_url or "").strip()
+    worker_url_safe = _normalize_worker_url(worker_url)
 
     return (
         _TEMPLATE

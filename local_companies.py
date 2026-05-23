@@ -416,21 +416,22 @@ def run_local_pipeline(tracker):
         jobs_df = approved_jobs[~intern_mask]
 
         # Generate the feedback page for the local-pipeline output before
-        # dispatch so the email's link resolves to this run's jobs.
+        # dispatch so the email's link resolves to this run's jobs. Rendered
+        # unconditionally — a stale page is worse than a fresh page whose
+        # submit button reports "missing worker URL" until the env var is wired.
         feedback_worker_url = os.environ.get("FEEDBACK_WORKER_URL", "")
         feedback_path = os.environ.get("FEEDBACK_PAGE_PATH", "docs/feedback_local.html")
-        if feedback_worker_url:
-            try:
-                page_html = render_feedback_page(
-                    dfs=[internships_df, jobs_df],
-                    worker_url=feedback_worker_url,
-                    page_title="Job Feedback (Local Companies)",
-                )
-                write_feedback_page(feedback_path, page_html)
-            except Exception as e:
-                logger.warning("Feedback page generation failed: %s", e)
-        else:
-            logger.info("Feedback page skipped (FEEDBACK_WORKER_URL missing).")
+        if not feedback_worker_url:
+            logger.warning("FEEDBACK_WORKER_URL missing — rendering page without a working submit button.")
+        try:
+            page_html = render_feedback_page(
+                dfs=[internships_df, jobs_df],
+                worker_url=feedback_worker_url,
+                page_title="Job Feedback (Local Companies)",
+            )
+            write_feedback_page(feedback_path, page_html)
+        except Exception as e:
+            logger.warning("Feedback page generation failed: %s", e)
 
         html_content = format_email_html(internships_df, jobs_df, stats)
         send_email(f"Local Companies Job Alerts - {today}", html_content, config.get("email_settings", {}))
