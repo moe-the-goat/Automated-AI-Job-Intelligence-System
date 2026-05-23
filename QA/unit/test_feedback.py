@@ -247,8 +247,7 @@ def _sample_df():
 def test_render_page_contains_all_jobs():
     html = render_feedback_page(
         dfs=[_sample_df()],
-        logs_repo="owner/logs",
-        write_token="ghp_fake_test_token",
+        worker_url="https://feedback.example.workers.dev",
     )
     assert "AI Engineer" in html
     assert "Software Engineer" in html
@@ -259,8 +258,7 @@ def test_render_page_contains_all_jobs():
 def test_render_page_embeds_options():
     html = render_feedback_page(
         dfs=[_sample_df()],
-        logs_repo="owner/logs",
-        write_token="t",
+        worker_url="https://feedback.example.workers.dev",
     )
     for value, label in FEEDBACK_OPTIONS:
         assert label in html
@@ -275,7 +273,7 @@ def test_render_page_escapes_html_in_job_fields():
         "job_url": "https://example.com/job/x",
         "match_percentage": 50,
     }])
-    html = render_feedback_page(dfs=[df], logs_repo="o/r", write_token="t")
+    html = render_feedback_page(dfs=[df], worker_url="https://feedback.example.workers.dev")
     assert "<script>alert" not in html
     assert "&lt;script&gt;" in html
     assert "&amp;" in html
@@ -284,29 +282,39 @@ def test_render_page_escapes_html_in_job_fields():
 def test_render_page_handles_empty_dfs():
     html = render_feedback_page(
         dfs=[pd.DataFrame(), None],
-        logs_repo="owner/logs",
-        write_token="t",
+        worker_url="https://feedback.example.workers.dev",
     )
     assert "No jobs" in html
 
 
-def test_render_page_embeds_token_and_repo_as_json_literals():
-    """Token and repo are injected as JSON string literals so quote characters
-    can't break the surrounding JavaScript."""
+def test_render_page_embeds_worker_url_as_json_literal():
+    """Worker URL is injected as a JSON string literal so any quote character
+    in the URL can't break the surrounding JavaScript."""
     html = render_feedback_page(
         dfs=[_sample_df()],
-        logs_repo="owner/repo-name",
-        write_token="ghp_TESTTOKEN",
+        worker_url="https://feedback.example.workers.dev",
     )
-    assert '"ghp_TESTTOKEN"' in html
-    assert '"owner/repo-name"' in html
+    assert '"https://feedback.example.workers.dev"' in html
+
+
+def test_render_page_never_contains_github_token_patterns():
+    """The page is committed to a public repo; if any GitHub PAT pattern
+    appears in the output, secret scanning will revoke it on push. This
+    test pins the no-token invariant."""
+    html = render_feedback_page(
+        dfs=[_sample_df()],
+        worker_url="https://feedback.example.workers.dev",
+    )
+    assert "ghp_" not in html
+    assert "github_pat_" not in html
+    assert "Authorization" not in html
+    assert "Bearer" not in html
 
 
 def test_render_page_badge_color_classes():
     html = render_feedback_page(
         dfs=[_sample_df()],
-        logs_repo="o/r",
-        write_token="t",
+        worker_url="https://feedback.example.workers.dev",
     )
     assert "match-green" in html  # 92
     assert "match-red" in html  # 68

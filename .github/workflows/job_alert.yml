@@ -58,7 +58,7 @@ jobs:
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         LOGS_REPO: ${{ vars.LOGS_REPO }}
         LOGS_REPO_TOKEN: ${{ secrets.LOGS_REPO_TOKEN }}
-        FEEDBACK_WRITE_TOKEN: ${{ secrets.FEEDBACK_WRITE_TOKEN }}
+        FEEDBACK_WORKER_URL: ${{ vars.FEEDBACK_WORKER_URL }}
         FEEDBACK_PAGE_URL: https://moe-the-goat.github.io/Automated-AI-Job-Intelligence-System/feedback_global.html
         FEEDBACK_PAGE_PATH: docs/feedback_global.html
       run: |

@@ -417,21 +417,20 @@ def run_local_pipeline(tracker):
 
         # Generate the feedback page for the local-pipeline output before
         # dispatch so the email's link resolves to this run's jobs.
-        feedback_token = os.environ.get("FEEDBACK_WRITE_TOKEN", "")
+        feedback_worker_url = os.environ.get("FEEDBACK_WORKER_URL", "")
         feedback_path = os.environ.get("FEEDBACK_PAGE_PATH", "docs/feedback_local.html")
-        if feedback_token and logs_repo:
+        if feedback_worker_url:
             try:
                 page_html = render_feedback_page(
                     dfs=[internships_df, jobs_df],
-                    logs_repo=logs_repo,
-                    write_token=feedback_token,
-                    page_title="Job Feedback — Local Companies",
+                    worker_url=feedback_worker_url,
+                    page_title="Job Feedback (Local Companies)",
                 )
                 write_feedback_page(feedback_path, page_html)
             except Exception as e:
                 logger.warning("Feedback page generation failed: %s", e)
         else:
-            logger.info("Feedback page skipped (FEEDBACK_WRITE_TOKEN or LOGS_REPO missing).")
+            logger.info("Feedback page skipped (FEEDBACK_WORKER_URL missing).")
 
         html_content = format_email_html(internships_df, jobs_df, stats)
         send_email(f"Local Companies Job Alerts - {today}", html_content, config.get("email_settings", {}))

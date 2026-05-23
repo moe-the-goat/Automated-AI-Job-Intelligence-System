@@ -331,21 +331,20 @@ def run_pipeline(config, tracker):
             
             # Generate the feedback page BEFORE dispatch so the email link
             # always resolves to the freshly-rendered jobs of this run.
-            feedback_token = os.environ.get("FEEDBACK_WRITE_TOKEN", "")
+            feedback_worker_url = os.environ.get("FEEDBACK_WORKER_URL", "")
             feedback_path = os.environ.get("FEEDBACK_PAGE_PATH", "docs/feedback_global.html")
-            if feedback_token and logs_repo:
+            if feedback_worker_url:
                 try:
                     page_html = render_feedback_page(
                         dfs=[internships_df, jobs_df, lower_ranked],
-                        logs_repo=logs_repo,
-                        write_token=feedback_token,
-                        page_title="Job Feedback — Global",
+                        worker_url=feedback_worker_url,
+                        page_title="Job Feedback (Global)",
                     )
                     write_feedback_page(feedback_path, page_html)
                 except Exception as e:
                     logger.warning("Feedback page generation failed: %s", e)
             else:
-                logger.info("Feedback page skipped (FEEDBACK_WRITE_TOKEN or LOGS_REPO missing).")
+                logger.info("Feedback page skipped (FEEDBACK_WORKER_URL missing).")
 
             output_config = config.get("output", {"use_email": True, "use_github_issue": False})
 

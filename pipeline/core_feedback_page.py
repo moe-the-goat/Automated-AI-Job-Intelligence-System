@@ -89,12 +89,19 @@ def _render_job_block(row, date_str):
     )
 
 
-def render_feedback_page(*, dfs, logs_repo, write_token, page_title="Job Feedback", date_str=None):
+def render_feedback_page(*, dfs, worker_url, page_title="Job Feedback", date_str=None):
     """Render the full feedback HTML page from one or more job DataFrames.
 
     `dfs` is an iterable of `pandas.DataFrame` (typically [internships, jobs,
     lower_ranked]). Empty or None entries are skipped silently. Returns the
     full HTML string ready to be written to `docs/`.
+
+    `worker_url` is the public URL of the Cloudflare Worker that authenticates
+    the submission server-side. The page POSTs the collected feedback to that
+    URL; the Worker holds the GitHub PAT in its own environment and writes the
+    file on the page's behalf. No token of any kind is embedded in this HTML,
+    which is essential because GitHub's secret scanning will revoke any token
+    committed to a public repo on sight.
     """
     date_str = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -111,17 +118,14 @@ def render_feedback_page(*, dfs, logs_repo, write_token, page_title="Job Feedbac
         else '<p class="empty">No jobs in today\'s pipeline run.</p>'
     )
 
-    token_safe = (write_token or "").strip()
-    logs_repo_safe = (logs_repo or "").strip()
+    worker_url_safe = (worker_url or "").strip()
 
     return (
         _TEMPLATE
         .replace("__PAGE_TITLE__", html.escape(page_title))
         .replace("__DATE__", html.escape(date_str))
         .replace("__JOB_BLOCKS__", job_blocks_html)
-        .replace("__TOKEN__", json.dumps(token_safe))
-        .replace("__LOGS_REPO__", json.dumps(logs_repo_safe))
-        .replace("__PENDING_PATH__", json.dumps("data/feedback_pending.json"))
+        .replace("__WORKER_URL__", json.dumps(worker_url_safe))
     )
 
 
@@ -223,30 +227,7 @@ _TEMPLATE = """<!DOCTYPE html>
   </div>
 
 <script>
-const TOKEN = __TOKEN__;
-const REPO = __LOGS_REPO__;
-const PENDING_PATH = __PENDING_PATH__;
-
-function utf8ToBase64(str) {
-  const bytes = new TextEncoder().encode(str);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
-}
-
-async function getCurrentSha() {
-  const url = `https://api.github.com/repos/${REPO}/contents/${PENDING_PATH}`;
-  const r = await fetch(url, {
-    headers: {
-      "Authorization": `Bearer ${TOKEN}`,
-      "Accept": "application/vnd.github.v3+json",
-    },
-  });
-  if (r.status === 404) return null;
-  if (!r.ok) throw new Error(`Read failed (${r.status})`);
-  const data = await r.json();
-  return data.sha || null;
-}
+const WORKER_URL = __WORKER_URL__;
 
 function collectEntries() {
   const out = [];
@@ -270,47 +251,33 @@ function collectEntries() {
 async function submitFeedback() {
   const btn = document.getElementById("submit-btn");
   const status = document.getElementById("status");
-  btn.disabled = true;
-  status.textContent = "Submitting…";
-  status.className = "status working";
-
-  if (!TOKEN || !REPO) {
-    status.textContent = "Feedback page not configured (missing token or repo).";
-    status.className = "status error";
-    btn.disabled = false;
-    return;
-  }
 
   const entries = collectEntries();
   if (entries.length === 0) {
     status.textContent = "No feedback selected.";
     status.className = "status error";
-    btn.disabled = false;
     return;
   }
 
+  if (!WORKER_URL) {
+    status.textContent = "Feedback page not configured (missing worker URL).";
+    status.className = "status error";
+    return;
+  }
+
+  btn.disabled = true;
+  status.textContent = "Submitting…";
+  status.className = "status working";
+
   try {
-    const sha = await getCurrentSha();
-    const body = { entries: entries };
-    const content = utf8ToBase64(JSON.stringify(body, null, 2));
-    const url = `https://api.github.com/repos/${REPO}/contents/${PENDING_PATH}`;
-    const payload = {
-      message: `Submitted ${entries.length} feedback entries from feedback page`,
-      content: content,
-    };
-    if (sha) payload.sha = sha;
-    const r = await fetch(url, {
-      method: "PUT",
-      headers: {
-        "Authorization": `Bearer ${TOKEN}`,
-        "Accept": "application/vnd.github.v3+json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
+    const r = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entries: entries }),
     });
     if (!r.ok) {
       const text = await r.text();
-      throw new Error(`Write failed (${r.status}): ${text.slice(0, 140)}`);
+      throw new Error(`(${r.status}) ${text.slice(0, 160)}`);
     }
     status.textContent = `Submitted ${entries.length} entr${entries.length === 1 ? "y" : "ies"}. They'll apply on the next pipeline run.`;
     status.className = "status success";

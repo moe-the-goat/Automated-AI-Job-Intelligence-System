@@ -24,6 +24,9 @@ feedback entry mutates a deterministic filter file (currently just
 """
 
 # Paths inside the private logs repo, addressed via the Contents API.
+# `feedback_pending.json` is the inbox: the Cloudflare Worker writes to it
+# when the user submits the feedback page; the pipeline drains it the next
+# morning. The log and preferences files are written by the pipeline.
 PENDING_PATH = "data/feedback_pending.json"
 LOG_PATH = "data/feedback_log.json"
 PREFERENCES_PATH = "data/candidate_preferences.txt"
