@@ -60,7 +60,7 @@ At the highest level, the pipeline is a six-stage funnel that closes back on its
 
 Each stage exists for a reason and was added in response to a specific failure mode I observed in production. The funnel is sequential and largely deterministic until the AI step, which is the only place a black-box model gets a voice — and even there, the verdicts are post-processed by deterministic caps before they reach the user.
 
-**Stage 1 — Raw scrape.** Nine external sources, each behind its own fetcher. JobSpy hits LinkedIn, Indeed, and ZipRecruiter across fifteen region-specific queries. Six public APIs supplement it (Remotive, Arbeitnow, Jobicy, RemoteOK, Himalayas, The Muse, WeWorkRemotely via RSS). YC's Work at a Startup is pulled via Jina Reader plus Gemini extraction. The local pipeline runs a four-mode search per Palestinian company: handle-precise DDG against LinkedIn posts, domain-restricted DDG against the company website, a JobSpy fallback, and an ATS lookup.
+**Stage 1 — Raw scrape.** Nine external sources, each behind its own fetcher. JobSpy hits LinkedIn and Indeed across fifteen region-specific queries. Six public APIs supplement it (Remotive, Arbeitnow, Jobicy, RemoteOK, Himalayas, The Muse, WeWorkRemotely via RSS). YC's Work at a Startup is pulled via Jina Reader plus Gemini extraction. The local pipeline runs a four-mode search per Palestinian company: handle-precise DDG against LinkedIn posts, domain-restricted DDG against the company website, a JobSpy fallback, and an ATS lookup.
 
 **Stage 2 — Filter gauntlet.** Eight deterministic checks: seen-jobs cache, reputation prefilter, dedup, language detection, location prefilter, seniority filter (including FAANG-style level codes), tech-keyword whitelist, and a non-tech intern blocker. A typical run filters 300 raw jobs down to 40-50 survivors.
 
@@ -102,7 +102,7 @@ The deterministic filter chain is the cheapest part of the pipeline and does the
 
 3. **Smart deduplication**. URL dedup catches the easy case. Normalized title-plus-company dedup catches the case where the same role is posted as "Software Engineer (Remote)" and "Software Engineer" by the same company — they look distinct via URL but are the same job.
 
-4. **Language**. CJK characters in the title kill the row immediately. For everything else, `langdetect` runs on the title (with a 30-character minimum to avoid false positives on short tech titles loaded with proper nouns) and on the description (with a 300-character minimum, conservative by design — false positives here delete real jobs from the daily email).
+4. **Language**. CJK characters in the title kill the row immediately. For everything else, `langdetect` runs on the title (with a 30-character minimum to avoid false positives on short tech titles loaded with proper nouns) and on the description (with a 100-character minimum — lowered from 300 after observing non-English descriptions leaking through on short bilingual postings).
 
 5. **Location**. Explicit location-locked postings that don't say "remote" in the title or location are dropped.
 
@@ -281,7 +281,7 @@ The CV used to be committed as `cv_text.txt`. Once the repo went public, that be
 
 Everything above describes what the system does. This section describes how I made sure it keeps working — and is the part of the project I would point a hiring manager toward first.
 
-**463 tests across three tiers.** The suite in [QA/](QA/) follows the testing pyramid. Most tests are unit tests in `QA/unit/` (pure functions, deterministic, sub-millisecond). Some are integration tests in `QA/integration/` (multi-module flows with external services mocked). The rest are regression tests in `QA/regression/`. The test runner at [QA/run_all.py](QA/run_all.py) is pure stdlib — no pytest dependency required to run it — though every test is pytest-compatible too, so you can run `pytest QA/` if you prefer. The whole suite executes in roughly twenty-three seconds locally.
+**505 tests across three tiers.** The suite in [QA/](QA/) follows the testing pyramid. Most tests are unit tests in `QA/unit/` (pure functions, deterministic, sub-millisecond). Some are integration tests in `QA/integration/` (multi-module flows with external services mocked). The rest are regression tests in `QA/regression/`. The test runner at [QA/run_all.py](QA/run_all.py) is pure stdlib — no pytest dependency required to run it — though every test is pytest-compatible too, so you can run `pytest QA/` if you prefer. The whole suite executes in roughly twenty-three seconds locally.
 
 **Regression tests named for production bugs.** Each file in `QA/regression/` freezes a specific failure that once made it into a real email — `test_date_decoder_ms_bug.py`, `test_logs_repo_url_normalization.py`, `test_short_description_bypass.py`, `test_zero_similarity_render.py`. When something breaks in production, the fix isn't complete until there's a regression test pinning it. This is the discipline that turns code into something you can maintain rather than something you have to babysit, and it's one of the things I'm most deliberate about in this repository.
 
@@ -406,7 +406,7 @@ A snapshot of the current state:
 | Companies in the trust-boost list           | 81                                               |
 | Companies in the reputation blacklist       | 12                                               |
 | Geo-lock countries covered (pre-screen)     | 80+                                              |
-| Total tests in the QA suite                 | 504                                              |
+| Total tests in the QA suite                 | 505                                              |
 | Test files                                  | 30                                               |
 | QA suite runtime (local, sequential)        | ~24 seconds                                      |
 | Daily pipeline runtime (GitHub Actions)     | ~5-7 minutes                                     |

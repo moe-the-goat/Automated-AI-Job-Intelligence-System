@@ -69,6 +69,7 @@ jobs:
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add docs/feedback_local.html data/reputation.json
+        git add data/reputation.json
+        [ -f docs/feedback_local.html ] && git add docs/feedback_local.html || true
         git diff --staged --quiet || git commit -m "Updated local feedback page and reputation list from daily run"
         git push
