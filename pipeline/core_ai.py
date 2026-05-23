@@ -428,6 +428,13 @@ def _build_geo_lock_regex():
         rf"\bhiring\s+(?:{geos})\s+(?:candidates?|applicants?|workers?|hires?|employees?)\s+only\b",
         # "<country>-only role" / "<country>-only remote"
         rf"\b(?:{geos})[\-\s]only\s+(?:role|position|remote|hiring)\b",
+        # "UK (Remote)" / "UK or US (Remote)" — location-label style restriction
+        # appearing in descriptions copied from job boards. Parenthesised "(Remote)"
+        # after a geo-locked country is unambiguous: the role is remote-eligible only
+        # for residents of that country.
+        rf"\b(?:{geos})\b(?:\s*(?:or|/)\s*\b(?:{geos})\b)*\s*\(remote\)",
+        # "Remote — UK" / "Remote - US" — dash-separated location label
+        rf"\bremote\s*[-–—]\s*(?:the\s+)?(?:{geos})\b",
     ]
     return re.compile("|".join(templates))
 
@@ -435,7 +442,16 @@ def _build_geo_lock_regex():
 _GEO_LOCK_REGEX = _build_geo_lock_regex()
 
 _LOCATION_GEO_LOCK_RE = re.compile(
+    # "Remote in Netherlands" / "Remote from UK" / "Remote — Germany"
     rf"\bremote\s+(?:in|from|[-–—])\s+(?:the\s+)?(?:{_GEO_LOCK_ALTERNATION})\b",
+    re.IGNORECASE,
+)
+
+_LOCATION_COUNTRY_PAREN_REMOTE_RE = re.compile(
+    # "UK (Remote)" / "UK or US (Remote)" / "UK/US (Remote)" / "United Kingdom (Remote)"
+    # The location field is short structured data so .{0,30} is safe — it allows an
+    # optional second country like "or US" between the geo-locked country and "(Remote)".
+    rf"\b(?:{_GEO_LOCK_ALTERNATION})\b.{{0,30}}\(remote\)",
     re.IGNORECASE,
 )
 
@@ -510,6 +526,9 @@ def quick_viability_check(row):
     if location:
         m = _LOCATION_GEO_LOCK_RE.search(location)
         if m:
+            return False, f"location geo-locked ({location[:60].strip()})"
+        m2 = _LOCATION_COUNTRY_PAREN_REMOTE_RE.search(location)
+        if m2:
             return False, f"location geo-locked ({location[:60].strip()})"
 
     return True, "viable"
@@ -602,6 +621,11 @@ EVALUATION RULES (apply rigorously, default to deducting points):
        * "must be eligible to work in [country] without sponsorship"
        * "US citizens / green card holders only"
        * "must reside in [non-MENA country]"
+       * "UK or US remote" / "remote (UK only)" / "[country] (Remote)" — remote-eligible
+         ONLY for residents of named countries. This IS a geographic restriction.
+         ⚠ Do NOT write "no country restrictions" for a "UK or US Remote" role.
+         A role that is remote for UK and US residents only EXCLUDES the candidate in
+         Palestine. Set is_valid=false AND logistics_fit <= 15.
      If ANY such phrase appears (or the web search reveals one), set is_valid=false AND
      logistics_fit <= 15. Note it explicitly in the verdict.
    - Explicit exclusion of Palestine / Middle East → same: is_valid=false, logistics_fit <= 15.
@@ -662,7 +686,10 @@ EVALUATION RULES (apply rigorously, default to deducting points):
       "Listed as worldwide remote with no country restrictions."
       "Explicitly welcomes EMEA candidates."
       "No geographic restriction mentioned — assumed open."
-      If the posting restricts to specific countries, name them.
+      ⚠ "UK or US Remote" is NOT "no country restrictions." If the role is remote
+      only for specific countries that do not include Palestine, write that it is
+      geo-restricted and set is_valid=false. E.g., "Remote is UK/US-only — candidate
+      in Palestine is excluded."
    c) GAP: name the SPECIFIC missing requirement that the candidate doesn't have.
       E.g., "Their stack also requires React/TypeScript frontend — your CV shows
       backend-only experience."

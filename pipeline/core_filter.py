@@ -98,6 +98,12 @@ _DESCRIPTION_LANGDETECT_MIN_CHARS = 100
 # get the tags confusing langdetect into "English" because of `<p>` / `<div>`.
 _HTML_TAG_RE_FOR_LANGDETECT = re.compile(r"<[^>]+>")
 
+# ř and ů are exclusive to Czech/Slovak; ő is uniquely Hungarian.
+# None of these appear in English, German, French, Spanish, or Italian.
+# ≥3 occurrences in the first 500 chars is a reliable non-English signal that
+# doesn't depend on langdetect's accuracy on tech-keyword-heavy text.
+_CZECH_SLOVAK_CHARS_RE = re.compile(r'[řůőŘŮŐ]')
+
 
 def _is_english_description(description):
     """Returns False only when langdetect is confident the description is non-English.
@@ -117,6 +123,11 @@ def _is_english_description(description):
     cleaned = re.sub(r"\s+", " ", cleaned)
     if len(cleaned) < _DESCRIPTION_LANGDETECT_MIN_CHARS:
         return True
+    # Fast path: Czech/Slovak/Hungarian characters that never appear in English.
+    # Langdetect can be fooled when Czech prose is mixed with English tech keywords,
+    # but ř/ů/ő are unambiguous regardless of surrounding keyword noise.
+    if len(_CZECH_SLOVAK_CHARS_RE.findall(cleaned[:500])) >= 3:
+        return False
     # Cap the text we feed to langdetect; it doesn't need the whole essay,
     # and a sampled 2KB chunk runs ~10x faster than 20KB descriptions.
     sample = cleaned[:2000]
