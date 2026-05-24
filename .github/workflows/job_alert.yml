@@ -66,11 +66,14 @@ jobs:
 
     # Commit the freshly-rendered feedback page and any reputation list
     # updates that came from ingested block_company signals. The commit is a
-    # no-op when nothing actually changed.
+    # no-op when nothing actually changed. Guard each `git add` with a file
+    # existence check so a render failure (which would leave the HTML file
+    # missing) doesn't fail this step — `git add <missing-file>` exits 128.
     - name: Commit feedback page and reputation updates
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add docs/feedback_global.html data/reputation.json
+        [ -f data/reputation.json ] && git add data/reputation.json || true
+        [ -f docs/feedback_global.html ] && git add docs/feedback_global.html || true
         git diff --staged --quiet || git commit -m "Updated feedback page and reputation list from daily run"
         git push

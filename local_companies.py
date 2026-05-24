@@ -83,7 +83,7 @@ def extract_domain(url):
         domain = urlparse(str(url)).netloc
         domain = domain.replace('www.', '')
         return domain
-    except:
+    except Exception:
         return ""
 
 def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
@@ -345,7 +345,8 @@ def run_local_pipeline(tracker):
     try:
         with open("cv_text.txt", "r", encoding="utf-8") as f:
             cv_text = f.read()
-    except:
+    except (OSError, UnicodeDecodeError) as e:
+        logger.warning("cv_text.txt unreadable (%s) — using built-in fallback CV.", e)
         cv_text = "Computer Engineering student specializing in AI systems engineering, building end-to-end pipelines that integrate LLMs, embeddings, and multi-source data into production-ready backend systems. Experienced deploying Python-based solutions with REST APIs, automated workflows, and real-world constraints. Growing focus on Generative AI, RAG architectures, and scalable intelligent systems."
         
     verdicts, valid_mask, match_pcts = [], [], []

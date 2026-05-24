@@ -21,6 +21,16 @@
 const PENDING_PATH = "data/feedback_pending.json";
 const MAX_ENTRIES_PER_SUBMISSION = 100;
 
+// Per RFC 6454 §4, origin scheme and host are case-insensitive. A capitalised
+// hostname in either ALLOWED_ORIGIN (config typo) or the incoming Origin
+// header (rare, but allowed by proxies / non-browser clients) would otherwise
+// fail the equality check below and produce a 403 the user can't explain.
+// Also strip any trailing slash so `https://example.com/` and `https://example.com`
+// are treated as the same origin.
+function normalizeOrigin(o) {
+  return (o || "").trim().toLowerCase().replace(/\/+$/, "");
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -30,8 +40,9 @@ export default {
       return json({ error: "Method not allowed" }, 405, env);
     }
 
-    const origin = request.headers.get("Origin") || "";
-    if (env.ALLOWED_ORIGIN && origin !== env.ALLOWED_ORIGIN) {
+    const allowedOrigin = normalizeOrigin(env.ALLOWED_ORIGIN);
+    const requestOrigin = normalizeOrigin(request.headers.get("Origin"));
+    if (allowedOrigin && requestOrigin !== allowedOrigin) {
       return json({ error: "Forbidden origin" }, 403, env);
     }
 
@@ -100,8 +111,12 @@ export default {
 };
 
 function corsHeaders(env) {
+  // Echo the normalised allowed origin so the browser's case-sensitive
+  // Access-Control-Allow-Origin comparison succeeds even when the env var
+  // was configured with stray uppercase characters or a trailing slash.
+  const allowed = normalizeOrigin(env.ALLOWED_ORIGIN);
   return {
-    "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN || "*",
+    "Access-Control-Allow-Origin": allowed || "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Max-Age": "86400",

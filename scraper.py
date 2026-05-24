@@ -252,7 +252,8 @@ def run_pipeline(config, tracker):
             try:
                 with open("cv_text.txt", "r", encoding="utf-8") as f:
                     cv_text = f.read()
-            except:
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning("cv_text.txt unreadable (%s) — using built-in fallback CV.", e)
                 cv_text = "Computer Engineering student specializing in AI systems engineering, building end-to-end pipelines that integrate LLMs, embeddings, and multi-source data into production-ready backend systems. Experienced deploying Python-based solutions with REST APIs, automated workflows, and real-world constraints. Growing focus on Generative AI, RAG architectures, and scalable intelligent systems."
 
             # A3: pre-rank by CV-embedding similarity. Top-N + wildcards go to
@@ -311,7 +312,13 @@ def run_pipeline(config, tracker):
                 lower_ranked = eval_slice[eval_slice['is_valid']].reset_index(drop=True)
                 logger.info("Lower-ranked jobs surviving Gemini validation: %d", len(lower_ranked))
             else:
-                # No Gemini key, or no lower-ranked rows — skip the second pass.
+                if lower_ranked.empty:
+                    logger.info("Lower-ranked section: no jobs below the embedding threshold.")
+                else:
+                    logger.warning(
+                        "Lower-ranked section: skipping %d job(s) — GEMINI_API_KEY not set.",
+                        len(lower_ranked),
+                    )
                 lower_ranked = pd.DataFrame()
 
             # Persist the embeddings we just computed (only for jobs that
