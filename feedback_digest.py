@@ -14,18 +14,18 @@ logger = get_logger(__name__)
 """
 FEEDBACK DIGEST
 ---------------
-Runs on a separate cron (every two weeks). Reads `data/feedback_log.json`
-from the private logs repo, asks the strongest available LLM (Cerebras with
-Groq fallback) to compress the entries into a 5-8 sentence candidate
-preference profile, writes the summary back to
-`data/candidate_preferences.txt`, and trims the raw log so it doesn't grow
-without bound. The next pipeline run picks up the refreshed profile and
-injects it into every verdict prompt.
-"""
+Runs on a separate cron (every 5 days). Reads `data/feedback_log.json` from
+the private logs repo, asks the strongest available LLM (Cerebras with Groq
+fallback) to compress the entries into a 5-8 sentence candidate preference
+profile, and writes the summary back to `data/candidate_preferences.txt`.
+The next pipeline run picks up the refreshed profile and injects it into
+every verdict prompt.
 
-# Keep a small tail of recent entries after a digest so the next summary
-# still has fresh ground truth even if no feedback arrives between digests.
-LOG_RETAINED_TAIL = 3
+The raw log is NEVER trimmed — every reaction the user has ever submitted
+stays in `feedback_log.json` indefinitely. This preserves the full corpus
+for a future per-job feedback retrieval (RAG) layer; an early digest that
+threw away history would destroy the very dataset that approach needs.
+"""
 
 
 SUMMARY_PROMPT = """You are analyzing a candidate's job-search feedback history to build a
@@ -82,7 +82,7 @@ def run_digest():
         logger.error("CEREBRAS_API_KEY or GROQ_API_KEY required for summarization.")
         return False
 
-    log_text, log_sha = _read_file(repo, LOG_PATH, token)
+    log_text, _ = _read_file(repo, LOG_PATH, token)
     if not log_text:
         logger.info("Digest: feedback log missing or empty, nothing to summarize.")
         return True
@@ -126,11 +126,8 @@ def run_digest():
         "Refreshed candidate preference profile from feedback log",
     )
 
-    trimmed = {"entries": entries[-LOG_RETAINED_TAIL:]}
-    _write_file(
-        repo, LOG_PATH, json.dumps(trimmed, indent=2), log_sha, token,
-        f"Trimmed feedback log after digest (kept last {LOG_RETAINED_TAIL} entries)",
-    )
+    # `feedback_log.json` is left untouched — see module docstring on why
+    # the log is never trimmed.
 
     logger.info("Digest: summarized %d entries; preference profile refreshed.", len(entries))
     return True
