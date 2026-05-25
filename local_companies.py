@@ -22,7 +22,15 @@ from pipeline.core_ats import (
 )
 from pipeline.url_validation import is_job_url_like, probe_urls_alive_batch
 from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
-from pipeline.core_feedback import ingest_pending_feedback, load_candidate_preferences
+from pipeline.core_embedding import retrieve_relevant_feedback
+from pipeline.core_feedback import (
+    ingest_pending_feedback,
+    load_candidate_preferences,
+    ensure_feedback_embeddings,
+    load_feedback_embeddings,
+    RAG_FEEDBACK_THRESHOLD,
+    RAG_TOP_K,
+)
 from pipeline.core_feedback_page import render_feedback_page, write_feedback_page
 
 # How far back the local pipeline will accept LinkedIn posts (matches the JobSpy 6-day window).
@@ -217,9 +225,37 @@ def run_local_pipeline(tracker):
     logs_repo = os.environ.get("LOGS_REPO")
     logs_token = os.environ.get("LOGS_REPO_TOKEN")
     ingest_pending_feedback(logs_repo, logs_token, tracker)
-    learned_preferences = load_candidate_preferences(logs_repo, logs_token)
-    if learned_preferences:
-        logger.info("Loaded candidate preferences (%d chars) for verdict context.", len(learned_preferences))
+
+    # RAG switch — mirrors scraper.py. See pipeline/core_feedback for the
+    # threshold rationale. Local pipeline doesn't have a separate lower-ranked
+    # section, so there's only one AI loop downstream that consumes preferences.
+    feedback_embed_key = (
+        os.environ.get("GEMINI_EMBED2_API_KEY")
+        or os.environ.get("GEMINI_EMBED_API_KEY")
+        or os.environ.get("GEMINI_API_KEY", "")
+    )
+    entry_count = ensure_feedback_embeddings(logs_repo, logs_token, feedback_embed_key)
+    use_rag = entry_count >= RAG_FEEDBACK_THRESHOLD
+
+    if use_rag:
+        feedback_embeddings = load_feedback_embeddings(logs_repo, logs_token)
+        logger.info(
+            "RAG mode ACTIVE: %d feedback entries >= threshold %d. Per-job retrieval injected into every verdict.",
+            entry_count, RAG_FEEDBACK_THRESHOLD,
+        )
+
+        def preferences_for(row):
+            return retrieve_relevant_feedback(row, feedback_embeddings, feedback_embed_key, top_k=RAG_TOP_K)
+    else:
+        learned_preferences = load_candidate_preferences(logs_repo, logs_token)
+        logger.info(
+            "Digest mode: %d feedback entries (RAG activates at %d). Global preference profile %s.",
+            entry_count, RAG_FEEDBACK_THRESHOLD,
+            f"loaded ({len(learned_preferences)} chars)" if learned_preferences else "is empty",
+        )
+
+        def preferences_for(_row):
+            return learned_preferences
 
     logger.info("Starting Local Companies Scrape...")
     companies_df = load_local_companies()
@@ -366,7 +402,7 @@ def run_local_pipeline(tracker):
                 evaluated = True
             else:
                 result, evaluated = evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key,
-                                                          learned_preferences=learned_preferences)
+                                                          learned_preferences=preferences_for(row))
             verdicts.append(result["verdict"])
             valid_mask.append(result["is_valid"])
             match_pcts.append(result["match_percentage"])

@@ -30,6 +30,7 @@ feedback entry mutates a deterministic filter file (currently just
 PENDING_PATH = "data/feedback_pending.json"
 LOG_PATH = "data/feedback_log.json"
 PREFERENCES_PATH = "data/candidate_preferences.txt"
+EMBEDDINGS_PATH = "data/feedback_embeddings.json"
 
 # Path in the local working tree (public code repo, edited in place).
 LOCAL_REPUTATION_PATH = "data/reputation.json"
@@ -40,6 +41,20 @@ VALID_FEEDBACK_TYPES = (
     "applied", "bookmarked", "not_relevant",
     "block_company", "wrong_location", "other",
 )
+
+# RAG switch (2026-05-25). Below this many archived feedback entries the
+# pipeline uses the 5-day digest summary as the candidate-preference context
+# for every job (cheap, deterministic, identical signal for every verdict).
+# At or above this many entries the pipeline switches to per-job retrieval:
+# embed the job, find the top-K most-similar past feedback entries, inject
+# those as preferences. The digest run becomes dead-but-harmless on the same
+# tick — `feedback_digest.py` early-exits and `candidate_preferences.txt` is
+# no longer read.
+#
+# RAG_TOP_K controls how many past entries to inject. 5 keeps the prompt
+# focused; raising it dilutes the signal with marginal matches.
+RAG_FEEDBACK_THRESHOLD = 50
+RAG_TOP_K = 5
 
 
 def _normalize_repo(repo):
@@ -274,3 +289,145 @@ def ingest_pending_feedback(repo, token, tracker=None):
         rep_updates, len(log_data["entries"]),
     )
     return len(entries)
+
+
+# ---------------------------------------------------------------------------
+# Feedback log → embeddings → RAG switch (2026-05-25)
+# ---------------------------------------------------------------------------
+
+def format_entry_text(entry):
+    """Canonical short-text representation of a feedback entry.
+
+    Used both as input to the embedding model and as the human-readable text
+    the verdict prompt sees at retrieval time. Kept compact on purpose — the
+    embedding model maps short, consistent phrases to dense vectors much more
+    cleanly than long unstructured notes.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    parts = [
+        f"[{entry.get('feedback', 'unknown')}]",
+        f"{entry.get('title', '?')} @ {entry.get('company', '?')}",
+    ]
+    if entry.get("location"):
+        parts.append(f"({entry['location']})")
+    if entry.get("note"):
+        parts.append(f"— note: {entry['note']}")
+    return " ".join(parts)
+
+
+def _load_log_entries(repo, token):
+    """Read feedback_log.json and return its entries list (or [] on miss/error)."""
+    log_text, _ = _read_file(repo, LOG_PATH, token)
+    if not log_text:
+        return []
+    try:
+        data = json.loads(log_text)
+    except json.JSONDecodeError:
+        logger.warning("Feedback log malformed — treating as empty.")
+        return []
+    if not isinstance(data, dict):
+        return []
+    entries = data.get("entries", [])
+    return entries if isinstance(entries, list) else []
+
+
+def count_feedback_entries(repo, token):
+    """Return the number of entries currently in feedback_log.json.
+
+    Drives the RAG switch in scraper.py / local_companies.py — once this count
+    crosses RAG_FEEDBACK_THRESHOLD the pipeline routes to per-job retrieval
+    instead of the global digest summary.
+    """
+    return len(_load_log_entries(repo, token))
+
+
+def load_feedback_embeddings(repo, token):
+    """Return the parsed feedback_embeddings.json contents, or {"entries": []}.
+
+    Shape: {"entries": [{"text": str, "embedding": list[float]}, ...]}.
+    Entry order matches feedback_log.json's entries array — `ensure_feedback_embeddings`
+    is what keeps the two in sync.
+    """
+    text, _ = _read_file(repo, EMBEDDINGS_PATH, token)
+    if not text:
+        return {"entries": []}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        logger.warning("feedback_embeddings.json malformed — treating as empty.")
+        return {"entries": []}
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+        return {"entries": []}
+    return data
+
+
+def ensure_feedback_embeddings(repo, token, embed_api_key):
+    """Embed any feedback-log entries that don't yet have an embedding, persist, return total count.
+
+    Idempotent: comparing lengths of log.entries vs embeddings.entries tells us
+    exactly which suffix is missing, so re-running is a no-op when up-to-date.
+    The two files stay positionally aligned — index i in embeddings.entries
+    corresponds to index i in log.entries.
+
+    Returns the entry count (used to decide RAG vs digest mode). On any error
+    the function logs and returns the count it WAS able to determine — never
+    raises into the pipeline.
+    """
+    if not repo or not token:
+        return 0
+
+    log_entries = _load_log_entries(repo, token)
+    total = len(log_entries)
+    if total == 0:
+        return 0
+
+    embeddings = load_feedback_embeddings(repo, token)
+    embedded_entries = embeddings.get("entries", [])
+    existing = len(embedded_entries)
+
+    if existing >= total:
+        # Already up to date (or there was a manual trim — we don't try to fix that).
+        return total
+
+    if not embed_api_key:
+        logger.warning(
+            "Feedback embeddings: %d entries unembedded but no embed API key — RAG retrieval will skip them.",
+            total - existing,
+        )
+        return total
+
+    # Lazy import — only loaded when there's actual embedding work to do.
+    from pipeline.core_embedding import embed_feedback_text
+
+    new_count = 0
+    skipped = 0
+    for entry in log_entries[existing:]:
+        text = format_entry_text(entry)
+        vec = embed_feedback_text(text, embed_api_key) if text else None
+        if vec is None:
+            # Persist a placeholder so the position alignment with log_entries
+            # is preserved; retrieval skips entries with no vector.
+            embedded_entries.append({"text": text, "embedding": None})
+            skipped += 1
+            continue
+        embedded_entries.append({"text": text, "embedding": vec})
+        new_count += 1
+
+    if new_count == 0 and skipped == 0:
+        return total
+
+    embeddings["entries"] = embedded_entries
+    _, emb_sha = _read_file(repo, EMBEDDINGS_PATH, token)
+    ok = _write_file(
+        repo, EMBEDDINGS_PATH,
+        json.dumps(embeddings, indent=2),
+        emb_sha, token,
+        f"Embedded {new_count} new feedback entr{'y' if new_count == 1 else 'ies'}",
+    )
+    if ok:
+        logger.info(
+            "Feedback embeddings: +%d new (%d skipped on API failure), %d total now indexed.",
+            new_count, skipped, len(embedded_entries),
+        )
+    return total

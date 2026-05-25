@@ -1,6 +1,5 @@
 import requests
 import pandas as pd
-from jobspy import scrape_jobs
 
 from pipeline.logging_setup import get_logger
 

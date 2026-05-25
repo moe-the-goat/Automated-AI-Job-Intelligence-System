@@ -20,9 +20,21 @@ from pipeline.core_search import (
 )
 from pipeline.core_filter import filter_api_jobs, apply_pipeline_filters, JobTracker
 from pipeline.core_ai import evaluate_job_with_ai, evaluate_job_with_gemini, quick_viability_check, skipped_result
-from pipeline.core_embedding import attach_similarity, drop_semantic_duplicates, update_embedding_history
+from pipeline.core_embedding import (
+    attach_similarity,
+    drop_semantic_duplicates,
+    update_embedding_history,
+    retrieve_relevant_feedback,
+)
 from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
-from pipeline.core_feedback import ingest_pending_feedback, load_candidate_preferences
+from pipeline.core_feedback import (
+    ingest_pending_feedback,
+    load_candidate_preferences,
+    ensure_feedback_embeddings,
+    load_feedback_embeddings,
+    RAG_FEEDBACK_THRESHOLD,
+    RAG_TOP_K,
+)
 from pipeline.core_feedback_page import render_feedback_page, write_feedback_page
 
 """
@@ -80,7 +92,7 @@ WILDCARD_COUNT = 5
 LOWER_RANKED_EVAL_LIMIT = 25
 
 
-def _run_ai_loop(df, cv_text, tracker, *, provider, cerebras_key=None, groq_key=None, gemini_key=None, learned_preferences=""):
+def _run_ai_loop(df, cv_text, tracker, *, provider, cerebras_key=None, groq_key=None, gemini_key=None, preferences_for=None):
     """Run quick_viability_check + AI verdict over a dataframe of jobs.
 
     Returns the SAME dataframe with these columns attached:
@@ -90,6 +102,11 @@ def _run_ai_loop(df, cv_text, tracker, *, provider, cerebras_key=None, groq_key=
     `provider` chooses which LLM:
       "cerebras_groq" -> evaluate_job_with_ai (Qwen-3 + Llama-3.3 ping-pong)
       "gemini"        -> evaluate_job_with_gemini (Flash Lite, single call + retries)
+
+    `preferences_for` is a callable that takes the row and returns the preference
+    string to inject into the verdict prompt. In digest mode it returns the
+    same global summary for every row; in RAG mode it returns per-job
+    retrieved feedback. None means "no preference context".
 
     Tracker is marked seen only when the LLM actually returned a verdict, so
     transient errors leave the job unmarked for next-run retry.
@@ -111,10 +128,11 @@ def _run_ai_loop(df, cv_text, tracker, *, provider, cerebras_key=None, groq_key=
             result = skipped_result(reason)
             evaluated = True  # deterministic skip — mark seen
         else:
+            prefs = preferences_for(row) if preferences_for else ""
             if provider == "gemini":
-                result, evaluated = evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences=learned_preferences)
+                result, evaluated = evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences=prefs)
             else:
-                result, evaluated = evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferences=learned_preferences)
+                result, evaluated = evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferences=prefs)
 
         verdicts.append(result["verdict"])
         valid_mask.append(result["is_valid"])
@@ -155,9 +173,38 @@ def run_pipeline(config, tracker):
     logs_repo = os.environ.get("LOGS_REPO")
     logs_token = os.environ.get("LOGS_REPO_TOKEN")
     ingest_pending_feedback(logs_repo, logs_token, tracker)
-    learned_preferences = load_candidate_preferences(logs_repo, logs_token)
-    if learned_preferences:
-        logger.info("Loaded candidate preferences (%d chars) for verdict context.", len(learned_preferences))
+
+    # RAG switch (2026-05-25). The feedback embed key lives in its own Gemini
+    # project so the dedicated 1K-RPD quota for Gemini Embedding 2 is isolated
+    # from the CV/job pre-rank embeddings. Falls back to the existing embed
+    # key (and then to the main Gemini key) so older configs keep working.
+    feedback_embed_key = (
+        os.environ.get("GEMINI_EMBED2_API_KEY")
+        or os.environ.get("GEMINI_EMBED_API_KEY")
+        or os.environ.get("GEMINI_API_KEY", "")
+    )
+    entry_count = ensure_feedback_embeddings(logs_repo, logs_token, feedback_embed_key)
+    use_rag = entry_count >= RAG_FEEDBACK_THRESHOLD
+
+    if use_rag:
+        feedback_embeddings = load_feedback_embeddings(logs_repo, logs_token)
+        logger.info(
+            "RAG mode ACTIVE: %d feedback entries >= threshold %d. Per-job retrieval injected into every verdict.",
+            entry_count, RAG_FEEDBACK_THRESHOLD,
+        )
+
+        def preferences_for(row):
+            return retrieve_relevant_feedback(row, feedback_embeddings, feedback_embed_key, top_k=RAG_TOP_K)
+    else:
+        learned_preferences = load_candidate_preferences(logs_repo, logs_token)
+        logger.info(
+            "Digest mode: %d feedback entries (RAG activates at %d). Global preference profile %s.",
+            entry_count, RAG_FEEDBACK_THRESHOLD,
+            f"loaded ({len(learned_preferences)} chars)" if learned_preferences else "is empty",
+        )
+
+        def preferences_for(_row):
+            return learned_preferences
 
     logger.info("Starting job scrape...")
 
@@ -292,7 +339,7 @@ def run_pipeline(config, tracker):
             ai_eval_set = _run_ai_loop(ai_eval_set, cv_text, tracker,
                                        provider="cerebras_groq",
                                        cerebras_key=cerebras_key, groq_key=groq_key,
-                                       learned_preferences=learned_preferences)
+                                       preferences_for=preferences_for)
             valid_top = ai_eval_set[ai_eval_set['is_valid']]
             stats['approved'] = len(valid_top)
             logger.info("Total top-section jobs remaining after AI validation: %d", stats['approved'])
@@ -308,7 +355,7 @@ def run_pipeline(config, tracker):
                 eval_slice = _run_ai_loop(eval_slice, cv_text, tracker,
                                           provider="gemini",
                                           gemini_key=gemini_key,
-                                          learned_preferences=learned_preferences)
+                                          preferences_for=preferences_for)
                 lower_ranked = eval_slice[eval_slice['is_valid']].reset_index(drop=True)
                 logger.info("Lower-ranked jobs surviving Gemini validation: %d", len(lower_ranked))
             else:

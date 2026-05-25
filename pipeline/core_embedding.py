@@ -60,6 +60,14 @@ EMBED_MODEL = "gemini-embedding-001"     # Gemini embeddings, free tier: 100 RPM
 EMBED_THROTTLE_SECONDS = 0.65            # ~92 RPM — just under the 100 RPM free-tier cap
 JOB_TEXT_MAX_CHARS = 7000                # include full requirements section, not just HR intro
 
+# Feedback RAG (2026-05-25). Runs on a dedicated Gemini project so its quota
+# doesn't compete with the CV/job pre-rank above. Model is Gemini Embedding 2
+# (8K input, 3072 dims) for stronger retrieval than the v1 used for CV ranking.
+# The actual switch from digest → RAG happens in core_feedback once the log
+# crosses RAG_FEEDBACK_THRESHOLD entries.
+FEEDBACK_EMBED_MODEL = "gemini-embedding-2"
+FEEDBACK_JOB_TEXT_MAX_CHARS = 1500       # short context window — title + intro is enough for retrieval
+
 # Semantic dedup config (2026-05-21). Stores 768-dim job embeddings keyed by
 # URL so a job posted again next week under a different URL gets caught by
 # cosine similarity even though URL-based dedup misses it.
@@ -99,17 +107,23 @@ def _write_cached_embedding(text, embedding):
         logger.warning("CV embedding cache write failed: %s", e)
 
 
-def _embed_text(client, text):
-    """Single embed call. Returns list[float] or None on failure."""
+def _embed_text(client, text, model=EMBED_MODEL):
+    """Single embed call. Returns list[float] or None on failure.
+
+    `model` defaults to the CV/job pre-rank model (Gemini Embedding 1). Pass
+    FEEDBACK_EMBED_MODEL when computing vectors that need to live in the
+    feedback-retrieval space (different model = different vector space —
+    you cannot compare across them).
+    """
     try:
         response = client.models.embed_content(
-            model=EMBED_MODEL,
+            model=model,
             contents=text,
         )
         # google-genai's response shape: response.embeddings[0].values
         return list(response.embeddings[0].values)
     except Exception as e:
-        logger.warning("Embedding call failed: %s", str(e)[:200])
+        logger.warning("Embedding call failed (model=%s): %s", model, str(e)[:200])
         return None
 
 
@@ -352,3 +366,88 @@ def update_embedding_history(new_embeddings):
             continue
         history[url] = {"embedding": list(vec), "added_at": now_str}
     save_embedding_history(history)
+
+
+# ---------------------------------------------------------------------------
+# Feedback RAG: per-job retrieval against past user feedback (2026-05-25)
+# ---------------------------------------------------------------------------
+#
+# Once the feedback log crosses RAG_FEEDBACK_THRESHOLD entries (see
+# core_feedback), the pipeline stops feeding every verdict prompt the same
+# AI-summarized profile. It instead embeds the current job, finds the most
+# similar past feedback entries, and injects THOSE as the candidate-preference
+# context. This makes the signal job-specific rather than averaged across an
+# increasingly heterogeneous history.
+
+def embed_feedback_text(text, api_key):
+    """Embed a single piece of text with the feedback-retrieval model.
+
+    Used both to embed each archived feedback entry once on ingest, and to
+    embed every incoming job at retrieval time. Returns None when the API key
+    is missing or the call fails — callers treat None as "skip / no context".
+    """
+    if not text or not api_key:
+        return None
+    from google import genai  # lazy: SDK only loaded when actually called
+    client = genai.Client(api_key=api_key)
+    return _embed_text(client, text, model=FEEDBACK_EMBED_MODEL)
+
+
+def _format_job_for_retrieval(job_row):
+    """Build the text representation used to embed a job at retrieval time.
+
+    Kept short on purpose — the embedding model is paid per token and the
+    title + company + first ~1500 chars of description carries the signal
+    that maps the job to similar past feedback. Including the full 7000-char
+    description (as the CV pre-rank does) would dilute the match against
+    short feedback-entry texts like '[applied] Backend Engineer @ Stripe'.
+    """
+    title = str(job_row.get("title", "")).strip()
+    company = str(job_row.get("company", "")).strip()
+    location = str(job_row.get("location", "")).strip()
+    description = str(job_row.get("description", "")).strip()[:FEEDBACK_JOB_TEXT_MAX_CHARS]
+    header = f"{title} @ {company}"
+    if location:
+        header += f" ({location})"
+    return f"{header}\n\n{description}".strip()
+
+
+def retrieve_relevant_feedback(job_row, feedback_embeddings, api_key, top_k=5):
+    """Return a short formatted list of past feedback entries most similar to this job.
+
+    `feedback_embeddings` is the {"entries": [{"text": ..., "embedding": ...}, ...]}
+    dict produced by core_feedback.ensure_feedback_embeddings. Embeds the job
+    with FEEDBACK_EMBED_MODEL, ranks every archived feedback entry by cosine
+    similarity, and returns the top-K formatted for direct injection into the
+    verdict prompt's CANDIDATE LEARNED PREFERENCES block.
+
+    Returns "" when there's no API key, no archived entries, or the job-embed
+    call fails — the verdict still runs, just without RAG context.
+    """
+    entries = (feedback_embeddings or {}).get("entries", []) if isinstance(feedback_embeddings, dict) else []
+    if not entries or not api_key:
+        return ""
+
+    job_text = _format_job_for_retrieval(job_row)
+    if not job_text:
+        return ""
+    job_vec = embed_feedback_text(job_text, api_key)
+    if job_vec is None:
+        return ""
+
+    scored = []
+    for entry in entries:
+        vec = entry.get("embedding") if isinstance(entry, dict) else None
+        text = entry.get("text", "") if isinstance(entry, dict) else ""
+        if not vec or not text:
+            continue
+        sim = cosine_similarity(job_vec, vec)
+        scored.append((sim, text))
+
+    if not scored:
+        return ""
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:max(1, int(top_k))]
+    lines = [f"- (similarity {sim:.2f}) {text}" for sim, text in top]
+    return "Most similar past feedback entries from this candidate:\n" + "\n".join(lines)

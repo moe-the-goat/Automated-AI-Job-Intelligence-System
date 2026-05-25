@@ -5,8 +5,10 @@ from pipeline.logging_setup import configure_logging, get_logger
 from pipeline.core_feedback import (
     LOG_PATH,
     PREFERENCES_PATH,
+    RAG_FEEDBACK_THRESHOLD,
     _read_file,
     _write_file,
+    format_entry_text,
 )
 
 logger = get_logger(__name__)
@@ -21,10 +23,14 @@ profile, and writes the summary back to `data/candidate_preferences.txt`.
 The next pipeline run picks up the refreshed profile and injects it into
 every verdict prompt.
 
+Once the log crosses RAG_FEEDBACK_THRESHOLD entries the digest stops running
+— the scraper switches to per-job retrieval against `feedback_embeddings.json`
+and the global summary becomes dead weight. The early exit below makes that
+switch automatic so nothing has to be removed by hand on the cutover day.
+
 The raw log is NEVER trimmed — every reaction the user has ever submitted
-stays in `feedback_log.json` indefinitely. This preserves the full corpus
-for a future per-job feedback retrieval (RAG) layer; an early digest that
-threw away history would destroy the very dataset that approach needs.
+stays in `feedback_log.json` indefinitely, both to keep RAG's corpus intact
+and so we can re-derive the digest if we ever need to roll back.
 """
 
 
@@ -60,15 +66,6 @@ no bullet lists, no markdown headers.
 """
 
 
-def _format_entry(e):
-    parts = [f"[{e.get('feedback', 'unknown')}]", f"{e.get('title', '?')} @ {e.get('company', '?')}"]
-    if e.get('location'):
-        parts.append(f"({e['location']})")
-    if e.get('note'):
-        parts.append(f"— note: {e['note']}")
-    return " ".join(parts)
-
-
 def run_digest():
     repo = os.environ.get("LOGS_REPO")
     token = os.environ.get("LOGS_REPO_TOKEN")
@@ -98,7 +95,18 @@ def run_digest():
         logger.info("Digest: feedback log has no entries.")
         return True
 
-    formatted = "\n".join(_format_entry(e) for e in entries)
+    # Once the log crosses the RAG threshold the scraper stops reading
+    # candidate_preferences.txt — running the digest LLM call would burn
+    # tokens to produce a file no one consumes. Bail out cleanly so the
+    # cron job becomes a no-op without anyone having to disable it manually.
+    if len(entries) >= RAG_FEEDBACK_THRESHOLD:
+        logger.info(
+            "Digest: %d entries >= RAG threshold %d. Scraper is on per-job retrieval now — skipping summary.",
+            len(entries), RAG_FEEDBACK_THRESHOLD,
+        )
+        return True
+
+    formatted = "\n".join(format_entry_text(e) for e in entries)
     prompt = SUMMARY_PROMPT.format(entries=formatted)
 
     from pipeline.core_llm import call_llm_with_fallback  # lazy
