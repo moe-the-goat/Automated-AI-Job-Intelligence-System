@@ -13,8 +13,6 @@ contract now:
 
 import logging
 
-import pytest
-
 import pipeline.core_feedback as cf
 from pipeline.core_feedback import (
     LogsRepoAuthError,
@@ -57,6 +55,25 @@ def _patch_requests(monkey_get=None, monkey_put=None):
         cf.requests.put = orig_put
 
     return restore
+
+
+class _Raises:
+    """Stdlib stand-in for pytest.raises — the QA runner is pure stdlib, no pytest."""
+
+    def __init__(self, expected):
+        self.expected = expected
+        self.value = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            raise AssertionError(f"expected {self.expected.__name__} but no exception was raised")
+        if not issubclass(exc_type, self.expected):
+            return False
+        self.value = exc
+        return True
 
 
 class _LogCapture:
@@ -118,7 +135,7 @@ def test_read_file_returns_none_on_404():
 def test_read_file_raises_on_403():
     restore = _patch_requests(monkey_get=lambda *a, **k: _FakeResponse(403))
     try:
-        with pytest.raises(LogsRepoAuthError) as exc_info:
+        with _Raises(LogsRepoAuthError) as exc_info:
             _read_file("owner/repo", "data/x.json", "tok")
         # Message must mention the path + remediation so the log line is actionable.
         msg = str(exc_info.value)
@@ -132,7 +149,7 @@ def test_read_file_raises_on_403():
 def test_read_file_raises_on_401():
     restore = _patch_requests(monkey_get=lambda *a, **k: _FakeResponse(401))
     try:
-        with pytest.raises(LogsRepoAuthError):
+        with _Raises(LogsRepoAuthError):
             _read_file("owner/repo", "data/x.json", "tok")
     finally:
         restore()
@@ -163,7 +180,7 @@ def test_read_file_short_circuits_with_no_repo_or_token():
 def test_write_file_raises_on_403():
     restore = _patch_requests(monkey_put=lambda *a, **k: _FakeResponse(403))
     try:
-        with pytest.raises(LogsRepoAuthError):
+        with _Raises(LogsRepoAuthError):
             _write_file("owner/repo", "data/x.json", "content", "sha", "tok", "msg")
     finally:
         restore()
