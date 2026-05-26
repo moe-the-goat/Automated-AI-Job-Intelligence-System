@@ -32,6 +32,7 @@ from pipeline.core_feedback import (
     load_candidate_preferences,
     ensure_feedback_embeddings,
     load_feedback_embeddings,
+    verify_logs_repo_access,
     RAG_FEEDBACK_THRESHOLD,
     RAG_TOP_K,
 )
@@ -172,6 +173,11 @@ def run_pipeline(config, tracker):
     # (block_company, applied) must influence today's run.
     logs_repo = os.environ.get("LOGS_REPO")
     logs_token = os.environ.get("LOGS_REPO_TOKEN")
+    # One-shot credential health check: a rejected PAT used to look identical
+    # to a missing file ((None, None) from the Contents API) and silently
+    # turned every feedback step into a no-op. The verify call now logs
+    # CRITICAL with the exact remediation if the token is bad.
+    verify_logs_repo_access(logs_repo, logs_token)
     ingest_pending_feedback(logs_repo, logs_token, tracker)
 
     # RAG switch (2026-05-25). The feedback embed key lives in its own Gemini

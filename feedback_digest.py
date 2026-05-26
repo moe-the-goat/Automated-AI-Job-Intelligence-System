@@ -6,9 +6,11 @@ from pipeline.core_feedback import (
     LOG_PATH,
     PREFERENCES_PATH,
     RAG_FEEDBACK_THRESHOLD,
+    LogsRepoAuthError,
     _read_file,
     _write_file,
     format_entry_text,
+    verify_logs_repo_access,
 )
 
 logger = get_logger(__name__)
@@ -79,7 +81,15 @@ def run_digest():
         logger.error("CEREBRAS_API_KEY or GROQ_API_KEY required for summarization.")
         return False
 
-    log_text, _ = _read_file(repo, LOG_PATH, token)
+    if not verify_logs_repo_access(repo, token):
+        logger.error("Digest: logs repo unreachable — aborting (see CRITICAL log above for remediation).")
+        return False
+
+    try:
+        log_text, _ = _read_file(repo, LOG_PATH, token)
+    except LogsRepoAuthError as e:
+        logger.critical("Digest: %s", e)
+        return False
     if not log_text:
         logger.info("Digest: feedback log missing or empty, nothing to summarize.")
         return True
@@ -128,11 +138,15 @@ def run_digest():
         logger.error("Digest: LLM returned an empty summary, aborting.")
         return False
 
-    _, pref_sha = _read_file(repo, PREFERENCES_PATH, token)
-    _write_file(
-        repo, PREFERENCES_PATH, summary, pref_sha, token,
-        "Refreshed candidate preference profile from feedback log",
-    )
+    try:
+        _, pref_sha = _read_file(repo, PREFERENCES_PATH, token)
+        _write_file(
+            repo, PREFERENCES_PATH, summary, pref_sha, token,
+            "Refreshed candidate preference profile from feedback log",
+        )
+    except LogsRepoAuthError as e:
+        logger.critical("Digest: failed to persist preferences: %s", e)
+        return False
 
     # `feedback_log.json` is left untouched — see module docstring on why
     # the log is never trimmed.

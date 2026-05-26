@@ -28,6 +28,7 @@ from pipeline.core_feedback import (
     load_candidate_preferences,
     ensure_feedback_embeddings,
     load_feedback_embeddings,
+    verify_logs_repo_access,
     RAG_FEEDBACK_THRESHOLD,
     RAG_TOP_K,
 )
@@ -224,6 +225,9 @@ def run_local_pipeline(tracker):
     # applied) shape today's pre-filter and verdict context.
     logs_repo = os.environ.get("LOGS_REPO")
     logs_token = os.environ.get("LOGS_REPO_TOKEN")
+    # One-shot credential check — see scraper.py for the rationale. A rejected
+    # PAT used to silently degrade every feedback step into a no-op.
+    verify_logs_repo_access(logs_repo, logs_token)
     ingest_pending_feedback(logs_repo, logs_token, tracker)
 
     # RAG switch — mirrors scraper.py. See pipeline/core_feedback for the

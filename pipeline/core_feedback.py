@@ -57,6 +57,18 @@ RAG_FEEDBACK_THRESHOLD = 50
 RAG_TOP_K = 5
 
 
+class LogsRepoAuthError(RuntimeError):
+    """Raised when the LOGS_REPO_TOKEN is rejected (401/403) by the GitHub Contents API.
+
+    A bad/expired token used to look identical to a missing file (both returned
+    `(None, None)` from `_read_file`), so the pipeline silently treated "I can't
+    read your repo" as "nothing to ingest" and skipped every feedback step for
+    days. This exception forces the failure to surface — top-level functions
+    catch it, log CRITICAL with the exact remediation, and return safe defaults
+    so the rest of the daily run still produces an email.
+    """
+
+
 def _normalize_repo(repo):
     """Coerce `owner/name`, full URL, or `github.com/owner/name` into `owner/name`."""
     if not repo:
@@ -73,11 +85,16 @@ def _api_url(repo, path):
     return f"https://api.github.com/repos/{repo}/contents/{path}"
 
 
+def _is_auth_error(status_code):
+    return status_code in (401, 403)
+
+
 def _read_file(repo, path, token):
     """Read a single file from the private logs repo via the Contents API.
 
-    Returns (text, sha) on success, (None, None) when the file is missing or
-    on any transport error. Callers treat (None, None) as "no data yet".
+    Returns (text, sha) on success or for a genuine 404 (file simply doesn't
+    exist yet — normal first-run state). Raises LogsRepoAuthError on 401/403
+    so callers can tell credentials problems apart from missing files.
     """
     repo = _normalize_repo(repo)
     if not repo or not token:
@@ -88,8 +105,17 @@ def _read_file(repo, path, token):
     }
     try:
         r = requests.get(_api_url(repo, path), headers=headers, timeout=15)
-        if r.status_code == 404:
-            return None, None
+    except requests.RequestException as e:
+        logger.warning("Feedback: network error reading %s from %s: %s", path, repo, e)
+        return None, None
+    if r.status_code == 404:
+        return None, None
+    if _is_auth_error(r.status_code):
+        raise LogsRepoAuthError(
+            f"GitHub Contents API rejected LOGS_REPO_TOKEN with {r.status_code} reading "
+            f"{path} from {repo}. Regenerate the PAT with contents read+write on {repo}."
+        )
+    try:
         r.raise_for_status()
         data = r.json()
         text = base64.b64decode(data["content"]).decode("utf-8")
@@ -100,7 +126,11 @@ def _read_file(repo, path, token):
 
 
 def _write_file(repo, path, content, sha, token, message):
-    """Create or update a single file via the Contents API. Returns True on success."""
+    """Create or update a single file via the Contents API. Returns True on success.
+
+    Raises LogsRepoAuthError on 401/403 so the caller can surface the auth
+    failure instead of treating it as a generic transient error.
+    """
     repo = _normalize_repo(repo)
     if not repo or not token:
         return False
@@ -116,6 +146,15 @@ def _write_file(repo, path, content, sha, token, message):
         payload["sha"] = sha
     try:
         r = requests.put(_api_url(repo, path), headers=headers, json=payload, timeout=15)
+    except requests.RequestException as e:
+        logger.warning("Feedback: network error writing %s to %s: %s", path, repo, e)
+        return False
+    if _is_auth_error(r.status_code):
+        raise LogsRepoAuthError(
+            f"GitHub Contents API rejected LOGS_REPO_TOKEN with {r.status_code} writing "
+            f"{path} to {repo}. Regenerate the PAT with contents read+write on {repo}."
+        )
+    try:
         r.raise_for_status()
         return True
     except Exception as e:
@@ -123,12 +162,54 @@ def _write_file(repo, path, content, sha, token, message):
         return False
 
 
+def verify_logs_repo_access(repo, token):
+    """One-shot credential check at pipeline start. Returns True iff the token can
+    reach the logs repo.
+
+    Logs CRITICAL with the exact remediation when the token is rejected, so a
+    silently expired PAT can never again make feedback ingestion look like a
+    success while pending entries pile up unread.
+    """
+    if not repo or not token:
+        logger.warning("Logs repo: LOGS_REPO or LOGS_REPO_TOKEN not set — feedback features disabled this run.")
+        return False
+    repo_n = _normalize_repo(repo)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    try:
+        r = requests.get(f"https://api.github.com/repos/{repo_n}", headers=headers, timeout=15)
+    except requests.RequestException as e:
+        logger.error("Logs repo: network error contacting %s (%s) — feedback steps will be skipped.", repo_n, e)
+        return False
+    if r.status_code == 200:
+        return True
+    if _is_auth_error(r.status_code):
+        logger.critical(
+            "Logs repo: LOGS_REPO_TOKEN was REJECTED (%d) by %s. "
+            "Feedback INGESTION, EMBEDDING, and DIGEST are all blocked until you regenerate the PAT. "
+            "Action: create a new GitHub PAT with `repo` scope (or fine-grained: contents read+write on %s), "
+            "then update the LOGS_REPO_TOKEN secret in the public repo's Settings -> Secrets.",
+            r.status_code, repo_n, repo_n,
+        )
+        return False
+    logger.error("Logs repo: unexpected status %d from %s — feedback steps will be skipped.", r.status_code, repo_n)
+    return False
+
+
 def load_candidate_preferences(repo, token):
     """Return the latest AI-summarized preference profile, or empty string.
 
-    Loaded once per pipeline run and injected into every verdict prompt.
+    Loaded once per pipeline run and injected into every verdict prompt. Returns
+    empty (and logs the auth failure) when the token is rejected — the verdict
+    prompt still runs, just without prior-feedback context.
     """
-    text, _ = _read_file(repo, PREFERENCES_PATH, token)
+    try:
+        text, _ = _read_file(repo, PREFERENCES_PATH, token)
+    except LogsRepoAuthError as e:
+        logger.critical("Feedback preferences unavailable: %s", e)
+        return ""
     return (text or "").strip()
 
 
@@ -240,7 +321,11 @@ def ingest_pending_feedback(repo, token, tracker=None):
         logger.info("Feedback: LOGS_REPO/LOGS_REPO_TOKEN missing, skipping ingestion.")
         return 0
 
-    pending_text, pending_sha = _read_file(repo, PENDING_PATH, token)
+    try:
+        pending_text, pending_sha = _read_file(repo, PENDING_PATH, token)
+    except LogsRepoAuthError as e:
+        logger.critical("Feedback ingestion ABORTED: %s", e)
+        return 0
     if not pending_text:
         logger.info("Feedback: no pending entries.")
         return 0
@@ -262,7 +347,12 @@ def ingest_pending_feedback(repo, token, tracker=None):
     rep_updates = _apply_block_companies(entries)
     _mark_applied_seen(entries, tracker)
 
-    log_text, log_sha = _read_file(repo, LOG_PATH, token)
+    try:
+        log_text, log_sha = _read_file(repo, LOG_PATH, token)
+    except LogsRepoAuthError as e:
+        logger.critical("Feedback ingestion ABORTED before archive: %s", e)
+        return 0
+
     log_data = {"entries": []}
     if log_text:
         try:
@@ -273,15 +363,23 @@ def ingest_pending_feedback(repo, token, tracker=None):
             logger.warning("Feedback log malformed, restarting from empty.")
 
     log_data["entries"].extend(entries)
-    _write_file(
-        repo, LOG_PATH, json.dumps(log_data, indent=2),
-        log_sha, token,
-        f"Appended {len(entries)} feedback entries to log",
-    )
-    _write_file(
-        repo, PENDING_PATH, json.dumps({"entries": []}, indent=2),
-        pending_sha, token, "Cleared ingested feedback pending",
-    )
+    try:
+        _write_file(
+            repo, LOG_PATH, json.dumps(log_data, indent=2),
+            log_sha, token,
+            f"Appended {len(entries)} feedback entries to log",
+        )
+        _write_file(
+            repo, PENDING_PATH, json.dumps({"entries": []}, indent=2),
+            pending_sha, token, "Cleared ingested feedback pending",
+        )
+    except LogsRepoAuthError as e:
+        logger.critical(
+            "Feedback ingestion FAILED mid-write (%s). Pending file NOT cleared — "
+            "entries remain in the inbox and will be retried on the next run once the token is fixed.",
+            e,
+        )
+        return 0
 
     logger.info(
         "Feedback: ingested %d entr%s (%d new blacklist entries, %d total in log).",
@@ -318,7 +416,11 @@ def format_entry_text(entry):
 
 def _load_log_entries(repo, token):
     """Read feedback_log.json and return its entries list (or [] on miss/error)."""
-    log_text, _ = _read_file(repo, LOG_PATH, token)
+    try:
+        log_text, _ = _read_file(repo, LOG_PATH, token)
+    except LogsRepoAuthError as e:
+        logger.critical("Feedback log unreadable: %s", e)
+        return []
     if not log_text:
         return []
     try:
@@ -349,7 +451,11 @@ def load_feedback_embeddings(repo, token):
     Entry order matches feedback_log.json's entries array — `ensure_feedback_embeddings`
     is what keeps the two in sync.
     """
-    text, _ = _read_file(repo, EMBEDDINGS_PATH, token)
+    try:
+        text, _ = _read_file(repo, EMBEDDINGS_PATH, token)
+    except LogsRepoAuthError as e:
+        logger.critical("Feedback embeddings unreadable: %s", e)
+        return {"entries": []}
     if not text:
         return {"entries": []}
     try:
@@ -418,13 +524,17 @@ def ensure_feedback_embeddings(repo, token, embed_api_key):
         return total
 
     embeddings["entries"] = embedded_entries
-    _, emb_sha = _read_file(repo, EMBEDDINGS_PATH, token)
-    ok = _write_file(
-        repo, EMBEDDINGS_PATH,
-        json.dumps(embeddings, indent=2),
-        emb_sha, token,
-        f"Embedded {new_count} new feedback entr{'y' if new_count == 1 else 'ies'}",
-    )
+    try:
+        _, emb_sha = _read_file(repo, EMBEDDINGS_PATH, token)
+        ok = _write_file(
+            repo, EMBEDDINGS_PATH,
+            json.dumps(embeddings, indent=2),
+            emb_sha, token,
+            f"Embedded {new_count} new feedback entr{'y' if new_count == 1 else 'ies'}",
+        )
+    except LogsRepoAuthError as e:
+        logger.critical("Feedback embeddings write FAILED: %s", e)
+        return total
     if ok:
         logger.info(
             "Feedback embeddings: +%d new (%d skipped on API failure), %d total now indexed.",
