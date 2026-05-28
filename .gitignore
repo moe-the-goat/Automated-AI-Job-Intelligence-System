@@ -21,5 +21,6 @@ CHAT_HISTORY.md
 cv_text.txt
 # Claude Code editor state — local only.
 .claude/
-# Supabase migrations — local only until the Stream B web repo is split off.
-migrations/
+
+# pytest cache — local artifact, regenerated each run.
+.pytest_cache/
