@@ -1,0 +1,131 @@
+name: Multi-User Job Alerts
+
+# Multi-tenant analog of `Automated Job Alert Scraper`. Runs the per-user
+# pipeline (multi_user_runner.py) on an hourly cron and processes every user
+# whose preferences.next_run_at <= NOW(). The runner itself does the gating
+# — most users with the default 24h cadence will be a no-op on 23 of every
+# 24 ticks.
+#
+# DEPLOYMENT NOTES
+# ----------------
+# 1. The workflow is committed with `cron` enabled but should be DISABLED in
+#    the GitHub Actions UI until B10 (the 7-day dual-run) starts. Use
+#    `workflow_dispatch` for ad-hoc smoke tests in the meantime.
+# 2. Defaults to `--dry-run` so the first live ticks persist runs + job_results
+#    into Supabase but do NOT send email. Flip the repo Variable
+#    MULTI_USER_DRY_RUN to "false" when ready to actually deliver mail.
+# 3. Required repo secrets (Settings → Secrets and variables → Actions):
+#      SUPABASE_URL                 https://<ref>.supabase.co
+#      SUPABASE_SERVICE_ROLE_KEY    server-side key from the Supabase dashboard
+#      RESEND_API_KEY               from resend.com — until B12 (custom domain),
+#                                   sends are from noreply@resend.dev
+#      (existing) GEMINI_API_KEY, GEMINI_EMBED_API_KEY, GEMINI_EMBED2_API_KEY,
+#                 CEREBRAS_API_KEY, GROQ_API_KEY
+#
+# Unlike `Automated Job Alert Scraper`, this workflow needs NO file writes
+# back to the repo: seen_jobs lives in Supabase, the feedback page is the
+# Next.js dashboard, and there's no GitHub-Issue routing.
+
+on:
+  schedule:
+    # Top of every hour. Per-user cadence is enforced inside the runner via
+    # preferences.next_run_at, so a daily user only sees one productive tick
+    # every 24h — the other 23 are short no-op DB scans.
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Skip email sending (overrides MULTI_USER_DRY_RUN variable)."
+        required: false
+        type: choice
+        default: "true"
+        options:
+          - "true"
+          - "false"
+      user_id:
+        description: "Optional: process only this user UUID (for replays / onboarding)."
+        required: false
+        type: string
+      skip_due_check:
+        description: "Optional: ignore preferences.next_run_at gating (use with user_id)."
+        required: false
+        type: choice
+        default: "false"
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  multi-user-run:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node24
+    # Read-only for code; no commits, no issues — the runner persists
+    # everything to Supabase.
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Same gate as the single-user workflow — abort BEFORE wasting a Supabase
+      # round-trip if any regression slipped through.
+      - name: QA gate
+        run: python QA/run_all.py
+
+      # Resolve the dry-run flag once, here, so the run step itself is a simple
+      # `python multi_user_runner.py $FLAGS` and the decision is visible in
+      # the job log. Manual dispatch input wins; otherwise fall back to the
+      # repo Variable; otherwise default to dry-run (safe default).
+      - name: Resolve runtime flags
+        id: flags
+        run: |
+          DRY="${{ github.event.inputs.dry_run }}"
+          if [ -z "$DRY" ]; then
+            DRY="${{ vars.MULTI_USER_DRY_RUN }}"
+          fi
+          if [ -z "$DRY" ]; then
+            DRY="true"
+          fi
+
+          FLAGS=""
+          if [ "$DRY" = "true" ]; then
+            FLAGS="$FLAGS --dry-run"
+          fi
+          if [ -n "${{ github.event.inputs.user_id }}" ]; then
+            FLAGS="$FLAGS --user-id ${{ github.event.inputs.user_id }}"
+          fi
+          if [ "${{ github.event.inputs.skip_due_check }}" = "true" ]; then
+            FLAGS="$FLAGS --skip-due-check"
+          fi
+
+          echo "Resolved flags: '$FLAGS' (dry_run=$DRY)"
+          echo "flags=$FLAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Run multi-user worker
+        env:
+          # Supabase (new)
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Resend (new) — sender override unused until B12 (custom domain)
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_ADDRESS: ${{ vars.RESEND_FROM_ADDRESS }}
+          # AI providers (shared with the single-user pipeline)
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_EMBED_API_KEY: ${{ secrets.GEMINI_EMBED_API_KEY }}
+          GEMINI_EMBED2_API_KEY: ${{ secrets.GEMINI_EMBED2_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python multi_user_runner.py ${{ steps.flags.outputs.flags }}
