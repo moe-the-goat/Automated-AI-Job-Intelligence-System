@@ -9,3 +9,4 @@ ddgs
 openpyxl
 langdetect
 feedparser
+supabase
