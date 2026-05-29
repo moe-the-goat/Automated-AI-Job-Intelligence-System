@@ -293,8 +293,10 @@ def migrate_feedback(client, user_id, log_data, embed_data, *, dry_run) -> dict:
             stats["failed"] += 1
             continue
         try:
-            resp = client.table("feedback").insert(row).select("id").single().execute()
-            new_id = (resp.data or {}).get("id")
+            # insert() returns the inserted row(s) as a list (returning=representation);
+            # there is no .select()/.single() on an insert builder.
+            resp = client.table("feedback").insert(row).execute()
+            new_id = resp.data[0]["id"] if resp.data else None
         except Exception as e:
             logger.error("Feedback[%d] insert failed: %s", i, e)
             stats["failed"] += 1

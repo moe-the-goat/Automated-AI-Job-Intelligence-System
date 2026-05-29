@@ -243,7 +243,10 @@ def ensure_feedback_embeddings(
         new_rows.append({
             "feedback_id": row["id"],
             "user_id": user_id,
-            "embedding": vec,
+            # pgvector's text input format is "[1,2,3]"; PostgREST maps a raw
+            # JSON array to a Postgres array literal "{1,2,3}", which fails the
+            # vector cast. Send the bracket-string form explicitly.
+            "embedding": to_pgvector_literal(vec),
         })
 
     if not new_rows:
@@ -269,6 +272,21 @@ def ensure_feedback_embeddings(
         )
 
     return total
+
+
+def to_pgvector_literal(vec) -> Optional[str]:
+    """Format a list of floats as pgvector's text input literal: '[0.1,0.2,...]'.
+
+    Inverse of _parse_pgvector. Used on INSERT so PostgREST sends a string the
+    vector type accepts, rather than a JSON array (which becomes a PG array
+    literal and fails the cast). Returns None for an empty / non-list input.
+    """
+    if not isinstance(vec, list) or not vec:
+        return None
+    try:
+        return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_pgvector(raw) -> Optional[list]:

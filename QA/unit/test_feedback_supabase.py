@@ -13,6 +13,7 @@ from pipeline.core_feedback_supabase import (
     load_feedback_embeddings,
     count_feedback_entries,
     load_candidate_preferences,
+    to_pgvector_literal,
     _parse_pgvector,
 )
 
@@ -103,6 +104,29 @@ def test_parse_pgvector_returns_none_on_garbage():
     assert _parse_pgvector("not a vector") is None
     assert _parse_pgvector("[a,b,c]") is None
     assert _parse_pgvector(42) is None
+
+
+# ---------------------------------------------------------------------------
+# to_pgvector_literal — the INSERT-side format (must be a "[...]" string, not
+# a JSON array, or PostgREST sends a PG array literal that fails the cast)
+# ---------------------------------------------------------------------------
+
+def test_to_pgvector_literal_formats_string():
+    assert to_pgvector_literal([0.1, 0.2, 0.3]) == "[0.1,0.2,0.3]"
+    assert to_pgvector_literal([1, 2]) == "[1.0,2.0]"
+
+
+def test_to_pgvector_literal_none_on_bad_input():
+    assert to_pgvector_literal(None) is None
+    assert to_pgvector_literal([]) is None
+    assert to_pgvector_literal("[0.1,0.2]") is None  # already a string, not a list
+
+
+def test_pgvector_round_trip():
+    # What we write must parse back to the same vector on read.
+    vec = [0.123, -0.456, 0.789]
+    literal = to_pgvector_literal(vec)
+    assert _parse_pgvector(literal) == vec
 
 
 # ---------------------------------------------------------------------------

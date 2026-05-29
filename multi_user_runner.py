@@ -86,6 +86,11 @@ WILDCARD_COUNT = 5
 LOWER_RANKED_EVAL_LIMIT = 15        # smaller than scraper.py (25) — multiplied by N users
 DESCRIPTION_EXCERPT_CHARS = 1000    # persisted to job_results so Tab B survives URL rot
 
+# Closed-beta gate: only users with profiles.is_whitelisted = true are
+# processed. The worker is the thing that spends API quota and sends mail, so
+# the whitelist is enforced HERE (not just in the UI). Set False to open up.
+WHITELIST_ONLY = True
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Lightweight per-tick caches
@@ -315,6 +320,11 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
         profile = row.get("profiles") or {}
         if isinstance(profile, list):
             profile = profile[0] if profile else {}
+
+        # Closed-beta gate — enforced at the worker, not just the UI.
+        if WHITELIST_ONLY and not profile.get("is_whitelisted"):
+            logger.info("Skipping user %s — not whitelisted (closed beta).", row["user_id"])
+            continue
 
         cv_text = (profile.get("cv_text") or "").strip()
         if not cv_text:
