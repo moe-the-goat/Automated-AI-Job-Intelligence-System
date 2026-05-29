@@ -194,11 +194,46 @@ def apply_post_ai_caps(result, row):
     return result
 
 
+def _extract_json_object(text):
+    """Return the first balanced top-level {...} JSON object in `text`, or None.
+
+    Reasoning models (e.g. gpt-oss-120b) can prepend chain-of-thought prose or
+    append commentary around the JSON verdict. We scan for the first '{' and
+    brace-match to its close, respecting quoted strings and escapes, so a stray
+    preamble/suffix doesn't break json.loads.
+    """
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == '\\':
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 def _parse_ai_response(text):
     """Parse a raw model output string into the canonical result dict.
 
     Tolerates: markdown ```json fences, surrounding whitespace, missing fields,
-    string-typed numbers, percent signs in numeric fields.
+    string-typed numbers, percent signs in numeric fields, and a reasoning-model
+    preamble/suffix wrapped around the JSON object.
     """
     if not text:
         raise ValueError("Empty AI response")
@@ -210,7 +245,15 @@ def _parse_ai_response(text):
     if t.endswith('```'):
         t = t[:-3]
     t = t.strip()
-    raw = json.loads(t)
+    try:
+        raw = json.loads(t)
+    except json.JSONDecodeError:
+        # The model wrapped the JSON in prose (common with reasoning models).
+        # Extract the first balanced object and parse that instead.
+        block = _extract_json_object(t)
+        if block is None:
+            raise
+        raw = json.loads(block)
     return _normalize_result(raw)
 
 # ---------------------------------------------------------------------------

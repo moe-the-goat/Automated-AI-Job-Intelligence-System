@@ -4,7 +4,12 @@ The verdict schema is the contract between core_ai and every consumer (renderer,
 DB, dashboard). Any silent change here would propagate to emails, GitHub Issues,
 and future Stream-B web UI rows. Tests here gatekeep that contract.
 """
-from pipeline.core_ai import DEFAULT_AI_RESULT, _normalize_result, _parse_ai_response
+from pipeline.core_ai import (
+    DEFAULT_AI_RESULT,
+    _normalize_result,
+    _parse_ai_response,
+    _extract_json_object,
+)
 
 
 def test_default_schema_keys():
@@ -121,5 +126,62 @@ def test_parse_empty_raises():
     try:
         _parse_ai_response("")
     except ValueError:
+        raised = True
+    assert raised
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-model hardening (gpt-oss-120b can wrap the JSON in prose).
+# ---------------------------------------------------------------------------
+
+_VERDICT_JSON = (
+    '{"is_valid": true, "verdict": "Strong fit", '
+    '"tech_fit": 88, "experience_fit": 72, "logistics_fit": 80, '
+    '"match_percentage": 81, "compensation": "$120k", '
+    '"effort": "medium", "suspicious": false, "scam": false}'
+)
+
+
+def test_parse_with_reasoning_preamble():
+    s = (
+        "We need to assess fit. The candidate has strong Python and the role "
+        "is remote-friendly, so logistics are fine. Final answer:\n\n" + _VERDICT_JSON
+    )
+    r = _parse_ai_response(s)
+    assert r["verdict"] == "Strong fit"
+    assert r["match_percentage"] == 81
+    assert r["is_valid"] is True
+
+
+def test_parse_with_preamble_and_trailing_commentary():
+    s = "Reasoning: looks good.\n" + _VERDICT_JSON + "\n\nHope that helps!"
+    r = _parse_ai_response(s)
+    assert r["tech_fit"] == 88
+    assert r["effort"] == "medium"
+
+
+def test_parse_with_fence_and_preamble():
+    s = "Here is the verdict:\n```json\n" + _VERDICT_JSON + "\n```"
+    r = _parse_ai_response(s)
+    assert r["match_percentage"] == 81
+
+
+def test_extract_json_object_balances_nested_braces_and_strings():
+    # A brace inside a string value must not end the object early.
+    text = 'prefix {"verdict": "great {role}", "tech_fit": 90} suffix'
+    block = _extract_json_object(text)
+    assert block == '{"verdict": "great {role}", "tech_fit": 90}'
+
+
+def test_extract_json_object_none_when_absent():
+    assert _extract_json_object("no json here") is None
+    assert _extract_json_object("") is None
+
+
+def test_parse_raises_when_no_json_at_all():
+    raised = False
+    try:
+        _parse_ai_response("the model said nothing useful")
+    except Exception:
         raised = True
     assert raised

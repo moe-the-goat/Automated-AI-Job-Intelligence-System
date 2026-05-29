@@ -22,29 +22,36 @@ from pipeline.logging_setup import get_logger
 logger = get_logger(__name__)
 
 
-# Model picks based on the actual free-tier menus on each provider (2026-05-19).
+# Model picks based on the actual free-tier menus on each provider.
 #
-# CRITICAL gotcha: avoid REASONING models like gpt-oss-120b. They burn most of
-# the `max_completion_tokens` budget on hidden internal reasoning tokens BEFORE
-# emitting any visible content, leaving the actual JSON response truncated or
-# entirely empty. Both Cerebras's gpt-oss-120b and Groq's llama-4-scout share
-# this behavior — we got "Empty AI response" and "Unterminated JSON" errors on
-# every call during the first attempt at non-Gemini verdicts.
+# 2026-05-29 update: Cerebras retired qwen-3-235b-a22b-instruct-2507 from the
+# free tier (calls now 404 "model does not exist or you do not have access").
+# The free menu is gpt-oss-120b (Production) + zai-glm-4.7 (Preview). We move to
+# gpt-oss-120b — Production tier, 1M TPD (10x Groq), 65K context.
 #
-# Cerebras free tier: qwen-3-235b-a22b-instruct-2507 is a 235B-param Qwen 3
-# instruction-tuned model with NO reasoning overhead.
-#   * 65K context, 5 RPM, 150 RPH, 2400 RPD, 30K TPM, 1M TPH, 1M TPD.
-#   * "Instruct" suffix => non-thinking variant => responses go straight to
-#     the requested JSON without burning tokens on internal CoT.
+# gpt-oss-120b is a REASONING model, which previously truncated/emptied the JSON
+# (hidden reasoning ate the 2048-token budget). We tame that with two levers:
+#   1. reasoning_effort="low"  — minimise hidden chain-of-thought.
+#   2. a larger Cerebras output budget (below) so reasoning + the ~500-token JSON
+#      verdict both fit.
+# core_ai._parse_ai_response also now extracts the JSON object even if the model
+# wraps it in prose — defence in depth against a stray reasoning preamble.
+#
+# Override per-deployment with the CEREBRAS_MODEL env var (e.g. to try
+# zai-glm-4.7) without a code change.
 #
 # Groq free tier: llama-3.3-70b-versatile.
-#   * 30 RPM, 1K RPD, 12K TPM, 100K TPD.
-#   * Smaller TPD than llama-4-scout (500K) but Llama 3.3 is a standard
-#     non-reasoning instruction model that reliably produces clean JSON.
-#     The TPD cap is enough as long as Cerebras takes the bulk of the calls;
-#     Groq only fires on Cerebras failures.
-_CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507"
+#   * 30 RPM, 1K RPD, 12K TPM, 100K TPD. Standard non-reasoning instruct model,
+#     reliable clean JSON. Only fires on Cerebras failures, so its small TPD is
+#     fine as long as Cerebras carries the bulk.
+import os
+
+_CEREBRAS_MODEL = os.environ.get("CEREBRAS_MODEL", "gpt-oss-120b")
 _GROQ_MODEL = "llama-3.3-70b-versatile"
+
+# gpt-oss reasoning needs headroom beyond the ~500-token JSON answer, so the
+# Cerebras call gets a larger budget than the non-reasoning Groq/Gemini paths.
+_CEREBRAS_MAX_OUTPUT_TOKENS = 8192
 
 # Gemini Flash Lite handles the cheaper second-pass verdict for "Also Found"
 # lower-ranked jobs. 15 RPM / 500 RPD free-tier budget — plenty for ~25 calls
@@ -91,12 +98,19 @@ def _call_cerebras(prompt, api_key):
     """Single Cerebras call. Raises on any error (caller decides retry policy)."""
     from cerebras.cloud.sdk import Cerebras
     client = Cerebras(api_key=api_key)
-    response = client.chat.completions.create(
+    kwargs = dict(
         model=_CEREBRAS_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
-        max_completion_tokens=_MAX_OUTPUT_TOKENS,
+        max_completion_tokens=_CEREBRAS_MAX_OUTPUT_TOKENS,
     )
+    # gpt-oss is a reasoning model — keep hidden reasoning minimal so the budget
+    # goes to the JSON answer. Guarded: if the installed SDK doesn't accept the
+    # kwarg, fall back to a plain call (a larger token budget still covers it).
+    try:
+        response = client.chat.completions.create(reasoning_effort="low", **kwargs)
+    except TypeError:
+        response = client.chat.completions.create(**kwargs)
     return response.choices[0].message.content
 
 
