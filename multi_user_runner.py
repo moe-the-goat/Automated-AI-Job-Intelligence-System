@@ -292,14 +292,16 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
     """
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    # Query 1: due preferences + the 1:1 profile. We can embed profiles because
+    # preferences.user_id is an FK to profiles. We CANNOT embed search_queries
+    # here — it has no FK to preferences (both only reference profiles), so
+    # PostgREST rejects the join (PGRST200). search_queries is loaded separately.
     query = (
         client.table("preferences")
         .select(
             "user_id, frequency_hours, is_active, next_run_at, "
             "notification_email, ai_eval_top_n, api_hours_old, "
-            "profiles!inner(cv_text, is_whitelisted), "
-            "search_queries(search_term, location, sites, job_type, is_remote, "
-            "results_wanted, hours_old, country_indeed, is_active)"
+            "profiles!inner(cv_text, is_whitelisted)"
         )
         .eq("is_active", True)
     )
@@ -315,31 +317,54 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
         logger.critical("Failed to load due users: %s", e)
         return []
 
+    pref_rows = resp.data or []
+    if not pref_rows:
+        return []
+
+    # Query 2: active search_queries for exactly those users, in one round trip.
+    user_ids = [r["user_id"] for r in pref_rows]
+    searches_by_user: dict[str, list] = {}
+    try:
+        searches_resp = (
+            client.table("search_queries")
+            .select(
+                "user_id, search_term, location, sites, job_type, is_remote, "
+                "results_wanted, hours_old, country_indeed, is_active"
+            )
+            .in_("user_id", user_ids)
+            .eq("is_active", True)
+            .execute()
+        )
+        for s in searches_resp.data or []:
+            searches_by_user.setdefault(s["user_id"], []).append(s)
+    except Exception as e:
+        logger.critical("Failed to load search_queries: %s", e)
+        return []
+
     users = []
-    for row in resp.data or []:
+    for row in pref_rows:
+        uid = row["user_id"]
         profile = row.get("profiles") or {}
         if isinstance(profile, list):
             profile = profile[0] if profile else {}
 
         # Closed-beta gate — enforced at the worker, not just the UI.
         if WHITELIST_ONLY and not profile.get("is_whitelisted"):
-            logger.info("Skipping user %s — not whitelisted (closed beta).", row["user_id"])
+            logger.info("Skipping user %s — not whitelisted (closed beta).", uid)
             continue
 
         cv_text = (profile.get("cv_text") or "").strip()
         if not cv_text:
-            logger.warning("Skipping user %s — no cv_text on profile.", row["user_id"])
+            logger.warning("Skipping user %s — no cv_text on profile.", uid)
             continue
 
-        # Filter search_queries to active ones only.
-        raw_searches = row.get("search_queries") or []
-        searches = [s for s in raw_searches if s.get("is_active", True)]
+        searches = searches_by_user.get(uid, [])
         if not searches:
-            logger.warning("Skipping user %s — no active search_queries.", row["user_id"])
+            logger.warning("Skipping user %s — no active search_queries.", uid)
             continue
 
         users.append({
-            "user_id": row["user_id"],
+            "user_id": uid,
             "notification_email": row["notification_email"],
             "cv_text": cv_text,
             "frequency_hours": row["frequency_hours"],
