@@ -69,7 +69,8 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          # Dedicated multi-user keys when set, else the shared ones (see multi_user.yml).
+          CEREBRAS_API_KEY: ${{ secrets.MULTI_CEREBRAS_API_KEY || secrets.CEREBRAS_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.MULTI_GROQ_API_KEY || secrets.GROQ_API_KEY }}
         run: |
           python feedback_digest_multi_user.py ${{ steps.flags.outputs.flags }}

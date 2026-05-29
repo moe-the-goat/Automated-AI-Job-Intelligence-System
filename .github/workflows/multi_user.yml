@@ -121,11 +121,17 @@ jobs:
           # Resend (new) — sender override unused until B12 (custom domain)
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           RESEND_FROM_ADDRESS: ${{ vars.RESEND_FROM_ADDRESS }}
-          # AI providers (shared with the single-user pipeline)
+          # Top-section verdict providers. Prefer the multi-user-dedicated keys
+          # so the worker has its OWN daily token budget and can't be starved by
+          # the legacy pipeline (which shares the 100K/day Groq TPD). Falls back
+          # to the shared keys when the MULTI_* secrets aren't set, so this stays
+          # a no-op until you create the second Cerebras/Groq accounts.
+          CEREBRAS_API_KEY: ${{ secrets.MULTI_CEREBRAS_API_KEY || secrets.CEREBRAS_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.MULTI_GROQ_API_KEY || secrets.GROQ_API_KEY }}
+          # Gemini (embeddings + lower-ranked verdicts) stays shared — its quota
+          # profile is different and wasn't the bottleneck.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_EMBED_API_KEY: ${{ secrets.GEMINI_EMBED_API_KEY }}
           GEMINI_EMBED2_API_KEY: ${{ secrets.GEMINI_EMBED2_API_KEY }}
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           python multi_user_runner.py ${{ steps.flags.outputs.flags }}
