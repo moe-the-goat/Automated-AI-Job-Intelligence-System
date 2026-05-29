@@ -76,10 +76,28 @@ select p.user_id, p.is_whitelisted, p.is_admin,
 
 You want: `has_cv = true`, `is_whitelisted = true`, `active_searches > 0`.
 
-## Step 5 — Local env for the migration
+## Step 5 — Run the data migration
 
-The migration reads the private logs repo and writes Supabase, so it needs
-both sets of credentials. In your local shell (PowerShell):
+The migration ports the historical feedback corpus + reputation list. It reads
+the private logs repo and writes Supabase, so it needs both sets of credentials.
+
+### Recommended: run it in GitHub Actions (no local secrets)
+
+GitHub only reveals a PAT's value once at creation, so the `LOGS_REPO_TOKEN`
+can't be copied back out — but it already lives as an Actions secret. The
+**Migrate User Data (B9a)** workflow runs the migration there, reusing the
+existing secrets:
+
+1. GitHub → Actions → **Migrate User Data (B9a)** → **Run workflow**.
+2. Set `email` (or `user_id`) and leave `dry_run = true` for the first pass.
+3. Review the log, then run again with `dry_run = false`.
+
+Skip to [Step 8 — Verify](#step-8--verify-in-supabase) afterwards.
+
+### Alternative: run locally
+
+Only if you have the `LOGS_REPO_TOKEN` value on hand. In your local shell
+(PowerShell):
 
 ```powershell
 $env:SUPABASE_URL              = "https://axyuiaxchlcshcvqqnws.supabase.co"
