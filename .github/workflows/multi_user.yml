@@ -55,6 +55,14 @@ on:
           - "true"
           - "false"
 
+# Never let two runs overlap: if a tick is still processing when the next hour
+# fires, the new run waits instead of double-processing users (which would
+# duplicate job_results and race seen_jobs). cancel-in-progress: false so an
+# in-flight pipeline is allowed to finish cleanly.
+concurrency:
+  group: multi-user-runner
+  cancel-in-progress: false
+
 jobs:
   multi-user-run:
     runs-on: ubuntu-latest

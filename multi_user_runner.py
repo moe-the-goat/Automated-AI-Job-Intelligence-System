@@ -91,6 +91,11 @@ DESCRIPTION_EXCERPT_CHARS = 1000    # persisted to job_results so Tab B survives
 # the whitelist is enforced HERE (not just in the UI). Set False to open up.
 WHITELIST_ONLY = True
 
+# Run lock: a user's next_run_at is pushed forward to now + cadence at the START
+# of their run (a claim), so an overlapping cron tick can't re-select a user
+# whose run is still in flight. On failure we pull it back to a shorter retry.
+FAILURE_RETRY_HOURS = 2
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Lightweight per-tick caches
@@ -509,11 +514,23 @@ def _safe_effort(v):
     return s if s in _VALID_EFFORTS else None
 
 
-def _bump_next_run(client, user_id: str, frequency_hours: int):
-    next_run = datetime.now(timezone.utc) + timedelta(hours=max(1, int(frequency_hours)))
+def _compute_next_run(frequency_hours, *, now=None) -> datetime:
+    """When the user should next be eligible: now + their cadence (min 1h)."""
+    now = now or datetime.now(timezone.utc)
+    return now + timedelta(hours=max(1, int(frequency_hours)))
+
+
+def _compute_retry(*, now=None) -> datetime:
+    """When to retry after a failed run — sooner than a full cadence so a
+    transient error (provider 5xx, network) recovers without waiting a day."""
+    now = now or datetime.now(timezone.utc)
+    return now + timedelta(hours=FAILURE_RETRY_HOURS)
+
+
+def _set_next_run(client, user_id: str, when: datetime):
     try:
         client.table("preferences").update(
-            {"next_run_at": next_run.isoformat()}
+            {"next_run_at": when.isoformat()}
         ).eq("user_id", user_id).execute()
     except Exception as e:
         logger.error("UPDATE preferences.next_run_at failed for %s: %s", user_id, e)
@@ -533,6 +550,13 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool):
         logger.error("Could not create run row for %s — skipping.", user_id)
         return
 
+    # Claim the user up front: push next_run_at to now + cadence BEFORE the slow
+    # pipeline runs, so a cron tick that overlaps this run won't re-select this
+    # user mid-flight (the workflow `concurrency` guard is the first line of
+    # defense; this is the data-layer backstop, e.g. for a manual dispatch that
+    # overlaps the schedule). On failure we pull it back to a short retry below.
+    _set_next_run(client, user_id, _compute_next_run(user["frequency_hours"]))
+
     tracker = SupabaseJobTracker(user_id, client=client)
     stats = {"scraped": 0, "filtered": 0, "ai_evaluated": 0, "approved": 0, "lower_ranked": 0}
 
@@ -551,7 +575,6 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool):
         if combined.empty:
             logger.info("User %s: no jobs scraped this tick.", user_id)
             _finalize_run(client, run_id, status="success", **stats)
-            _bump_next_run(client, user_id, user["frequency_hours"])
             tracker.save()
             return
 
@@ -561,7 +584,6 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool):
         if combined.empty:
             logger.info("User %s: 0 jobs survived the pre-filters.", user_id)
             _finalize_run(client, run_id, status="success", **stats)
-            _bump_next_run(client, user_id, user["frequency_hours"])
             tracker.save()
             return
 
@@ -642,7 +664,6 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool):
             logger.info("User %s: --dry-run, email not sent.", user_id)
 
         _finalize_run(client, run_id, status="success", **stats)
-        _bump_next_run(client, user_id, user["frequency_hours"])
         tracker.save()
 
     except Exception as e:
@@ -652,6 +673,9 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool):
             error=f"{type(e).__name__}: {e}",
             **stats,
         )
+        # Pull the claim back to a short retry so a transient failure recovers
+        # well before the full cadence would have allowed.
+        _set_next_run(client, user_id, _compute_retry())
         tracker.save()
 
 
