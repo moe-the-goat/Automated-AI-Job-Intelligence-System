@@ -304,7 +304,7 @@ def save_embedding_history(history):
         logger.warning("Embedding history save failed: %s", e)
 
 
-def drop_semantic_duplicates(df, new_embeddings, threshold=SEMANTIC_DEDUP_THRESHOLD):
+def drop_semantic_duplicates(df, new_embeddings, threshold=SEMANTIC_DEDUP_THRESHOLD, history=None):
     """Remove rows whose embedding is ≥threshold cosine-similar to any history entry.
 
     `new_embeddings` is the {url: embedding_vector} dict from attach_similarity.
@@ -312,20 +312,31 @@ def drop_semantic_duplicates(df, new_embeddings, threshold=SEMANTIC_DEDUP_THRESH
     Returns the filtered dataframe. Rows whose URL isn't in `new_embeddings`
     (e.g. embedding API failure) are kept by default — we don't drop them just
     because we couldn't verify, since URL-dedup already handled exact repeats.
+
+    `history` lets a caller inject the comparison set directly. Two accepted
+    shapes:
+      * legacy disk form  {url: {"embedding": [...], "added_at": ...}}
+      * flat form         {url: [...]}   (the multi-user Supabase history)
+    When None (the single-user default) it's loaded from the local disk cache.
     """
     if df is None or df.empty or not new_embeddings:
         return df
 
-    history = load_embedding_history()
+    if history is None:
+        history = load_embedding_history()
     if not history:
         return df
 
-    # Pre-extract historical vectors as a flat list for the inner loop.
+    # Pre-extract historical vectors as a flat list for the inner loop. Tolerate
+    # both the disk shape ({"embedding": [...]}) and the flat shape ([...]).
     hist_pairs = []
     for url, entry in history.items():
-        if not isinstance(entry, dict):
-            continue
-        vec = entry.get("embedding")
+        if isinstance(entry, dict):
+            vec = entry.get("embedding")
+        elif isinstance(entry, list):
+            vec = entry
+        else:
+            vec = None
         if vec:
             hist_pairs.append((url, vec))
     if not hist_pairs:

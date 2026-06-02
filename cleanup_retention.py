@@ -44,6 +44,10 @@ logger = get_logger(__name__)
 
 SEEN_JOBS_RETENTION_DAYS = 90
 JOB_RESULTS_RETENTION_DAYS = 90
+# job_embeddings is only used for the 14-day semantic-dedup window, so it can be
+# pruned much more aggressively than seen_jobs. A little slack (30d) keeps it
+# robust to a missed weekly run without bloating the table.
+JOB_EMBEDDINGS_RETENTION_DAYS = 30
 _PAGE = 1000      # PostgREST default max rows per request
 _DELETE_CHUNK = 100
 
@@ -129,6 +133,39 @@ def purge_seen_jobs(client, days: int, *, dry_run: bool, now=None) -> int:
     return n
 
 
+def purge_by_timestamp(client, table: str, ts_column: str, days: int, *, dry_run: bool, now=None) -> int:
+    """Delete rows from `table` whose `ts_column` is older than `days`.
+
+    Generic single-condition purge for tables with no preserve-exceptions
+    (unlike job_results, which must keep bookmarked rows). Used for
+    job_embeddings. Returns the count removed (or that would be, in dry-run).
+    """
+    cut = cutoff_iso(days, now=now)
+    try:
+        n = (
+            client.table(table)
+            .select(ts_column, count="exact", head=True)
+            .lt(ts_column, cut)
+            .execute()
+        ).count or 0
+    except Exception as e:
+        logger.error("%s count failed: %s", table, e)
+        return 0
+    if n == 0:
+        logger.info("%s: nothing older than %dd.", table, days)
+        return 0
+    if dry_run:
+        logger.info("[dry-run] %s: would delete %d row(s) older than %dd.", table, n, days)
+        return n
+    try:
+        client.table(table).delete().lt(ts_column, cut).execute()
+        logger.info("%s: deleted %d row(s) older than %dd.", table, n, days)
+    except Exception as e:
+        logger.error("%s delete failed: %s", table, e)
+        return 0
+    return n
+
+
 def purge_job_results(client, days: int, *, dry_run: bool, now=None) -> int:
     """Delete job_results older than `days` that no bookmark references.
 
@@ -178,10 +215,11 @@ def purge_job_results(client, days: int, *, dry_run: bool, now=None) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main(argv: Optional[list] = None) -> int:
-    parser = argparse.ArgumentParser(description="Retention cleanup for seen_jobs + job_results.")
+    parser = argparse.ArgumentParser(description="Retention cleanup for seen_jobs, job_results, job_embeddings.")
     parser.add_argument("--dry-run", action="store_true", help="Report counts; delete nothing.")
     parser.add_argument("--seen-days", type=int, default=SEEN_JOBS_RETENTION_DAYS)
     parser.add_argument("--results-days", type=int, default=JOB_RESULTS_RETENTION_DAYS)
+    parser.add_argument("--embeddings-days", type=int, default=JOB_EMBEDDINGS_RETENTION_DAYS)
     args = parser.parse_args(argv)
 
     configure_logging()
@@ -192,12 +230,16 @@ def main(argv: Optional[list] = None) -> int:
         logger.critical(str(e))
         return 2
 
-    logger.info("Retention cleanup%s — seen_jobs>%dd, job_results>%dd.",
-                " [dry-run]" if args.dry_run else "", args.seen_days, args.results_days)
+    logger.info("Retention cleanup%s — seen_jobs>%dd, job_results>%dd, job_embeddings>%dd.",
+                " [dry-run]" if args.dry_run else "",
+                args.seen_days, args.results_days, args.embeddings_days)
     seen = purge_seen_jobs(client, args.seen_days, dry_run=args.dry_run)
     results = purge_job_results(client, args.results_days, dry_run=args.dry_run)
-    logger.info("Cleanup %s: seen_jobs=%d, job_results=%d.",
-                "preview" if args.dry_run else "done", seen, results)
+    embeds = purge_by_timestamp(
+        client, "job_embeddings", "embedded_at", args.embeddings_days, dry_run=args.dry_run
+    )
+    logger.info("Cleanup %s: seen_jobs=%d, job_results=%d, job_embeddings=%d.",
+                "preview" if args.dry_run else "done", seen, results, embeds)
     return 0
 
 

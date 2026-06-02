@@ -212,3 +212,40 @@ def test_update_embedding_history_skips_none_values():
 def test_threshold_constant_is_strict():
     """Sanity check on the configured threshold — don't let it slip below 0.9."""
     assert SEMANTIC_DEDUP_THRESHOLD >= 0.9
+
+
+# ---------------------------------------------------------------------------
+# Injected history (multi-user path): drop_semantic_duplicates(history=...)
+# The multi-user runner passes the Supabase history directly, in FLAT form
+# {url: [vec]} rather than the disk form {url: {"embedding": [vec], ...}}.
+# These tests lock both that the injected set is used (disk cache ignored) and
+# that the flat shape is accepted.
+# ---------------------------------------------------------------------------
+
+def test_injected_flat_history_drops_repost():
+    # No disk cache touched; history passed in flat form.
+    df = pd.DataFrame([{"title": "Reposted role", "job_url": "https://new/url"}])
+    history = {"https://old/url": [1.0, 0.0, 0.0]}
+    out = drop_semantic_duplicates(df, {"https://new/url": [0.999, 0.01, 0.0]}, history=history)
+    assert len(out) == 0
+
+
+def test_injected_history_keeps_dissimilar():
+    df = pd.DataFrame([{"title": "Different role", "job_url": "https://new/url"}])
+    history = {"https://old/url": [1.0, 0.0, 0.0]}
+    out = drop_semantic_duplicates(df, {"https://new/url": [0.0, 1.0, 0.0]}, history=history)
+    assert len(out) == 1
+
+
+def test_injected_empty_history_is_noop():
+    df = pd.DataFrame([{"title": "X", "job_url": "https://a/b"}])
+    out = drop_semantic_duplicates(df, {"https://a/b": [1.0, 0.0]}, history={})
+    assert len(out) == 1
+
+
+def test_injected_history_also_accepts_disk_shape():
+    # Tolerate the {"embedding": [...]} nested shape too, for safety.
+    df = pd.DataFrame([{"title": "Repost", "job_url": "https://new/url"}])
+    history = {"https://old/url": {"embedding": [1.0, 0.0], "added_at": "2026-05-01T00:00:00+00:00"}}
+    out = drop_semantic_duplicates(df, {"https://new/url": [1.0, 0.0]}, history=history)
+    assert len(out) == 0

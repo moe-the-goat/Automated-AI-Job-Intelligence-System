@@ -57,13 +57,19 @@ from pipeline.core_ai import (
     quick_viability_check,
     skipped_result,
 )
-from pipeline.core_embedding import attach_similarity, retrieve_relevant_feedback
+from pipeline.core_embedding import (
+    attach_similarity,
+    drop_semantic_duplicates,
+    retrieve_relevant_feedback,
+)
 from pipeline.core_notify import format_email_html
 from pipeline.core_email_resend import send_email as send_via_resend
 from pipeline.core_supabase import (
     SupabaseConfigError,
     SupabaseJobTracker,
     get_service_client,
+    load_job_embedding_history,
+    save_job_embedding_history,
 )
 from pipeline.core_feedback_supabase import (
     RAG_FEEDBACK_THRESHOLD,
@@ -593,9 +599,20 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool):
         cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
         groq_key = os.environ.get("GROQ_API_KEY", "")
 
-        combined, _job_embeddings = attach_similarity(
+        combined, job_embeddings = attach_similarity(
             combined, user["cv_text"], gemini_embed_key
         )
+
+        # 4b. Semantic dedup — drop "same job reposted at a new URL" against this
+        # user's rolling 14-day embedding history (the multi-user analog of the
+        # legacy local cache; SupabaseJobTracker already handled exact-URL repeats).
+        history = load_job_embedding_history(user_id, client=client)
+        if history:
+            before = len(combined)
+            combined = drop_semantic_duplicates(combined, job_embeddings, history=history)
+            dropped = before - len(combined)
+            if dropped:
+                logger.info("User %s: semantic dedup dropped %d reposted job(s).", user_id, dropped)
 
         # 5. Split into AI-eval set + lower-ranked
         top_n = int(user.get("ai_eval_top_n") or AI_EVAL_TOP_N)
@@ -662,6 +679,16 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool):
                 logger.warning("User %s: Resend send failed — marking run success but email skipped.", user_id)
         elif dry_run:
             logger.info("User %s: --dry-run, email not sent.", user_id)
+
+        # Remember the embeddings of jobs that survived to delivery so the next
+        # run's semantic dedup has fresh history. Mirror scraper.py: only keep
+        # URLs that actually made it into the email (top + lower-ranked).
+        kept_urls = set(valid_top.get("job_url", pd.Series(dtype=str)).tolist())
+        if not lower_ranked.empty:
+            kept_urls |= set(lower_ranked.get("job_url", pd.Series(dtype=str)).tolist())
+        survivors = {u: v for u, v in job_embeddings.items() if u in kept_urls and v is not None}
+        if survivors:
+            save_job_embedding_history(user_id, survivors, client=client)
 
         _finalize_run(client, run_id, status="success", **stats)
         tracker.save()

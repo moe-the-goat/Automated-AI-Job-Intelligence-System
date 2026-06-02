@@ -166,3 +166,86 @@ class SupabaseJobTracker:
                 "SupabaseJobTracker.save FAILED for user %s (%d rows queued): %s",
                 self.user_id, len(rows), e,
             )
+
+
+# ---------------------------------------------------------------------------
+# Per-user job embedding history (semantic dedup — multi-user analog of
+# core_embedding's local embedding_history.json)
+# ---------------------------------------------------------------------------
+
+# Only compare against recent history — mirrors the legacy 14-day rolling cache.
+# Older reposts are no longer "the same job reposted", just normal churn.
+JOB_EMBEDDING_LOOKBACK_DAYS = 14
+
+
+def load_job_embedding_history(user_id: str, client=None) -> dict:
+    """Return {job_url: embedding_vector} of this user's recently-surfaced jobs.
+
+    Multi-user equivalent of core_embedding.load_embedding_history(): the rolling
+    window of prerank embeddings that drop_semantic_duplicates() compares new
+    jobs against. Reads only the last JOB_EMBEDDING_LOOKBACK_DAYS. Returns {} on
+    any error so dedup degrades to a no-op rather than crashing the run.
+    """
+    if not user_id:
+        return {}
+    client = client or get_service_client()
+    from datetime import datetime, timedelta, timezone
+
+    since = (
+        datetime.now(timezone.utc) - timedelta(days=JOB_EMBEDDING_LOOKBACK_DAYS)
+    ).isoformat()
+    try:
+        resp = (
+            client.table("job_embeddings")
+            .select("job_url, embedding")
+            .eq("user_id", user_id)
+            .gte("embedded_at", since)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning("load_job_embedding_history failed for %s: %s", user_id, e)
+        return {}
+
+    out = {}
+    for row in resp.data or []:
+        url = row.get("job_url")
+        vec = row.get("embedding")
+        if url and isinstance(vec, list) and vec:
+            out[url] = vec
+    return out
+
+
+def save_job_embedding_history(user_id: str, embeddings: dict, client=None) -> int:
+    """Upsert {job_url: embedding_vector} for this user. Returns rows written.
+
+    Called with the embeddings of jobs that survived to delivery, so next run's
+    dedup has fresh history. embedded_at refreshes on conflict so a re-surfaced
+    job stays inside the rolling window. Stored as a plain jsonb array (the
+    comparison is a Python cosine loop, not a pgvector query). Best-effort.
+    """
+    if not user_id or not embeddings:
+        return 0
+    client = client or get_service_client()
+    from datetime import datetime, timezone
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {"user_id": user_id, "job_url": url, "embedding": list(vec), "embedded_at": now_iso}
+        for url, vec in embeddings.items()
+        if url and vec is not None
+    ]
+    if not rows:
+        return 0
+    try:
+        # Chunk to keep the payload sane — vectors are large.
+        written = 0
+        for i in range(0, len(rows), 100):
+            client.table("job_embeddings").upsert(
+                rows[i:i + 100], on_conflict="user_id,job_url"
+            ).execute()
+            written += len(rows[i:i + 100])
+        logger.info("save_job_embedding_history: wrote %d embedding(s) for user %s.", written, user_id)
+        return written
+    except Exception as e:
+        logger.error("save_job_embedding_history failed for %s: %s", user_id, e)
+        return 0
