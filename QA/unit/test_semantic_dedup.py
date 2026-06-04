@@ -46,7 +46,13 @@ def test_save_and_load_roundtrip():
     tmp = "_test_emb_roundtrip.json"
     orig = _swap_cache_path(tmp)
     try:
-        history = {"https://co/job1": {"embedding": [0.1, 0.2, 0.3], "added_at": "2026-05-21T10:00:00+00:00"}}
+        # added_at MUST be relative to now, not a fixed date: save_embedding_history
+        # prunes anything older than EMBEDDING_HISTORY_TTL_DAYS, so a hardcoded
+        # timestamp silently ages out of the window and the round-trip starts
+        # returning {} (this exact bug broke the CI QA gate once the literal
+        # crossed the 14-day line).
+        fresh = datetime.now(tz=timezone.utc).isoformat()
+        history = {"https://co/job1": {"embedding": [0.1, 0.2, 0.3], "added_at": fresh}}
         save_embedding_history(history)
         loaded = load_embedding_history()
         assert loaded["https://co/job1"]["embedding"] == [0.1, 0.2, 0.3]
@@ -244,8 +250,11 @@ def test_injected_empty_history_is_noop():
 
 
 def test_injected_history_also_accepts_disk_shape():
-    # Tolerate the {"embedding": [...]} nested shape too, for safety.
+    # Tolerate the {"embedding": [...]} nested shape too, for safety. Timestamp
+    # is relative (drop_semantic_duplicates with injected history doesn't prune,
+    # but keep it now-relative so it can't become a time-bomb if that changes).
+    fresh = datetime.now(tz=timezone.utc).isoformat()
     df = pd.DataFrame([{"title": "Repost", "job_url": "https://new/url"}])
-    history = {"https://old/url": {"embedding": [1.0, 0.0], "added_at": "2026-05-01T00:00:00+00:00"}}
+    history = {"https://old/url": {"embedding": [1.0, 0.0], "added_at": fresh}}
     out = drop_semantic_duplicates(df, {"https://new/url": [1.0, 0.0]}, history=history)
     assert len(out) == 0
