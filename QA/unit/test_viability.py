@@ -75,10 +75,21 @@ def test_keeps_empty_description():
     assert ok is True
 
 
-def test_keeps_linkedin_post_with_short_body():
-    """LinkedIn-radar posts legitimately have hashtag-teaser bodies. Don't reject those."""
+def test_keeps_ddg_snippet_with_short_body():
+    """DDG-sourced local posts legitimately have hashtag-teaser bodies (tagged
+    source='ddg_*'). Don't reject those for being short."""
+    row = {"title": "We're hiring a React developer",
+           "source": "ddg_linkedin",
+           "description": "#hiring #python #react #developer #remote"}
+    ok, _ = quick_viability_check(row)
+    assert ok is True
+
+
+def test_keeps_legacy_linkedin_post_prefix():
+    """Backward-compat: the old 'LinkedIn Post:' title prefix still bypasses the
+    short-body check, in case any cached/old row carries it."""
     row = {"title": "LinkedIn Post: #hiring #python #react ...",
-           "description": "#hiring #python #python #react #developer #remote"}
+           "description": "#hiring #python #react #developer #remote"}
     ok, _ = quick_viability_check(row)
     assert ok is True
 

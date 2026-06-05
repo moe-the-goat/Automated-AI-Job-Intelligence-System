@@ -8,9 +8,9 @@ The AI's `get_full_job_description` URL-fetch fallback exists specifically to
 handle this case, but the pre-screen never let the job reach the AI.
 
 Fix: bypass the short-description rule when description is one of
-{"", "nan", "none", "null"} OR has fewer than 20 chars, OR is a LinkedIn-Post
-snippet (title starts with "LinkedIn Post:"), OR is the explicit
-"[NO DESCRIPTION]" / "[DESCRIPTION TRUNCATED]" placeholder.
+{"", "nan", "none", "null"} OR has fewer than 20 chars, OR is a DDG-sourced
+local snippet (source="ddg_*", or legacy "LinkedIn Post:" title prefix), OR is
+the explicit "[NO DESCRIPTION]" / "[DESCRIPTION TRUNCATED]" placeholder.
 """
 from pipeline.core_ai import quick_viability_check
 
@@ -54,10 +54,19 @@ def test_truncated_description_placeholder_passes():
     assert ok is True
 
 
-def test_linkedin_post_with_hashtag_only_body_passes():
-    """LinkedIn post snippets are legitimately short hashtag teasers."""
+def test_ddg_sourced_snippet_with_hashtag_body_passes():
+    """DDG-sourced local snippets (source='ddg_*') are legitimately short."""
+    row = {"title": "We're hiring a backend developer",
+           "source": "ddg_website",
+           "description": "#hiring #python #react #developer #remote"}
+    ok, _ = quick_viability_check(row)
+    assert ok is True
+
+
+def test_legacy_linkedin_post_prefix_still_passes():
+    """Backward-compat for any cached row still carrying the old title prefix."""
     row = {"title": "LinkedIn Post: #hiring #python #react ...",
-           "description": "#hiring #python #python #react #developer #remote"}
+           "description": "#hiring #python #react #developer #remote"}
     ok, _ = quick_viability_check(row)
     assert ok is True
 

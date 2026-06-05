@@ -64,6 +64,9 @@ from pipeline.core_feedback import (
     verify_logs_repo_access,
 )
 from pipeline.core_supabase import SupabaseConfigError, get_service_client
+# Canonical pgvector-literal formatter lives in core_feedback_supabase; re-export
+# under the historical name so this module (and its tests) keep one shared impl.
+from pipeline.core_feedback_supabase import to_pgvector_literal as vector_literal
 
 logger = get_logger(__name__)
 
@@ -110,20 +113,6 @@ def plan_inserts(log_entries: list, existing_rows: list) -> list:
             continue
         to_insert.append(i)
     return to_insert
-
-
-def vector_literal(vec) -> Optional[str]:
-    """Format a list of floats as a pgvector insert literal: '[0.1,0.2,...]'.
-
-    Returns None for a null/empty/non-list vector so the caller inserts the
-    feedback row without an embedding (the runner backfills it later).
-    """
-    if not isinstance(vec, list) or not vec:
-        return None
-    try:
-        return "[" + ",".join(repr(float(x)) for x in vec) + "]"
-    except (TypeError, ValueError):
-        return None
 
 
 def reputation_rows(rep: dict, added_by: Optional[str]) -> list:

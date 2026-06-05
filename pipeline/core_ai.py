@@ -526,16 +526,20 @@ def quick_viability_check(row):
     # "short" description doesn't actually mean "lazy repost":
     #   - Literally missing values from APIs (`nan` / `None` / `null` / empty / <20 chars)
     #     should pass through so `evaluate_job_with_ai`'s URL-fetch fallback can run.
-    #   - LinkedIn post snippets (from the local pipeline) are legitimately terse —
-    #     the title is prefixed with "LinkedIn Post:" and the body is a hashtag teaser.
+    #   - DDG-sourced snippets (from the local pipeline) are legitimately terse —
+    #     a LinkedIn/website hit's body is often just a hashtag teaser. These are
+    #     tagged source="ddg_*". (Historically detected via a "LinkedIn Post:"
+    #     title prefix, removed when local titles became real — the source tag is
+    #     the durable signal now.)
     #   - Truncated-by-authwall placeholders trigger the AI's Limited Info Protocol.
     is_missing = description_clean in ("", "nan", "none", "null") or len(description_clean) < 20
-    is_linkedin_post = title.startswith("linkedin post:")
+    source = str(row.get("source", "")).strip().lower()
+    is_ddg_snippet = source.startswith("ddg_") or title.startswith("linkedin post:")
     is_truncated_placeholder = (
         "[no description" in description or "[description truncated" in description
     )
 
-    if not (is_missing or is_linkedin_post or is_truncated_placeholder):
+    if not (is_missing or is_ddg_snippet or is_truncated_placeholder):
         if len(description_clean) < _MIN_DESCRIPTION_CHARS:
             return False, f"description too short ({len(description_clean)} chars)"
 
