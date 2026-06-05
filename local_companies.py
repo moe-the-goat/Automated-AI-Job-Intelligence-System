@@ -34,8 +34,10 @@ from pipeline.core_feedback import (
 )
 from pipeline.core_feedback_page import render_feedback_page, write_feedback_page
 
-# How far back the local pipeline will accept LinkedIn posts (matches the JobSpy 6-day window).
-LOCAL_LOOKBACK_DAYS = 6
+# How far back the local pipeline will accept LinkedIn posts (matches the JobSpy
+# 7-day window below). Wide on purpose — local postings are sparse, and the
+# seen_jobs tracker prevents the wider overlap from producing duplicate emails.
+LOCAL_LOOKBACK_DAYS = 7
 
 # LinkedIn activity IDs are snowflake-like: the top ~41 bits encode a UNIX timestamp
 # in MILLISECONDS (not seconds!). Right-shifting the 64-bit ID by 22 strips off the
@@ -333,7 +335,7 @@ def run_local_pipeline(tracker):
                 location="State of Palestine",
                 distance=100,
                 results_wanted=5,
-                hours_old=144 # 6 days
+                hours_old=LOCAL_LOOKBACK_DAYS * 24  # 7 days
             )
             for _, j_row in jobspy_res.iterrows():
                 # Make sure the company name roughly matches to avoid generic search results
