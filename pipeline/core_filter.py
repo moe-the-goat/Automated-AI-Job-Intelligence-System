@@ -203,13 +203,24 @@ def filter_api_jobs(df, hours_old):
         
     return df
 
-def apply_pipeline_filters(combined_jobs, tracker=None):
+def apply_pipeline_filters(combined_jobs, tracker=None, local=False):
     """
     The main gauntlet. Runs all the Tier 2 and Tier 3 deterministic filters
     to protect the AI from evaluating garbage data.
 
     If a JobTracker is passed in, previously-evaluated URLs are dropped first
     so we don't burn API quota re-evaluating them.
+
+    `local=True` switches to the lighter filter set used by local_companies.py.
+    The global firehose needs aggressive role/seniority/location filtering to
+    survive ~440 unvetted jobs/day. The local pipeline is different: every job
+    comes from a hand-curated list of Palestinian tech companies, so the company
+    is already pre-vetted. The aggressive global filters (role-keyword match on
+    title, seniority codes, non-Palestine location lock) wrongly nuked ~all local
+    jobs — e.g. the role-keyword step requires a tech keyword IN THE TITLE, which
+    dropped legitimate posts whose title didn't happen to contain one. In local
+    mode we keep only the universally-safe steps (seen-tracker, dedup, CJK +
+    non-English language, reputation flag) and let the AI verdict judge relevance.
     """
     if combined_jobs.empty:
         return combined_jobs
@@ -258,6 +269,12 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
         if dropped:
             logger.info("Language filter (description): dropped %d non-English descriptions.", dropped)
 
+    # Steps 4-7 are the AGGRESSIVE relevance filters. They protect the global
+    # firehose but wrongly gut the local pipeline (pre-vetted companies), so they
+    # are skipped entirely in local mode — the AI verdict handles relevance there.
+    if local:
+        return combined_jobs
+
     # 4. Location Pre-filter: Drop clearly location-locked jobs that don't say remote
     if "location" in combined_jobs.columns:
         explicit_non_remote = ['shanghai', 'beijing', 'mumbai', 'bangalore', 'moscow', 'tx', 'ca', 'ny', 'california', 'texas', 'new york', 'india', 'china', 'russia']
@@ -266,7 +283,7 @@ def apply_pipeline_filters(combined_jobs, tracker=None):
         remote_in_title = combined_jobs['title'].astype(str).str.lower().str.contains('remote')
         bad_loc = combined_jobs['location'].astype(str).str.lower().str.contains(pattern, na=False)
         combined_jobs = combined_jobs[~(bad_loc & ~remote_in_loc & ~remote_in_title)]
-        
+
     # 5. Filter out senior/lead roles by title — covers ordinary seniority words
     # AND company-internal level codes used by FAANG-style ladders.
     # Examples we want to catch:

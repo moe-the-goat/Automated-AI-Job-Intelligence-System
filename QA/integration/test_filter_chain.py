@@ -289,3 +289,65 @@ def test_filter_keeps_software_engineer_intern():
     df = _single_row_df("Software Engineer Intern")
     out = apply_pipeline_filters(df)
     assert len(out) == 1
+
+
+# ---------------------------------------------------------------------------
+# Local mode (local=True) — the lighter filter set for local_companies.py.
+# Pre-vetted Palestinian companies: skip the aggressive role/seniority/location
+# steps (the AI verdict judges relevance), keep the universally-safe ones.
+# ---------------------------------------------------------------------------
+
+def test_local_keeps_job_without_tech_keyword_in_title():
+    """A real post whose title lacks a tech keyword is DROPPED globally (step 6)
+    but KEPT in local mode — this was the bug that zeroed the local pipeline."""
+    df = _single_row_df("We're hiring! Join our growing team")
+    assert len(apply_pipeline_filters(df, local=False)) == 0
+    assert len(apply_pipeline_filters(df, local=True)) == 1
+
+
+def test_local_keeps_senior_titles():
+    """Seniority filter is global-only; a small local shop's 'Senior' role is
+    still worth surfacing to the AI."""
+    df = _single_row_df("Senior Backend Engineer")
+    assert len(apply_pipeline_filters(df, local=False)) == 0
+    assert len(apply_pipeline_filters(df, local=True)) == 1
+
+
+def test_local_keeps_india_location_lock():
+    """Location lock is global-only. 'India' is in the global block list and a
+    title without 'remote' is dropped globally — local mode keeps it (it never
+    runs the location step)."""
+    df = _single_row_df("Software Engineer", location="Bangalore, India")
+    assert len(apply_pipeline_filters(df, local=False)) == 0
+    assert len(apply_pipeline_filters(df, local=True)) == 1
+
+
+def test_local_still_drops_cjk_titles():
+    """Universally-safe steps still run in local mode: a CJK title is dropped."""
+    df = _single_row_df("ソフトウェアエンジニア")
+    assert len(apply_pipeline_filters(df, local=True)) == 0
+
+
+def test_local_still_dedups_url_collisions():
+    """URL dedup still runs in local mode."""
+    import pandas as pd
+    base = {
+        "title": "Backend Developer", "company": "PalCo", "location": "Ramallah",
+        "job_url": "https://palco.ps/jobs/1", "description": "x" * 60, "date_posted": "",
+    }
+    df = pd.DataFrame([base, dict(base)])  # identical URL twice
+    out = apply_pipeline_filters(df, local=True)
+    assert len(out) == 1
+
+
+def test_local_still_flags_reputation_without_dropping():
+    """Reputation flagging (not dropping) still applies in local mode."""
+    df = _single_row_df("Web Developer", company="Skillfied Mentor")
+    out = apply_pipeline_filters(df, local=True)
+    assert len(out) == 1
+    assert bool(out.iloc[0]["pre_flagged_low_quality"]) is True
+
+
+def test_local_empty_dataframe():
+    import pandas as pd
+    assert apply_pipeline_filters(pd.DataFrame(), local=True).empty

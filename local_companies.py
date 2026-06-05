@@ -136,12 +136,16 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
                 continue
 
             jobs_found.append({
-                "title": "LinkedIn Post: " + title[:50] + "...",
+                # Use the real post title (not a "LinkedIn Post: ..." prefix) so
+                # dedup + the AI verdict see genuine text. `source` tags the
+                # provenance for the ghost-listing HEAD-probe below.
+                "title": title[:120] if title else f"{company_name} — LinkedIn hiring post",
                 "company": company_name,
                 "location": "Local/Remote",
                 "job_url": link,
                 "description": body,
-                "job_type": "fulltime"
+                "job_type": "fulltime",
+                "source": "ddg_linkedin",
             })
     except Exception as e:
         logger.warning("DDG LinkedIn search failed for %s: %s", company_name, e)
@@ -168,12 +172,13 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
                     continue
 
                 jobs_found.append({
-                    "title": "Website Job: " + title[:50] + "...",
+                    "title": title[:120] if title else f"{company_name} — careers page listing",
                     "company": company_name,
                     "location": "Local/Remote",
                     "job_url": link,
                     "description": body,
-                    "job_type": "fulltime"
+                    "job_type": "fulltime",
+                    "source": "ddg_website",
                 })
         except Exception as e:
             logger.warning("DDG Website search failed for %s: %s", company_name, e)
@@ -349,11 +354,12 @@ def run_local_pipeline(tracker):
     # (those came from live endpoints, no need to verify) and JobSpy (which
     # already filters by hours_old). The probe is concurrent so 30 URLs take
     # ~1.5s instead of 30s.
-    ddg_urls = [
-        j.get("job_url") for j in all_raw_jobs
-        if str(j.get("title", "")).startswith(("LinkedIn Post:", "Website Job:"))
-        and j.get("job_url")
-    ]
+    # DDG-sourced rows are tagged source="ddg_linkedin"/"ddg_website"; ATS and
+    # JobSpy rows have no such tag (live endpoints / already recency-filtered).
+    def _is_ddg(j):
+        return str(j.get("source", "")).startswith("ddg_")
+
+    ddg_urls = [j.get("job_url") for j in all_raw_jobs if _is_ddg(j) and j.get("job_url")]
     if ddg_urls:
         unique_urls = list(set(ddg_urls))
         logger.info("Verifying %d DDG-sourced URL(s) via HEAD probe...", len(unique_urls))
@@ -361,7 +367,7 @@ def run_local_pipeline(tracker):
         before = len(all_raw_jobs)
         all_raw_jobs = [
             j for j in all_raw_jobs
-            if not str(j.get("title", "")).startswith(("LinkedIn Post:", "Website Job:"))
+            if not _is_ddg(j)
             or alive_map.get(j.get("job_url"), True)        # default True so unprobed entries stay
         ]
         dropped = before - len(all_raw_jobs)
@@ -376,8 +382,12 @@ def run_local_pipeline(tracker):
     stats['scraped'] = len(combined_jobs)
     logger.info("Total raw jobs found: %d", stats['scraped'])
     
-    # 2. Filter Jobs (tracker drops previously-seen URLs first)
-    combined_jobs = apply_pipeline_filters(combined_jobs, tracker=tracker)
+    # 2. Filter Jobs (tracker drops previously-seen URLs first).
+    # local=True uses the lighter filter set: these companies are pre-vetted, so
+    # we skip the aggressive global role/seniority/location filters and let the
+    # AI verdict judge relevance. (The aggressive set was dropping ~every local
+    # job — e.g. the role-keyword-in-title step.)
+    combined_jobs = apply_pipeline_filters(combined_jobs, tracker=tracker, local=True)
     stats['filtered'] = len(combined_jobs)
     logger.info("Total jobs surviving pre-filters: %d", stats['filtered'])
     
