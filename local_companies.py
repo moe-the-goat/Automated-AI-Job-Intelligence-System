@@ -39,6 +39,21 @@ from pipeline.core_feedback_page import render_feedback_page, write_feedback_pag
 # seen_jobs tracker prevents the wider overlap from producing duplicate emails.
 LOCAL_LOOKBACK_DAYS = 7
 
+# Option B: location-based Palestine sweeps. The per-company JobSpy loop only
+# catches jobs whose posted company name matches our Excel list. These broad
+# location searches catch ANY tech job posted in Palestine on the LinkedIn Jobs
+# board — including good companies that aren't (yet) on our sheet. seen_jobs +
+# title/URL dedup keep this from duplicating the per-company hits.
+LOCAL_AREA_SEARCHES = [
+    "software engineer",
+    "software developer",
+    "web developer",
+    "mobile developer",
+    "data analyst",
+    "AI engineer",
+]
+LOCAL_AREA_RESULTS_WANTED = 25
+
 # LinkedIn activity IDs are snowflake-like: the top ~41 bits encode a UNIX timestamp
 # in MILLISECONDS (not seconds!). Right-shifting the 64-bit ID by 22 strips off the
 # low sequence/counter bits and yields a millisecond timestamp.
@@ -98,15 +113,18 @@ def extract_domain(url):
         return ""
 
 def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
-    """Uses DuckDuckGo to search for recent job posts on LinkedIn and the company website.
+    """Search for recent job posts on LinkedIn and the company website.
 
-    When `linkedin_handle` is provided (extracted from the Excel-sheet LinkedIn URL),
-    the LinkedIn search becomes a precise site:linkedin.com/company/{handle}/posts
-    query — far less noise than the old first-word-of-company-name approach.
+    Uses `web_search` (Google Programmable Search when configured, else DuckDuckGo)
+    so the local pipeline isn't reliant on IP-blockable search scraping. When
+    `linkedin_handle` is provided (from the Excel LinkedIn URL), the LinkedIn
+    query is the precise site:linkedin.com/company/{handle}/posts form.
+
+    Name kept as `ddg_search_for_jobs` for call-site stability; the provider is
+    now abstracted behind core_websearch.web_search.
     """
-    from ddgs import DDGS  # lazy import — see top-of-file comment
+    from pipeline.core_websearch import web_search
     jobs_found = []
-    ddgs = DDGS()
 
     short_name = company_name.split()[0] if len(company_name.split()) > 0 else company_name
 
@@ -118,7 +136,7 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
         else:
             q1 = f'site:linkedin.com/posts {short_name} (hiring OR vacancy OR "looking for" OR job)'
             logger.info("Searching LinkedIn Posts for: %s (using '%s')...", company_name, short_name)
-        res1 = ddgs.text(q1, max_results=3, timelimit="w") # past week
+        res1 = web_search(q1, max_results=3, timelimit="w")  # past week (DDG fallback only)
         cutoff = datetime.now(timezone.utc) - timedelta(days=LOCAL_LOOKBACK_DAYS)
         for r in res1:
             title = r.get('title', '')
@@ -157,7 +175,7 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
         try:
             q2 = f'site:{domain} (hiring OR careers OR jobs OR vacancy)'
             logger.info("Searching Website (%s) for: %s...", domain, company_name)
-            res2 = ddgs.text(q2, max_results=3, timelimit="w") # past week
+            res2 = web_search(q2, max_results=3, timelimit="w")  # past week (DDG fallback only)
             for r in res2:
                 title = r.get('title', '')
                 body = r.get('body', '')
@@ -344,6 +362,36 @@ def run_local_pipeline(tracker):
                     all_raw_jobs.append(j_row.to_dict())
         except Exception as e:
             logger.warning("JobSpy failed for %s: %s", company_name, e)
+
+    # Option B: broad location-based Palestine sweeps. Unlike the per-company
+    # loop above, these don't filter by company name — they pull every tech job
+    # posted in Palestine on the LinkedIn Jobs board, surfacing good companies
+    # not on our Excel sheet. Tagged source="jobspy_area" for traceability.
+    # seen_jobs + dedup prevent overlap with the per-company hits.
+    try:
+        from jobspy import scrape_jobs  # lazy import (already imported above on success paths)
+        for term in LOCAL_AREA_SEARCHES:
+            logger.info("Running Palestine-area JobSpy for: %s...", term)
+            try:
+                area_res = scrape_jobs(
+                    site_name=["linkedin"],
+                    search_term=term,
+                    location="State of Palestine",
+                    distance=100,
+                    results_wanted=LOCAL_AREA_RESULTS_WANTED,
+                    hours_old=LOCAL_LOOKBACK_DAYS * 24,
+                )
+                added = 0
+                for _, j_row in area_res.iterrows():
+                    job = j_row.to_dict()
+                    job["source"] = "jobspy_area"
+                    all_raw_jobs.append(job)
+                    added += 1
+                logger.info("Palestine-area '%s': %d job(s).", term, added)
+            except Exception as e:
+                logger.warning("Palestine-area JobSpy failed for '%s': %s", term, e)
+    except Exception as e:
+        logger.warning("Palestine-area sweep unavailable (jobspy import failed): %s", e)
 
     # Persist ATS cache for future runs (so re-detection is rare).
     ats_cache.save()
