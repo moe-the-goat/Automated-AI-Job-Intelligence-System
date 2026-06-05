@@ -59,6 +59,28 @@ def sort_by_match_percentage(df):
     df = df.drop(columns=['_sort_pct', '_sort_tech'])
     return df
 
+
+# Top-section display floor: jobs the AI scored below this are dropped from the
+# main email tables. They cleared validation (is_valid=True) but are weak fits —
+# showing them just pads the email with noise. Overridable via the
+# MATCH_DISPLAY_THRESHOLD env var. The "Also Found" lower-ranked section is
+# unaffected; it has its own purpose (sub-AI-cutoff jobs).
+MATCH_DISPLAY_THRESHOLD = int(os.environ.get("MATCH_DISPLAY_THRESHOLD", "55"))
+
+
+def filter_by_match_threshold(df, threshold=MATCH_DISPLAY_THRESHOLD):
+    """Drop rows whose match_percentage is below `threshold`.
+
+    Rows with a non-numeric / 'N/A' match are KEPT (we don't silently hide a job
+    just because the AI couldn't put a number on it). Empty frames pass through.
+    """
+    if df is None or df.empty or "match_percentage" not in df.columns:
+        return df
+    pct = pd.to_numeric(df['match_percentage'].replace('N/A', -1), errors='coerce')
+    # Keep: at/above threshold, OR unscored (-1/NaN -> treat as keep, not hide).
+    keep = pct.isna() | (pct < 0) | (pct >= threshold)
+    return df[keep].reset_index(drop=True)
+
 def _match_pct_badge_html(pct):
     """Color-coded inline pill badge for an integer match percentage.
 
@@ -351,6 +373,10 @@ def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None):
     """
     internships_df = sort_by_match_percentage(internships_df.copy() if not internships_df.empty else pd.DataFrame())
     jobs_df = sort_by_match_percentage(jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
+    # Drop weak fits below the display floor — keeps the email focused on jobs
+    # actually worth scanning.
+    internships_df = filter_by_match_threshold(internships_df)
+    jobs_df = filter_by_match_threshold(jobs_df)
 
     html = "<h2>Automated AI Job Alerts</h2>"
     html += _feedback_link_html()
@@ -446,6 +472,9 @@ def format_github_markdown(internships_df, jobs_df, stats, lower_ranked_df=None)
     """Generates Markdown formatting for a GitHub Issue payload."""
     internships_df = sort_by_match_percentage(internships_df.copy() if not internships_df.empty else pd.DataFrame())
     jobs_df = sort_by_match_percentage(jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
+    # Same display floor as the email — keep both outputs consistent.
+    internships_df = filter_by_match_threshold(internships_df)
+    jobs_df = filter_by_match_threshold(jobs_df)
 
     md = "## Automated AI Job Alerts\n\n"
     md += _feedback_link_md()

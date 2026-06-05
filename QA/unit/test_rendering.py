@@ -2,6 +2,7 @@
 import pandas as pd
 from pipeline.core_notify import (
     sort_by_match_percentage,
+    filter_by_match_threshold,
     _fmt_match_cell_html,
     _fmt_match_cell_md,
     _suspicious_title,
@@ -10,6 +11,38 @@ from pipeline.core_notify import (
     _bolden_verdict_html,
     _bolden_verdict_md,
 )
+
+
+# --- Display-floor filter (drops weak fits below the threshold) ---
+
+def test_filter_threshold_drops_below_and_keeps_at_or_above():
+    df = pd.DataFrame([
+        {"title": "Strong", "match_percentage": 88},
+        {"title": "At floor", "match_percentage": 55},
+        {"title": "Weak", "match_percentage": 42},
+    ])
+    out = filter_by_match_threshold(df, threshold=55)
+    titles = set(out["title"])
+    assert "Strong" in titles and "At floor" in titles
+    assert "Weak" not in titles
+
+
+def test_filter_threshold_keeps_unscored_jobs():
+    # N/A / unscored jobs must NOT be silently hidden.
+    df = pd.DataFrame([
+        {"title": "Scored low", "match_percentage": 30},
+        {"title": "Unscored", "match_percentage": "N/A"},
+    ])
+    out = filter_by_match_threshold(df, threshold=55)
+    titles = set(out["title"])
+    assert "Unscored" in titles
+    assert "Scored low" not in titles
+
+
+def test_filter_threshold_empty_and_missing_column():
+    assert filter_by_match_threshold(pd.DataFrame()).empty
+    df = pd.DataFrame([{"title": "no pct column"}])
+    assert len(filter_by_match_threshold(df)) == 1
 
 
 # --- Match cell formatting (HTML) — now renders a color-coded badge ---
