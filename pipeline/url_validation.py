@@ -130,6 +130,40 @@ def is_job_url_like(url):
     return bool(_JOB_PATH_SIGNAL_RE.search(url))
 
 
+# A bare careers LANDING page: the job segment is the last meaningful path part,
+# with nothing specific after it. e.g. /careers, /careers/, /jobs, /job/,
+# /work-with-us/. These point at a list, not a posting — the link "doesn't reach
+# the position". A real detail page has a slug or id after the segment:
+# /jobs/backend-engineer-123, /careers/senior-dev.
+_CAREERS_LANDING_RE = re.compile(
+    r"/(?:jobs?|careers?|positions?|vacanc[yi]e?s?|openings?|roles?|"
+    r"employment|work-with-us|join-us)/?$",
+    re.IGNORECASE,
+)
+
+
+def is_specific_job_url_like(url):
+    """Stricter form of is_job_url_like for undated DDG-website results.
+
+    Requires a real job-DETAIL URL: passes is_job_url_like AND is not a bare
+    careers landing page (which lists jobs but isn't one). This stops generic
+    "Careers - <Company>" links that don't open a specific position.
+
+    Pure function — no network.
+    """
+    if not is_job_url_like(url):
+        return False
+    try:
+        from urllib.parse import urlsplit
+        path = urlsplit(url).path or ""
+    except ValueError:
+        path = url
+    # Reject when the path ENDS at the job segment (landing page, no detail slug).
+    if _CAREERS_LANDING_RE.search(path):
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # HEAD probe (network, optional)
 # ---------------------------------------------------------------------------

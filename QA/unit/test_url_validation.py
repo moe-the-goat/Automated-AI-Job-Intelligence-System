@@ -5,9 +5,44 @@ listings that DDG/Bing index for weeks after a company removes a posting.
 """
 from pipeline.url_validation import (
     is_job_url_like,
+    is_specific_job_url_like,
     probe_url_alive,
     probe_urls_alive_batch,
 )
+
+
+# ---------------------------------------------------------------------------
+# is_specific_job_url_like — must reject bare careers LANDING pages (the
+# "link doesn't reach the position" problem) while keeping real detail URLs.
+# ---------------------------------------------------------------------------
+
+def test_specific_accepts_real_detail_urls():
+    assert is_specific_job_url_like("https://boards.greenhouse.io/asaltech/jobs/12345")
+    assert is_specific_job_url_like("https://acme.com/careers/senior-backend-engineer")
+    assert is_specific_job_url_like("https://acme.com/jobs/ml-intern-2026")
+    assert is_specific_job_url_like("https://innotech.factorialhr.com/job_posting/devops-20937")
+
+
+def test_specific_rejects_bare_careers_landing_pages():
+    # These list jobs but aren't a posting — the generic "Careers - <Co>" links.
+    for u in [
+        "https://ggateway.tech/careers",
+        "https://ggateway.tech/careers/",
+        "https://acme.com/jobs",
+        "https://acme.com/jobs/",
+        "https://acme.com/job/",
+        "https://acme.com/vacancies/",
+        "https://acme.com/work-with-us/",
+        "https://acme.com/join-us",
+    ]:
+        assert is_specific_job_url_like(u) is False, u
+
+
+def test_specific_rejects_what_is_job_url_like_already_rejects():
+    assert is_specific_job_url_like("https://acme.com/") is False
+    assert is_specific_job_url_like("https://acme.com/blog/hiring-tips") is False
+    assert is_specific_job_url_like("") is False
+    assert is_specific_job_url_like(None) is False
 
 
 # ---------------------------------------------------------------------------

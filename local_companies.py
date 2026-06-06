@@ -20,7 +20,7 @@ from pipeline.core_ats import (
     get_jobs_for_company as get_ats_jobs,
     AtsCache,
 )
-from pipeline.url_validation import is_job_url_like, probe_urls_alive_batch
+from pipeline.url_validation import is_job_url_like, is_specific_job_url_like, probe_urls_alive_batch
 from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 from pipeline.core_embedding import retrieve_relevant_feedback, attach_similarity
 from pipeline.core_feedback import (
@@ -143,10 +143,17 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
             body = r.get('body', '')
             link = r.get('href', '')
 
-            # DDG's `timelimit` is unreliable for LinkedIn — re-verify the post date
-            # from the activity ID itself and drop anything older than the lookback window.
+            # Require a REAL, DATEABLE post. A LinkedIn hit with no decodable
+            # activity-<id> is a generic company/careers page (e.g.
+            # "Careers - GGateway"), not a dated job post — including it produced
+            # the stale, generic "link doesn't reach the position" results. So:
+            #   - no activity id  -> skip (can't date it; it's not a post)
+            #   - older than the lookback window -> skip
             post_date = linkedin_post_date(link)
-            if post_date and post_date < cutoff:
+            if post_date is None:
+                logger.info("Skipping non-post LinkedIn URL for %s: %s", company_name, link[:80])
+                continue
+            if post_date < cutoff:
                 logger.info("Skipping old post for %s: posted %s", company_name, post_date.date())
                 continue
             # Drop unrelated companies that match only because the first word is generic
@@ -181,14 +188,15 @@ def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
                 body = r.get('body', '')
                 link = r.get('href', '')
 
-                # URL-pattern check: a result for `site:freightos.com (hiring
-                # OR careers OR jobs OR vacancy)` once matched the URL
-                # /freight-industry-updates/market-updates/the-data-behind-
-                # amazons-logistics-and-fulfillment-play/ — a blog post about
-                # logistics, not a job. is_job_url_like requires the path to
-                # look like an actual job-posting page.
-                if not is_job_url_like(link):
-                    logger.info("Skipping non-job URL for %s: %s", company_name, link[:80])
+                # URL check: require a SPECIFIC job-detail URL, not a bare
+                # careers landing page. is_specific_job_url_like rejects both
+                # blog/marketing pages (e.g. a logistics article matched on
+                # "logistics") AND generic "/careers" landing pages that don't
+                # open an actual position — the "link doesn't reach the job"
+                # problem. Undated DDG-website pages with no detail slug are the
+                # main source of stale, generic results, so we drop them here.
+                if not is_specific_job_url_like(link):
+                    logger.info("Skipping non-specific URL for %s: %s", company_name, link[:80])
                     continue
 
                 jobs_found.append({
