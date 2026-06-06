@@ -54,6 +54,14 @@ LOCAL_AREA_SEARCHES = [
 ]
 LOCAL_AREA_RESULTS_WANTED = 25
 
+# Public Telegram job channels (read via their t.me/s/<handle> web preview — no
+# login/token needed). These are a high-yield local-jobs source. Add handles
+# here as you find more public channels. Posts run through the LOCAL filter path
+# (Arabic-safe) + the AI verdict.
+TELEGRAM_JOB_CHANNELS = [
+    "fromcodetocareer",
+]
+
 # LinkedIn activity IDs are snowflake-like: the top ~41 bits encode a UNIX timestamp
 # in MILLISECONDS (not seconds!). Right-shifting the 64-bit ID by 22 strips off the
 # low sequence/counter bits and yields a millisecond timestamp.
@@ -392,6 +400,19 @@ def run_local_pipeline(tracker):
                 logger.warning("Palestine-area JobSpy failed for '%s': %s", term, e)
     except Exception as e:
         logger.warning("Palestine-area sweep unavailable (jobspy import failed): %s", e)
+
+    # Public Telegram job channels — high-yield local source, read via the
+    # t.me/s/<handle> web preview (no login/token). Tagged source="telegram";
+    # runs through the same local filter + AI verdict as everything else.
+    if TELEGRAM_JOB_CHANNELS:
+        try:
+            from pipeline.core_telegram import fetch_telegram_jobs
+            tg_jobs = fetch_telegram_jobs(TELEGRAM_JOB_CHANNELS, lookback_days=LOCAL_LOOKBACK_DAYS)
+            if tg_jobs:
+                logger.info("Telegram channels contributed %d post(s) this run.", len(tg_jobs))
+                all_raw_jobs.extend(tg_jobs)
+        except Exception as e:
+            logger.warning("Telegram sweep failed: %s", e)
 
     # Persist ATS cache for future runs (so re-detection is rare).
     ats_cache.save()
