@@ -77,7 +77,25 @@ jobs:
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add data/reputation.json
+        [ -f data/reputation.json ] && git add data/reputation.json || true
         [ -f docs/feedback_local.html ] && git add docs/feedback_local.html || true
-        git diff --staged --quiet || git commit -m "Updated local feedback page and reputation list from daily run"
-        git push
+        # Nothing changed? Done.
+        if git diff --staged --quiet; then
+          echo "No changes to commit."
+          exit 0
+        fi
+        git commit -m "Updated local feedback page and reputation list from daily run"
+        # The run takes ~20-75 min, during which the remote often moves ahead
+        # (daily bot commits, manual pushes). A bare `git push` then fails with
+        # "fetch first" and marks the whole job red even though the pipeline
+        # succeeded and the email was sent. Rebase onto the latest remote and
+        # retry a few times so a concurrent push doesn't fail the run.
+        for attempt in 1 2 3; do
+          if git push; then
+            echo "Pushed on attempt $attempt."
+            exit 0
+          fi
+          echo "Push rejected (attempt $attempt) — rebasing on origin/main and retrying."
+          git pull --rebase origin main || true
+        done
+        echo "::warning::Could not push feedback-page/reputation update after 3 attempts (non-fatal)."

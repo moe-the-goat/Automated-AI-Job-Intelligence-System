@@ -76,5 +76,20 @@ jobs:
         git config user.email "github-actions[bot]@users.noreply.github.com"
         [ -f data/reputation.json ] && git add data/reputation.json || true
         [ -f docs/feedback_global.html ] && git add docs/feedback_global.html || true
-        git diff --staged --quiet || git commit -m "Updated feedback page and reputation list from daily run"
-        git push
+        if git diff --staged --quiet; then
+          echo "No changes to commit."
+          exit 0
+        fi
+        git commit -m "Updated feedback page and reputation list from daily run"
+        # Rebase-and-retry: the run is long, so the remote often moves ahead
+        # (bot commits, manual pushes). A bare push then fails "fetch first" and
+        # marks the job red even though the email was sent. See local_companies.yml.
+        for attempt in 1 2 3; do
+          if git push; then
+            echo "Pushed on attempt $attempt."
+            exit 0
+          fi
+          echo "Push rejected (attempt $attempt) — rebasing on origin/main and retrying."
+          git pull --rebase origin main || true
+        done
+        echo "::warning::Could not push feedback-page/reputation update after 3 attempts (non-fatal)."
