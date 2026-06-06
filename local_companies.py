@@ -39,21 +39,6 @@ from pipeline.core_feedback_page import render_feedback_page, write_feedback_pag
 # seen_jobs tracker prevents the wider overlap from producing duplicate emails.
 LOCAL_LOOKBACK_DAYS = 7
 
-# Option B: location-based Palestine sweeps. The per-company JobSpy loop only
-# catches jobs whose posted company name matches our Excel list. These broad
-# location searches catch ANY tech job posted in Palestine on the LinkedIn Jobs
-# board — including good companies that aren't (yet) on our sheet. seen_jobs +
-# title/URL dedup keep this from duplicating the per-company hits.
-LOCAL_AREA_SEARCHES = [
-    "software engineer",
-    "software developer",
-    "web developer",
-    "mobile developer",
-    "data analyst",
-    "AI engineer",
-]
-LOCAL_AREA_RESULTS_WANTED = 25
-
 # Public Telegram job channels (read via their t.me/s/<handle> web preview — no
 # login/token needed). These are a high-yield local-jobs source. Add handles
 # here as you find more public channels. Posts run through the LOCAL filter path
@@ -115,38 +100,6 @@ This script runs on a separate schedule (every 2 days) to hunt for jobs from
 specific local Palestinian IT companies. It uses DuckDuckGo to bypass LinkedIn 
 login walls and search company posts directly, as well as scraping their custom websites.
 """
-
-# Location guard for the Option-B area sweep. JobSpy, when LinkedIn has few
-# results for a low-supply location like Palestine, falls back to returning
-# loosely-related GLOBAL jobs (we saw a flood of Indiana/US roles). The per-
-# company loop is protected by a company-name match; the broad area sweep is
-# not, so we filter its results to jobs that are actually in Palestine OR
-# genuinely remote. Anything explicitly tied to another country is dropped.
-_PALESTINE_LOC_TOKENS = (
-    "palestin", "ramallah", "nablus", "gaza", "hebron", "bethlehem", "jenin",
-    "tulkarm", "jericho", "west bank", "birzeit", "al-bireh", "albireh",
-)
-_REMOTE_LOC_TOKENS = ("remote", "anywhere", "worldwide", "global")
-
-
-def is_palestine_or_remote(location, title="") -> bool:
-    """True if a job looks Palestine-based or genuinely remote.
-
-    Used to gate the broad area sweep. Empty/unknown location is treated as
-    acceptable (kept) — better to let the AI judge an unlabeled local-board job
-    than to silently drop it; the flood we fix is jobs EXPLICITLY in another
-    country (e.g. 'Indianapolis, IN', 'Indiana, United States').
-    """
-    loc = str(location or "").strip().lower()
-    ttl = str(title or "").strip().lower()
-    if not loc or loc == "nan":
-        return True  # unknown — let the AI decide
-    if any(tok in loc for tok in _PALESTINE_LOC_TOKENS):
-        return True
-    if any(tok in loc for tok in _REMOTE_LOC_TOKENS) or "remote" in ttl:
-        return True
-    return False  # explicitly some other place — drop
-
 
 def extract_domain(url):
     """Extracts the base domain from a URL (e.g. https://www.company.com/jobs -> company.com)"""
@@ -410,42 +363,13 @@ def run_local_pipeline(tracker):
         except Exception as e:
             logger.warning("JobSpy failed for %s: %s", company_name, e)
 
-    # Option B: broad location-based Palestine sweeps. Unlike the per-company
-    # loop above, these don't filter by company name — they pull every tech job
-    # posted in Palestine on the LinkedIn Jobs board, surfacing good companies
-    # not on our Excel sheet. Tagged source="jobspy_area" for traceability.
-    # seen_jobs + dedup prevent overlap with the per-company hits.
-    try:
-        from jobspy import scrape_jobs  # lazy import (already imported above on success paths)
-        for term in LOCAL_AREA_SEARCHES:
-            logger.info("Running Palestine-area JobSpy for: %s...", term)
-            try:
-                area_res = scrape_jobs(
-                    site_name=["linkedin"],
-                    search_term=term,
-                    location="State of Palestine",
-                    distance=100,
-                    results_wanted=LOCAL_AREA_RESULTS_WANTED,
-                    hours_old=LOCAL_LOOKBACK_DAYS * 24,
-                )
-                added = 0
-                skipped_geo = 0
-                for _, j_row in area_res.iterrows():
-                    job = j_row.to_dict()
-                    # Drop JobSpy's global fallback results — keep only Palestine
-                    # or genuinely-remote jobs (see is_palestine_or_remote).
-                    if not is_palestine_or_remote(job.get("location"), job.get("title")):
-                        skipped_geo += 1
-                        continue
-                    job["source"] = "jobspy_area"
-                    all_raw_jobs.append(job)
-                    added += 1
-                logger.info("Palestine-area '%s': %d kept, %d off-location dropped.",
-                            term, added, skipped_geo)
-            except Exception as e:
-                logger.warning("Palestine-area JobSpy failed for '%s': %s", term, e)
-    except Exception as e:
-        logger.warning("Palestine-area sweep unavailable (jobspy import failed): %s", e)
+    # NOTE: the broad "Palestine-area" JobSpy sweep (formerly "Option B") was
+    # removed 2026-06-06. On a low-supply location like Palestine, JobSpy fell
+    # back to GLOBAL jobs — one run dropped 98 off-location results to keep ~17,
+    # and the kept ones (empty location field) were foreign companies (Salesforce,
+    # Roche, Midcontinent) that polluted the local email. The genuinely-local
+    # jobs all come from the per-company ATS/DDG/JobSpy paths + Telegram + jobs.ps,
+    # so the sweep was net-negative noise. Removed for result consistency.
 
     # Public Telegram job channels — high-yield local source, read via the
     # t.me/s/<handle> web preview (no login/token). Tagged source="telegram";
