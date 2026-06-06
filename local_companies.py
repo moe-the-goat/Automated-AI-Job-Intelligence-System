@@ -22,7 +22,7 @@ from pipeline.core_ats import (
 )
 from pipeline.url_validation import is_job_url_like, probe_urls_alive_batch
 from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
-from pipeline.core_embedding import retrieve_relevant_feedback
+from pipeline.core_embedding import retrieve_relevant_feedback, attach_similarity
 from pipeline.core_feedback import (
     ingest_pending_feedback,
     load_candidate_preferences,
@@ -61,6 +61,13 @@ LOCAL_AREA_RESULTS_WANTED = 25
 TELEGRAM_JOB_CHANNELS = [
     "fromcodetocareer",
 ]
+
+# Cap on how many local jobs reach the AI per run. With 5 sources the filtered
+# set can balloon (one run hit 105), making the AI step slow + quota-heavy. We
+# rank survivors by CV-embedding similarity and evaluate only the top N; the
+# rest are deferred to a future run (seen_jobs keeps them from being lost — they
+# re-surface and get ranked again next time). Mirrors scraper.py's AI_EVAL_TOP_N.
+LOCAL_AI_EVAL_TOP_N = 40
 
 # LinkedIn activity IDs are snowflake-like: the top ~41 bits encode a UNIX timestamp
 # in MILLISECONDS (not seconds!). Right-shifting the 64-bit ID by 22 strips off the
@@ -108,6 +115,38 @@ This script runs on a separate schedule (every 2 days) to hunt for jobs from
 specific local Palestinian IT companies. It uses DuckDuckGo to bypass LinkedIn 
 login walls and search company posts directly, as well as scraping their custom websites.
 """
+
+# Location guard for the Option-B area sweep. JobSpy, when LinkedIn has few
+# results for a low-supply location like Palestine, falls back to returning
+# loosely-related GLOBAL jobs (we saw a flood of Indiana/US roles). The per-
+# company loop is protected by a company-name match; the broad area sweep is
+# not, so we filter its results to jobs that are actually in Palestine OR
+# genuinely remote. Anything explicitly tied to another country is dropped.
+_PALESTINE_LOC_TOKENS = (
+    "palestin", "ramallah", "nablus", "gaza", "hebron", "bethlehem", "jenin",
+    "tulkarm", "jericho", "west bank", "birzeit", "al-bireh", "albireh",
+)
+_REMOTE_LOC_TOKENS = ("remote", "anywhere", "worldwide", "global")
+
+
+def is_palestine_or_remote(location, title="") -> bool:
+    """True if a job looks Palestine-based or genuinely remote.
+
+    Used to gate the broad area sweep. Empty/unknown location is treated as
+    acceptable (kept) — better to let the AI judge an unlabeled local-board job
+    than to silently drop it; the flood we fix is jobs EXPLICITLY in another
+    country (e.g. 'Indianapolis, IN', 'Indiana, United States').
+    """
+    loc = str(location or "").strip().lower()
+    ttl = str(title or "").strip().lower()
+    if not loc or loc == "nan":
+        return True  # unknown — let the AI decide
+    if any(tok in loc for tok in _PALESTINE_LOC_TOKENS):
+        return True
+    if any(tok in loc for tok in _REMOTE_LOC_TOKENS) or "remote" in ttl:
+        return True
+    return False  # explicitly some other place — drop
+
 
 def extract_domain(url):
     """Extracts the base domain from a URL (e.g. https://www.company.com/jobs -> company.com)"""
@@ -390,12 +429,19 @@ def run_local_pipeline(tracker):
                     hours_old=LOCAL_LOOKBACK_DAYS * 24,
                 )
                 added = 0
+                skipped_geo = 0
                 for _, j_row in area_res.iterrows():
                     job = j_row.to_dict()
+                    # Drop JobSpy's global fallback results — keep only Palestine
+                    # or genuinely-remote jobs (see is_palestine_or_remote).
+                    if not is_palestine_or_remote(job.get("location"), job.get("title")):
+                        skipped_geo += 1
+                        continue
                     job["source"] = "jobspy_area"
                     all_raw_jobs.append(job)
                     added += 1
-                logger.info("Palestine-area '%s': %d job(s).", term, added)
+                logger.info("Palestine-area '%s': %d kept, %d off-location dropped.",
+                            term, added, skipped_geo)
             except Exception as e:
                 logger.warning("Palestine-area JobSpy failed for '%s': %s", term, e)
     except Exception as e:
@@ -473,7 +519,7 @@ def run_local_pipeline(tracker):
     combined_jobs = apply_pipeline_filters(combined_jobs, tracker=tracker, local=True)
     stats['filtered'] = len(combined_jobs)
     logger.info("Total jobs surviving pre-filters: %d", stats['filtered'])
-    
+
     # 3. AI Evaluation (gemini_key was loaded earlier for the Jina fallback)
     try:
         with open("cv_text.txt", "r", encoding="utf-8") as f:
@@ -481,7 +527,22 @@ def run_local_pipeline(tracker):
     except (OSError, UnicodeDecodeError) as e:
         logger.warning("cv_text.txt unreadable (%s) — using built-in fallback CV.", e)
         cv_text = "Computer Engineering student specializing in AI systems engineering, building end-to-end pipelines that integrate LLMs, embeddings, and multi-source data into production-ready backend systems. Experienced deploying Python-based solutions with REST APIs, automated workflows, and real-world constraints. Growing focus on Generative AI, RAG architectures, and scalable intelligent systems."
-        
+
+    # 2b. CV-embedding pre-rank + cap. With 5 sources the survivor set can be
+    # large (one run hit 105 → ~76 min of AI). Rank by similarity to the CV and
+    # send only the top LOCAL_AI_EVAL_TOP_N to the AI; the rest defer to a future
+    # run. Best-effort: if embedding fails (no key / API down), we keep the
+    # original order and still apply the cap so the budget stays bounded.
+    if not combined_jobs.empty and len(combined_jobs) > LOCAL_AI_EVAL_TOP_N:
+        gemini_embed_key = os.environ.get("GEMINI_EMBED_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
+        try:
+            combined_jobs, _job_vecs = attach_similarity(combined_jobs, cv_text, gemini_embed_key)
+        except Exception as e:
+            logger.warning("Local pre-rank failed (%s) — capping in original order.", e)
+        before = len(combined_jobs)
+        combined_jobs = combined_jobs.head(LOCAL_AI_EVAL_TOP_N).reset_index(drop=True)
+        logger.info("Local pre-rank: capped %d -> %d jobs for AI evaluation.", before, len(combined_jobs))
+
     verdicts, valid_mask, match_pcts = [], [], []
     tech_fits, exp_fits, log_fits = [], [], []
     comps, efforts, suspiciouses, scams = [], [], [], []
