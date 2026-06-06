@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Job Feedback (Local Companies) — 2026-06-06</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    max-width: 900px; margin: 0 auto; padding: 32px 20px 120px;
+    color: #1f2937; background: #f9fafb; line-height: 1.5;
+  }
+  h1 { margin: 0 0 4px; font-size: 26px; color: #111827; }
+  .meta { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
+  .job {
+    background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px;
+    padding: 16px 18px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  .job-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .job-info { flex: 1; min-width: 0; }
+  .job-title { font-size: 17px; font-weight: 600; }
+  .job-title a { color: #1d4ed8; text-decoration: none; }
+  .job-title a:hover { text-decoration: underline; }
+  .job-company { color: #374151; font-size: 14px; margin-top: 2px; }
+  .job-location { color: #6b7280; font-size: 13px; margin-top: 2px; }
+  .match {
+    padding: 4px 10px; border-radius: 6px; color: #ffffff;
+    font-size: 13px; font-weight: 600; white-space: nowrap; flex-shrink: 0;
+  }
+  .match-green { background: #22c55e; }
+  .match-amber { background: #eab308; }
+  .match-red   { background: #ef4444; }
+  .match-grey  { background: #9ca3af; }
+  .verdict { color: #374151; font-size: 14px; margin: 12px 0; white-space: pre-wrap; }
+  .feedback-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+  select, textarea {
+    font-family: inherit; font-size: 14px; padding: 8px 10px;
+    border-radius: 6px; border: 1px solid #d1d5db; background: #ffffff; color: #1f2937;
+  }
+  select:focus, textarea:focus { outline: 2px solid #2563eb; outline-offset: -1px; border-color: #2563eb; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 52px; margin-top: 8px; resize: vertical; }
+  .empty { color: #6b7280; font-style: italic; }
+  .submit-bar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: #ffffff; border-top: 1px solid #e5e7eb;
+    padding: 14px 20px; text-align: center; box-shadow: 0 -2px 8px rgba(0,0,0,0.06);
+  }
+  button {
+    background: #2563eb; color: #ffffff; padding: 10px 28px;
+    border: none; border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #1d4ed8; }
+  button:disabled { background: #9ca3af; cursor: not-allowed; }
+  .status { margin-left: 16px; font-weight: 600; font-size: 14px; }
+  .status.success { color: #16a34a; }
+  .status.error { color: #dc2626; }
+  .status.working { color: #6b7280; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e5e7eb; background: #0f172a; }
+    h1 { color: #f1f5f9; }
+    .meta { color: #94a3b8; }
+    .job { background: #1e293b; border-color: #334155; box-shadow: none; }
+    .job-title a { color: #60a5fa; }
+    .job-company { color: #cbd5f5; }
+    .job-location { color: #94a3b8; }
+    .verdict { color: #cbd5f5; }
+    select, textarea { background: #0f172a; color: #e5e7eb; border-color: #475569; }
+    .submit-bar { background: #1e293b; border-color: #334155; }
+  }
+</style>
+</head>
+<body>
+  <h1>Job Feedback (Local Companies)</h1>
+  <div class="meta">
+    Generated 2026-06-06 · Pick a feedback type for any job you want to influence future scoring on. Skip the rest.
+  </div>
+
+  <div id="jobs">
+    <div class="job" data-url="https://www.linkedin.com/jobs/remote-work-jobs-worldwide?position=1&amp;pageNum=0" data-company="Aurora Technologies" data-title="649,000+ Remote Work jobs (42,728 new)" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://www.linkedin.com/jobs/remote-work-jobs-worldwide?position=1&amp;pageNum=0" target="_blank" rel="noopener">649,000+ Remote Work jobs (42,728 new)</a></div><div class="job-company">Aurora Technologies</div><div class="job-location">Local/Remote</div></div><span class="match match-amber">76%</span></div><div class="verdict">Your AI Document Assistant (RAG) project using LangChain, FAISS and Ollama directly showcases LLM‑integrated application development. No geographic restriction mentioned — assumed open. The main gap is the lack of any professional work experience, as the role expects at least some industry exposure.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://www.linkedin.com/posts/alexsalmon_recruitment-careers-hiring-activity-7414803670908952576-tSsV" data-company="Aurora Technologies" data-title="Recruitment&#x27;s Unsung Heroes: Changing Careers and... | LinkedIn" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://www.linkedin.com/posts/alexsalmon_recruitment-careers-hiring-activity-7414803670908952576-tSsV" target="_blank" rel="noopener">Recruitment&#x27;s Unsung Heroes: Changing Careers and... | LinkedIn</a></div><div class="job-company">Aurora Technologies</div><div class="job-location">Local/Remote</div></div><span class="match match-amber">73%</span></div><div class="verdict">Your AI Document Assistant (RAG) project using LangChain, FAISS and Ollama aligns with the kind of LLM‑integrated application development the role hints at. No geographic restriction is mentioned — assumed open to candidates in Palestine. The posting provides no concrete technical stack, so there is no evidence that your FastAPI, PyTorch CV or video‑retrieval experience is required, and you have no professional work history beyond academic projects. While the role appears entry‑level, the lack of a defined tech stack makes it a stretch fit.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://www.linkedin.com/posts/amit-sharma-b2980623_jobs-career-activity-7264534753331093505-PTjg" data-company="Aurora Technologies" data-title="Amit Sharma on LinkedIn: #jobs #career" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://www.linkedin.com/posts/amit-sharma-b2980623_jobs-career-activity-7264534753331093505-PTjg" target="_blank" rel="noopener">Amit Sharma on LinkedIn: #jobs #career</a></div><div class="job-company">Aurora Technologies</div><div class="job-location">Local/Remote</div></div><span class="match match-red">51%</span></div><div class="verdict">MATCH: Your AI Document Assistant (RAG) project using LangChain, FAISS, and Ollama aligns with the kind of LLM‑integrated backend work many AI roles seek. REMOTE: No geographic restriction mentioned — assumed open to candidates in Palestine. GAP: The posting provides no concrete technical stack or required experience, and you have zero professional employment years, which may fall short of any implicit expectations for production‑grade experience.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://www.jobs.ps/en/jobs/office-coordinator-32319" data-company="Computer Media Center CMC" data-title="Office Coordinator - Jobs.ps | Jobs in Palestine" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://www.jobs.ps/en/jobs/office-coordinator-32319" target="_blank" rel="noopener">Office Coordinator - Jobs.ps | Jobs in Palestine</a></div><div class="job-company">Computer Media Center CMC</div><div class="job-location">Local/Remote</div></div><span class="match match-red">41%</span></div><div class="verdict">MATCH: Your AI Document Assistant (RAG) project using LangChain, FAISS, and FastAPI demonstrates strong technical capabilities, but the Office Coordinator role focuses on administrative coordination rather than software development. REMOTE: No geographic restriction mentioned — assumed open. GAP: The position requires office coordination, report handling, and event planning experience, which your CV does not show. SECOND MATCH/GAP: While you have extensive AI and backend experience, you lack any demonstrated office administration or stakeholder management background.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://www.freightos.com/careers/" data-company="Freightos Ramallah" data-title="Careers | Freightos" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://www.freightos.com/careers/" target="_blank" rel="noopener">Careers | Freightos</a></div><div class="job-company">Freightos Ramallah</div><div class="job-location">Local/Remote</div></div><span class="match match-red">57%</span></div><div class="verdict">MATCH: Your AI Document Assistant (RAG) project using LangChain, FAISS, and Ollama demonstrates relevant experience with LLM‑integrated backend systems, which could align with any LLM‑focused development needs. REMOTE: No geographic restriction mentioned — assumed open to candidates in Palestine. GAP: The job description provides no concrete technical stack, but it likely expects production‑grade experience with cloud services or specific domain knowledge that your CV does not explicitly show.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://ggateway.tech/careers/" data-company="GGateway" data-title="Careers - GGateway" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://ggateway.tech/careers/" target="_blank" rel="noopener">Careers - GGateway</a></div><div class="job-company">GGateway</div><div class="job-location">Local/Remote</div></div><span class="match match-red">68%</span></div><div class="verdict">Your RAG project (LangChain + FAISS + Ollama) directly matches their stated need for LLM-integrated app development. Listed as no geographic restriction mentioned — assumed open. The company&#x27;s stack also requires experience with job creation and capacity building, which your CV does not explicitly mention. Your Text-to-Video Retrieval System project showcases your skills in deep learning and video retrieval, but the job description does not explicitly mention these skills as required. The candidate lacks professional experience, which might be a concern for the role.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://innotech.factorialhr.com/apply/scrum-master-1422" data-company="Innotech" data-title="Innotech - Job offers, offices and team" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://innotech.factorialhr.com/apply/scrum-master-1422" target="_blank" rel="noopener">Innotech - Job offers, offices and team</a></div><div class="job-company">Innotech</div><div class="job-location">Local/Remote</div></div><span class="match match-red">38%</span></div><div class="verdict">MATCH: Your RAG project (LangChain + FAISS + Ollama) aligns with typical LLM‑integrated app work, but the posting provides no specific requirements to confirm a direct match. REMOTE: No geographic restriction mentioned — assumed open. GAP: The role lacks a clear tech stack, and you have no professional experience, which is a major unknown for this position.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://innotech.factorialhr.com/job_posting/system-administrator-261372" data-company="Innotech" data-title="Apply today to System Administrator and join the Innotech team" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://innotech.factorialhr.com/job_posting/system-administrator-261372" target="_blank" rel="noopener">Apply today to System Administrator and join the Innotech team</a></div><div class="job-company">Innotech</div><div class="job-location">Local/Remote</div></div><span class="match match-red">65%</span></div><div class="verdict">Your Linux (Ubuntu) experience and Python scripting from your AI projects provide a foundation for system administration tasks. No geographic restriction mentioned — assumed open. However, you lack direct system administration experience such as network management, Active Directory, and server maintenance.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://www.offtec.com/en-us/subsidiaries/offtec-group/careers/" data-company="OFFTEC Palestine" data-title="OFFTEC Group | Careers - OHG" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://www.offtec.com/en-us/subsidiaries/offtec-group/careers/" target="_blank" rel="noopener">OFFTEC Group | Careers - OHG</a></div><div class="job-company">OFFTEC Palestine</div><div class="job-location">Local/Remote</div></div><span class="match match-red">51%</span></div><div class="verdict">Your AI Document Assistant (RAG) project (LangChain + FAISS + Ollama) directly matches any need for LLM‑integrated backend services. No geographic restriction mentioned — assumed open. However, you have zero professional work experience, while the role likely expects on‑site IT or system engineering experience. Additionally, the job description does not specify any of the AI/ML technologies you specialize in, so there is no clear alignment with required stack.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://orionvtech.com/careers/" data-company="Orion VLSI Technologies" data-title="Careers - Orion VLSI Technologies" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://orionvtech.com/careers/" target="_blank" rel="noopener">Careers - Orion VLSI Technologies</a></div><div class="job-company">Orion VLSI Technologies</div><div class="job-location">Local/Remote</div></div><span class="match match-red">55%</span></div><div class="verdict">[AI-SUSPICIOUS] Your AI Document Assistant (RAG) project using LangChain, FAISS, and Ollama directly matches the need for LLM‑integrated application development. No geographic restriction mentioned — assumed open. The role requires security‑focused experience and knowledge of security tooling, which your CV does not demonstrate.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://pal-swiss.alnayzak.org/jobs/44" data-company="Pal-Swiss Tech Hubs" data-title="The pal-swiss tech hubs" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://pal-swiss.alnayzak.org/jobs/44" target="_blank" rel="noopener">The pal-swiss tech hubs</a></div><div class="job-company">Pal-Swiss Tech Hubs</div><div class="job-location">Local/Remote</div></div><span class="match match-red">56%</span></div><div class="verdict">Your AI Document Assistant (RAG) project (LangChain + FAISS + Ollama) does not align with the role&#x27;s focus on website performance specialization. Remote is listed with no geographic restriction, so you are eligible from Palestine. The position requires experience with web performance tools and metrics, which your CV does not demonstrate. Additionally, the job description lacks clear technical requirements, making it unclear how your AI and backend skills would be applied.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://provision.ps/en/job/7" data-company="ProVision" data-title="ProVision for Websites &amp; Mobile Apps Design and Development" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://provision.ps/en/job/7" target="_blank" rel="noopener">ProVision for Websites &amp; Mobile Apps Design and Development</a></div><div class="job-company">ProVision</div><div class="job-location">Local/Remote</div></div><span class="match match-amber">78%</span></div><div class="verdict">Your AI Document Assistant (RAG) project using LangChain, FAISS, and Ollama, as well as your FastAPI deployment experience, directly address the need for backend AI‑enabled services. The role is listed as remote with no country restrictions, so you can work from Palestine. However, the position emphasizes website and mobile app design and development, and your CV shows no front‑end experience (e.g., React, TypeScript, UI/UX design).</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://progineer.net/careers/" data-company="ProGineer Technologies" data-title="Careers | ProGineer Technologies" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://progineer.net/careers/" target="_blank" rel="noopener">Careers | ProGineer Technologies</a></div><div class="job-company">ProGineer Technologies</div><div class="job-location">Local/Remote</div></div><span class="match match-red">58%</span></div><div class="verdict">Your RAG project (LangChain + FAISS + Ollama) directly matches their stated need for AI-integrated app development. Listed as no geographic restriction mentioned — assumed open. The company requires experience in the programming, IT, and computer-engineering industry, but you have no professional years of experience. Your strongest asset is the RAG project, but the job description lacks specific details about required technologies.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://vatrin.app/en/careers/elixir-software-engineer" data-company="Vatrin" data-title="Vatrin" data-location="Local/Remote" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://vatrin.app/en/careers/elixir-software-engineer" target="_blank" rel="noopener">Vatrin</a></div><div class="job-company">Vatrin</div><div class="job-location">Local/Remote</div></div><span class="match match-amber">81%</span></div><div class="verdict">Your AI Document Assistant (RAG) project using LangChain, FAISS and Ollama directly matches any need for LLM‑integrated backend services. The role lists no geographic restriction, so remote work is open to candidates in Palestine. The main gap is the lack of professional work experience, as you have only academic projects and no full‑time employment.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://www.linkedin.com/jobs/view/4420108653" data-company="Roche Diagnostics France" data-title="AI Full Stack Engineer" data-location="" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://www.linkedin.com/jobs/view/4420108653" target="_blank" rel="noopener">AI Full Stack Engineer</a></div><div class="job-company">Roche Diagnostics France</div><div class="job-location"></div></div><span class="match match-amber">83%</span></div><div class="verdict">Your AI Document Assistant (RAG) project using LangChain, FAISS and Ollama directly matches the role’s need for LLM‑integrated backend services, and your Automated AI Job Intelligence System showcases FastAPI‑based full‑stack deployment. No geographic restriction mentioned — assumed open. The posting also expects cloud production experience (e.g., AWS/GCP) and domain knowledge in medical diagnostics, which your CV does not demonstrate. Additionally, there is no evidence of frontend UI work such as React/TypeScript that may be part of the full‑stack expectations.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://www.linkedin.com/jobs/view/4417379306" data-company="Midcontinent Independent System Operator (MISO)" data-title="Principal AI Engineer" data-location="" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://www.linkedin.com/jobs/view/4417379306" target="_blank" rel="noopener">Principal AI Engineer</a></div><div class="job-company">Midcontinent Independent System Operator (MISO)</div><div class="job-location"></div></div><span class="match match-red">63%</span></div><div class="verdict">Your AI Document Assistant (RAG) project using LangChain, FAISS and Ollama, as well as the Automated AI Job Intelligence System built with FastAPI and Docker, directly address the role’s need for LLM‑integrated, production‑ready AI applications. No geographic restriction is mentioned in the posting, so remote work is assumed open to candidates in Palestine. However, the position also requires extensive experience (3+ years) building AI solutions in a professional setting and expertise with Azure Data Factory, Spark/Databricks, and MLflow, which are not present on your CV. Additionally, the lack of large‑scale cloud deployment experience (e.g., Azure ML) is a notable gap.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+<div class="job" data-url="https://www.linkedin.com/jobs/view/4410920362" data-company="Salesforce" data-title="Account Solution Engineer, Higher Education" data-location="" data-date="2026-06-06"><div class="job-header"><div class="job-info"><div class="job-title"><a href="https://www.linkedin.com/jobs/view/4410920362" target="_blank" rel="noopener">Account Solution Engineer, Higher Education</a></div><div class="job-company">Salesforce</div><div class="job-location"></div></div><span class="match match-red">63%</span></div><div class="verdict">Your AI Document Assistant (RAG) project (LangChain + FAISS + Ollama) directly matches the need for building LLM‑integrated applications. Remote is listed as worldwide with no country restrictions. However, the role requires solution‑engineering and sales experience with higher‑education customers, which your CV does not demonstrate. Additionally, the position expects familiarity with Salesforce’s platform and enterprise‑level integration, which is not covered in your projects.</div><div class="feedback-row"><select class="feedback-select"><option value="">— Select feedback —</option>
+<option value="applied">Applied</option>
+<option value="bookmarked">Bookmarked</option>
+<option value="not_relevant">Not relevant</option>
+<option value="block_company">Block company</option>
+<option value="wrong_location">Wrong location</option>
+<option value="other">Other</option></select></div><textarea class="feedback-note" placeholder="Optional note explaining your choice"></textarea></div>
+  </div>
+
+  <div class="submit-bar">
+    <button id="submit-btn">Submit All Feedback</button>
+    <span id="status" class="status"></span>
+  </div>
+
+<script>
+const WORKER_URL = "https://job-feedback.mohaabuhijleh.workers.dev";
+
+function collectEntries() {
+  const out = [];
+  document.querySelectorAll(".job").forEach((el) => {
+    const fb = el.querySelector(".feedback-select").value;
+    if (!fb) return;
+    const note = el.querySelector(".feedback-note").value.trim();
+    out.push({
+      job_url: el.dataset.url,
+      company: el.dataset.company,
+      title: el.dataset.title,
+      location: el.dataset.location,
+      feedback: fb,
+      note: note,
+      date: el.dataset.date,
+    });
+  });
+  return out;
+}
+
+async function submitFeedback() {
+  const btn = document.getElementById("submit-btn");
+  const status = document.getElementById("status");
+
+  const entries = collectEntries();
+  if (entries.length === 0) {
+    status.textContent = "No feedback selected.";
+    status.className = "status error";
+    return;
+  }
+
+  if (!WORKER_URL) {
+    status.textContent = "Feedback page not configured (missing worker URL).";
+    status.className = "status error";
+    return;
+  }
+
+  btn.disabled = true;
+  status.textContent = "Submitting…";
+  status.className = "status working";
+
+  try {
+    const r = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entries: entries }),
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      throw new Error(`(${r.status}) ${text.slice(0, 160)}`);
+    }
+    status.textContent = `Submitted ${entries.length} entr${entries.length === 1 ? "y" : "ies"}. They'll apply on the next pipeline run.`;
+    status.className = "status success";
+  } catch (err) {
+    status.textContent = `Error: ${err.message}`;
+    status.className = "status error";
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("submit-btn").addEventListener("click", submitFeedback);
+</script>
+</body>
+</html>
