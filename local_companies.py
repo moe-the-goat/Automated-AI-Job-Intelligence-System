@@ -414,6 +414,18 @@ def run_local_pipeline(tracker):
         except Exception as e:
             logger.warning("Telegram sweep failed: %s", e)
 
+    # jobs.ps — the main general Palestinian job board. Reads each listing's
+    # JSON-LD JobPosting (structured, reliable). General board (NGO-heavy), so
+    # the filters + AI verdict separate tech from the rest. source="jobs_ps".
+    try:
+        from pipeline.core_jobsps import fetch_jobsps_jobs
+        jobsps = fetch_jobsps_jobs(lookback_days=LOCAL_LOOKBACK_DAYS)
+        if jobsps:
+            logger.info("jobs.ps contributed %d job(s) this run.", len(jobsps))
+            all_raw_jobs.extend(jobsps)
+    except Exception as e:
+        logger.warning("jobs.ps sweep failed: %s", e)
+
     # Persist ATS cache for future runs (so re-detection is rare).
     ats_cache.save()
     if stats["ats_jobs"]:
