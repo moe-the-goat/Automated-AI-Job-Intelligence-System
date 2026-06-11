@@ -51,6 +51,7 @@ from pipeline.core_search import (
     fetch_yc_workatastartup_jobs,
 )
 from pipeline.core_filter import filter_api_jobs, apply_pipeline_filters
+from pipeline.core_local_sources import collect_local_raw_jobs
 from pipeline.core_ai import (
     evaluate_job_with_ai,
     evaluate_job_with_gemini,
@@ -102,6 +103,13 @@ WHITELIST_ONLY = True
 # whose run is still in flight. On failure we pull it back to a shorter retry.
 FAILURE_RETRY_HOURS = 2
 
+# Include the Palestinian local-market sources (Telegram, jobs.ps, per-company
+# ATS/DDG/JobSpy) in every user's run. The local market is the SAME for everyone,
+# so it's collected ONCE per cron tick (shared cache) and merged into each user's
+# pipeline, where their own CV-ranking + RAG personalizes which local jobs surface.
+# Local rows use the lighter filter (local=True); global rows use the full filter.
+INCLUDE_LOCAL_SOURCES = True
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Lightweight per-tick caches
@@ -124,6 +132,33 @@ class _ApiCache:
                 logger.warning("API cache: %s fetch failed: %s. Treating as empty.", name, e)
                 self._cache[name] = pd.DataFrame()
         return self._cache[name]
+
+
+class _LocalJobsCache:
+    """Collects the Palestinian local-market jobs ONCE per cron tick.
+
+    The local market is identical for every user, so we scrape it a single time
+    and hand the same raw list to each user's pipeline (where per-user CV ranking
+    + RAG decides what surfaces). Lazy: nothing runs until the first user asks.
+    """
+    def __init__(self):
+        self._jobs = None  # None = not yet collected
+
+    def get(self) -> list:
+        if self._jobs is None:
+            try:
+                gemini_key = os.environ.get("GEMINI_API_KEY", "")
+                jobs, st = collect_local_raw_jobs(gemini_key=gemini_key)
+                self._jobs = jobs
+                logger.info(
+                    "Local cache: %d raw local job(s) collected this tick (ats=%d ddg=%d jobspy=%d telegram=%d jobs_ps=%d).",
+                    len(jobs), st["ats_jobs"], st["ddg_jobs"], st["jobspy_jobs"],
+                    st["telegram_jobs"], st["jobsps_jobs"],
+                )
+            except Exception as e:
+                logger.warning("Local cache: collection failed: %s. Treating as empty.", e)
+                self._jobs = []
+        return self._jobs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -546,9 +581,14 @@ def _set_next_run(client, user_id: str, when: datetime):
 # Per-user pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool):
+def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool, local_cache=None):
     """End-to-end pipeline for one user. Never raises — failures are logged
     and recorded on the runs row so other users in the batch still execute.
+
+    `local_cache` (a _LocalJobsCache) supplies the shared Palestinian local-market
+    jobs collected once per tick. When provided, local jobs are filtered with the
+    lighter local=True rules and merged with the user's globally-filtered jobs
+    before CV ranking, so each user sees local jobs personalized to their CV.
     """
     user_id = user["user_id"]
     run_id = _insert_run(client, user_id)
@@ -575,23 +615,44 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool):
         )
         preferences_for, _mode = _build_preferences_provider(user_id, feedback_embed_key)
 
-        # 2. Scrape
-        combined = _scrape_for_user(user, api_cache)
-        stats["scraped"] = int(len(combined))
-        if combined.empty:
+        # 2. Scrape — global (per-user searches + public APIs) and shared local.
+        global_jobs = _scrape_for_user(user, api_cache)
+        local_jobs = pd.DataFrame()
+        if local_cache is not None:
+            raw_local = local_cache.get()
+            if raw_local:
+                local_jobs = pd.DataFrame(raw_local)
+        stats["scraped"] = int(len(global_jobs) + len(local_jobs))
+        if global_jobs.empty and local_jobs.empty:
             logger.info("User %s: no jobs scraped this tick.", user_id)
             _finalize_run(client, run_id, status="success", **stats)
             tracker.save()
             return
 
-        # 3. Deterministic filters (tracker drops seen URLs first)
-        combined = apply_pipeline_filters(combined, tracker=tracker)
-        stats["filtered"] = int(len(combined))
-        if combined.empty:
+        # 3. Deterministic filters (tracker drops seen URLs first). Global jobs
+        # get the aggressive firehose filter; local jobs get the lighter local=True
+        # filter (pre-vetted companies, Arabic-safe). Then merge for ranking.
+        filtered_parts = []
+        if not global_jobs.empty:
+            g = apply_pipeline_filters(global_jobs, tracker=tracker)
+            if not g.empty:
+                filtered_parts.append(g)
+        if not local_jobs.empty:
+            l = apply_pipeline_filters(local_jobs, tracker=tracker, local=True)
+            if not l.empty:
+                filtered_parts.append(l)
+
+        if not filtered_parts:
             logger.info("User %s: 0 jobs survived the pre-filters.", user_id)
             _finalize_run(client, run_id, status="success", **stats)
             tracker.save()
             return
+        combined = pd.concat(filtered_parts, ignore_index=True)
+        # URL-dedup across the merged set (a job could appear in both global and
+        # local pulls). Keep first occurrence.
+        if "job_url" in combined.columns:
+            combined = combined.drop_duplicates(subset=["job_url"]).reset_index(drop=True)
+        stats["filtered"] = int(len(combined))
 
         # 4. CV embedding pre-rank
         gemini_key = os.environ.get("GEMINI_API_KEY", "")
@@ -738,11 +799,13 @@ def main(argv: Optional[list] = None) -> int:
         return 0
 
     api_cache = _ApiCache()
+    # Shared local-market jobs, collected once on first use this tick.
+    local_cache = _LocalJobsCache() if INCLUDE_LOCAL_SOURCES else None
     tick_start = time.time()
     for user in users:
         user_start = time.time()
         logger.info("--- Starting user %s ---", user["user_id"])
-        _run_for_user(user, client, api_cache, dry_run=args.dry_run)
+        _run_for_user(user, client, api_cache, dry_run=args.dry_run, local_cache=local_cache)
         logger.info(
             "--- Finished user %s in %.1fs ---",
             user["user_id"], time.time() - user_start,

@@ -21,6 +21,7 @@ from pipeline.core_ats import (
     AtsCache,
 )
 from pipeline.url_validation import is_job_url_like, is_specific_job_url_like, probe_urls_alive_batch
+from pipeline.core_local_sources import collect_local_raw_jobs
 from pipeline.core_notify import format_email_html, format_github_markdown, send_email, create_github_issue, cleanup_old_github_issues
 from pipeline.core_embedding import retrieve_relevant_feedback, attach_similarity
 from pipeline.core_feedback import (
@@ -295,150 +296,25 @@ def run_local_pipeline(tracker):
             return learned_preferences
 
     logger.info("Starting Local Companies Scrape...")
-    companies_df = load_local_companies()
-    if companies_df.empty:
-        logger.warning("No companies loaded. Ensure the Excel files exist.")
-        return
-        
-    all_raw_jobs = []
-    ats_cache = AtsCache()
-    # Load API keys early. Gemini stays for the Jina-fallback branch in the ATS
-    # sweep. The main AI verdict now runs on Cerebras (primary) + Groq (fallback).
-    # local_companies.py does NOT run Layer 3 geo-checks — Palestinian companies
-    # don't have non-Palestine geo-restriction concerns.
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
     cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
     groq_key = os.environ.get("GROQ_API_KEY", "")
+    gemini_key = os.environ.get("GEMINI_API_KEY", "")
 
-    # Track statistics
-    stats = {"scraped": 0, "filtered": 0, "approved": 0, "ats_jobs": 0, "jina_jobs": 0}
+    stats = {"scraped": 0, "filtered": 0, "approved": 0}
 
-    # 1. Scrape Jobs for each company
-    for _, row in companies_df.iterrows():
-        company_name = str(row.get("company name", "")).strip()
-        website = str(row.get("jobs website", ""))
-        linkedin_url = str(row.get("linkedin profile", ""))
-        domain = extract_domain(website)
-        linkedin_handle = extract_linkedin_handle(linkedin_url) if linkedin_url and linkedin_url.lower() != "nan" else None
-
-        if not company_name or company_name == "nan":
-            continue
-
-        # NEW: ATS API scrape (Greenhouse / Lever / Workable / Ashby / Workday).
-        # One-time detection cached in data/ats_cache.json so subsequent runs go
-        # straight to the API. `website` doubles as the careers-page seed for
-        # first-time detection.
-        #
-        # Wave 2: when no SaaS ATS is detected, route through Jina Reader +
-        # Gemini extraction. This costs one extra Gemini call per ATS-less
-        # company per run but unlocks the long tail of custom careers pages
-        # (most Palestinian companies fall here).
-        if website and website.lower() != "nan":
-            try:
-                ats_jobs = get_ats_jobs(
-                    company_name, website, cache=ats_cache,
-                    gemini_api_key=gemini_key,
-                    jina_fallback=bool(gemini_key),
-                )
-                if ats_jobs:
-                    logger.info("ATS yielded %d job(s) for %s", len(ats_jobs), company_name)
-                    stats["ats_jobs"] += len(ats_jobs)
-                    all_raw_jobs.extend(ats_jobs)
-            except Exception as e:
-                logger.warning("ATS scrape failed for %s: %s", company_name, str(e)[:120])
-
-        # DuckDuckGo Scrapes (now precision-boosted with linkedin_handle when available)
-        ddg_jobs = ddg_search_for_jobs(company_name, domain, linkedin_handle=linkedin_handle)
-        all_raw_jobs.extend(ddg_jobs)
-
-        # JobSpy Scrape (Jobs Section)
-        try:
-            from jobspy import scrape_jobs  # lazy import
-            logger.info("Running JobSpy for %s...", company_name)
-            jobspy_res = scrape_jobs(
-                site_name=["linkedin"],
-                search_term=company_name,
-                location="State of Palestine",
-                distance=100,
-                results_wanted=5,
-                hours_old=LOCAL_LOOKBACK_DAYS * 24  # 7 days
-            )
-            for _, j_row in jobspy_res.iterrows():
-                # Make sure the company name roughly matches to avoid generic search results
-                found_company = str(j_row.get("company", "")).lower()
-                if company_name.lower() in found_company or found_company in company_name.lower():
-                    all_raw_jobs.append(j_row.to_dict())
-        except Exception as e:
-            logger.warning("JobSpy failed for %s: %s", company_name, e)
-
-    # NOTE: the broad "Palestine-area" JobSpy sweep (formerly "Option B") was
-    # removed 2026-06-06. On a low-supply location like Palestine, JobSpy fell
-    # back to GLOBAL jobs — one run dropped 98 off-location results to keep ~17,
-    # and the kept ones (empty location field) were foreign companies (Salesforce,
-    # Roche, Midcontinent) that polluted the local email. The genuinely-local
-    # jobs all come from the per-company ATS/DDG/JobSpy paths + Telegram + jobs.ps,
-    # so the sweep was net-negative noise. Removed for result consistency.
-
-    # Public Telegram job channels — high-yield local source, read via the
-    # t.me/s/<handle> web preview (no login/token). Tagged source="telegram";
-    # runs through the same local filter + AI verdict as everything else.
-    if TELEGRAM_JOB_CHANNELS:
-        try:
-            from pipeline.core_telegram import fetch_telegram_jobs
-            tg_jobs = fetch_telegram_jobs(TELEGRAM_JOB_CHANNELS, lookback_days=LOCAL_LOOKBACK_DAYS)
-            if tg_jobs:
-                logger.info("Telegram channels contributed %d post(s) this run.", len(tg_jobs))
-                all_raw_jobs.extend(tg_jobs)
-        except Exception as e:
-            logger.warning("Telegram sweep failed: %s", e)
-
-    # jobs.ps — the main general Palestinian job board. Reads each listing's
-    # JSON-LD JobPosting (structured, reliable). General board (NGO-heavy), so
-    # the filters + AI verdict separate tech from the rest. source="jobs_ps".
-    try:
-        from pipeline.core_jobsps import fetch_jobsps_jobs
-        jobsps = fetch_jobsps_jobs(lookback_days=LOCAL_LOOKBACK_DAYS)
-        if jobsps:
-            logger.info("jobs.ps contributed %d job(s) this run.", len(jobsps))
-            all_raw_jobs.extend(jobsps)
-    except Exception as e:
-        logger.warning("jobs.ps sweep failed: %s", e)
-
-    # Persist ATS cache for future runs (so re-detection is rare).
-    ats_cache.save()
-    if stats["ats_jobs"]:
-        logger.info("ATS sweep contributed %d job(s) this run.", stats['ats_jobs'])
-
-    # Ghost-listing check: DDG/Bing index stale URLs for weeks after a company
-    # removes a job. Batch HEAD-probe every DDG-sourced URL and drop the dead
-    # ones BEFORE the AI ever sees them. We skip URLs from the ATS API path
-    # (those came from live endpoints, no need to verify) and JobSpy (which
-    # already filters by hours_old). The probe is concurrent so 30 URLs take
-    # ~1.5s instead of 30s.
-    # DDG-sourced rows are tagged source="ddg_linkedin"/"ddg_website"; ATS and
-    # JobSpy rows have no such tag (live endpoints / already recency-filtered).
-    def _is_ddg(j):
-        return str(j.get("source", "")).startswith("ddg_")
-
-    ddg_urls = [j.get("job_url") for j in all_raw_jobs if _is_ddg(j) and j.get("job_url")]
-    if ddg_urls:
-        unique_urls = list(set(ddg_urls))
-        logger.info("Verifying %d DDG-sourced URL(s) via HEAD probe...", len(unique_urls))
-        alive_map = probe_urls_alive_batch(unique_urls)
-        before = len(all_raw_jobs)
-        all_raw_jobs = [
-            j for j in all_raw_jobs
-            if not _is_ddg(j)
-            or alive_map.get(j.get("job_url"), True)        # default True so unprobed entries stay
-        ]
-        dropped = before - len(all_raw_jobs)
-        if dropped:
-            logger.info("Ghost-listing filter: dropped %d dead URL(s).", dropped)
+    # Collect raw local jobs from every local source via the shared module
+    # (also used by multi_user_runner.py — single source of truth). Includes the
+    # per-company ATS/DDG/JobSpy sweep, Telegram, jobs.ps, and the ghost-listing
+    # HEAD-probe.
+    all_raw_jobs, source_stats = collect_local_raw_jobs(
+        gemini_key=gemini_key, lookback_days=LOCAL_LOOKBACK_DAYS
+    )
+    logger.info("Local sources: %s", source_stats)
 
     if not all_raw_jobs:
         logger.info("No jobs found at all. Shutting down quietly.")
         return
-        
+
     combined_jobs = pd.DataFrame(all_raw_jobs)
     stats['scraped'] = len(combined_jobs)
     logger.info("Total raw jobs found: %d", stats['scraped'])
