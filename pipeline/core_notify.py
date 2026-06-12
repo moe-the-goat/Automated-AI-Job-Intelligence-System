@@ -405,9 +405,15 @@ def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None,
     internships_df = filter_by_match_threshold(internships_df)
     jobs_df = filter_by_match_threshold(jobs_df)
 
+    # "AI Approved" must match the jobs actually listed below it, not the raw
+    # pre-threshold total: a job that cleared validation but scored under the
+    # display floor is hidden from the tables, so counting it here would make
+    # the stat claim "3" while the reader sees 2. Count the displayed rows.
+    shown_approved = len(internships_df) + len(jobs_df)
+
     html = "<h2>Automated AI Job Alerts</h2>"
     html += _feedback_cta_html(feedback_url) if feedback_url else _feedback_link_html()
-    html += f"<div><b>Pipeline Stats:</b> Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {stats['approved']}</div>"
+    html += f"<div><b>Pipeline Stats:</b> Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {shown_approved}</div>"
     html += (
         "<div style='color: #666; font-size: 12px; margin-top:4px;'>"
         "Match cell shows composite % (color-coded: "
@@ -514,9 +520,13 @@ def format_github_markdown(internships_df, jobs_df, stats, lower_ranked_df=None)
     internships_df = filter_by_match_threshold(internships_df)
     jobs_df = filter_by_match_threshold(jobs_df)
 
+    # Count the rows actually shown, not the raw pre-threshold total, so the
+    # "AI Approved" stat matches the tables below it (see format_email_html).
+    shown_approved = len(internships_df) + len(jobs_df)
+
     md = "## Automated AI Job Alerts\n\n"
     md += _feedback_link_md()
-    md += f"**Pipeline Stats:** Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {stats['approved']}\n\n"
+    md += f"**Pipeline Stats:** Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {shown_approved}\n\n"
     md += "_Match shows composite % with sub-scores Tech / Experience / Logistics. 🚨 = web-confirmed scam · 🚫 = blacklisted · ⚠️ = AI-suspicious._\n\n---\n\n"
 
     md += "### 🎓 Internships (AI & SWE)\n\n"

@@ -23,6 +23,38 @@ def test_email_includes_pipeline_stats():
     assert "AI Approved: 1" in html
 
 
+def test_email_approved_count_matches_displayed_rows_not_raw_total():
+    """Regression: the 'AI Approved' stat must count the jobs the email actually
+    shows, not the caller's raw pre-threshold total. A job that cleared the AI
+    (is_valid) but scored below the display floor (default 55) is dropped from
+    the tables, so it must not be counted — otherwise the stat reads '3' while
+    the reader sees 2 (the bug observed in production)."""
+    df = pd.DataFrame([
+        baseline_job_row(title="Strong A", match_percentage=86),
+        baseline_job_row(title="Strong B", match_percentage=85),
+        baseline_job_row(title="Weak C", match_percentage=49),  # below the 55 floor
+    ])
+    # Caller passes the raw approved total (3) — the renderer must correct it.
+    html = format_email_html(df, pd.DataFrame(), _stats(3))
+    assert "AI Approved: 2" in html
+    assert "AI Approved: 3" not in html
+    # And the hidden job is genuinely absent from the body.
+    assert "Strong A" in html
+    assert "Strong B" in html
+    assert "Weak C" not in html
+
+
+def test_markdown_approved_count_matches_displayed_rows():
+    """Same correction for the GitHub-Issue markdown output."""
+    df = pd.DataFrame([
+        baseline_job_row(title="Strong A", match_percentage=86),
+        baseline_job_row(title="Weak C", match_percentage=49),
+    ])
+    md = format_github_markdown(df, pd.DataFrame(), _stats(2))
+    assert "AI Approved: 1" in md
+    assert "Weak C" not in md
+
+
 def test_email_renders_internships_table():
     df = pd.DataFrame([
         baseline_job_row(title="AI Engineering Intern", company="iion"),
