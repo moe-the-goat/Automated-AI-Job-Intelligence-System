@@ -25,7 +25,8 @@ CLI:
 Env (in addition to the scraper's existing secrets):
     SUPABASE_URL
     SUPABASE_SERVICE_ROLE_KEY
-    RESEND_API_KEY
+    SENDER_EMAIL            Gmail address that sends the alerts (SMTP transport)
+    EMAIL_APP_PASSWORD      Google app password for SENDER_EMAIL
     GEMINI_EMBED2_API_KEY   (or GEMINI_EMBED_API_KEY / GEMINI_API_KEY fallback)
 """
 
@@ -64,7 +65,9 @@ from pipeline.core_embedding import (
     retrieve_relevant_feedback,
 )
 from pipeline.core_notify import format_email_html
-from pipeline.core_email_resend import send_email as send_via_resend
+# Transport: Gmail SMTP (sends to any recipient, no domain needed). Replaced
+# Resend, which required a verified custom domain to reach arbitrary addresses.
+from pipeline.core_email_smtp import send_email as send_email_transport
 from pipeline.core_supabase import (
     SupabaseConfigError,
     SupabaseJobTracker,
@@ -812,13 +815,13 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool, lo
                 lower_ranked_df=lower_ranked,
                 feedback_url=feedback_url,
             )
-            ok, _info = send_via_resend(
+            ok, _info = send_email_transport(
                 user["notification_email"],
                 "Your Daily Job Alerts",
                 html,
             )
             if not ok:
-                logger.warning("User %s: Resend send failed — marking run success but email skipped.", user_id)
+                logger.warning("User %s: email send failed — marking run success but email skipped.", user_id)
         elif dry_run:
             logger.info("User %s: --dry-run, email not sent.", user_id)
 

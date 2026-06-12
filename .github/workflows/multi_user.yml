@@ -17,8 +17,9 @@ name: Multi-User Job Alerts
 # 3. Required repo secrets (Settings → Secrets and variables → Actions):
 #      SUPABASE_URL                 https://<ref>.supabase.co
 #      SUPABASE_SERVICE_ROLE_KEY    server-side key from the Supabase dashboard
-#      RESEND_API_KEY               from resend.com — until B12 (custom domain),
-#                                   sends are from noreply@resend.dev
+#      SENDER_EMAIL                 Gmail address that sends the alerts
+#      EMAIL_APP_PASSWORD           Google app password for SENDER_EMAIL
+#                                   (Gmail SMTP sends to any recipient; no domain)
 #      (existing) GEMINI_API_KEY, GEMINI_EMBED_API_KEY, GEMINI_EMBED2_API_KEY,
 #                 CEREBRAS_API_KEY, GROQ_API_KEY
 #
@@ -126,9 +127,11 @@ jobs:
           # Supabase (new)
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # Resend (new) — sender override unused until B12 (custom domain)
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          RESEND_FROM_ADDRESS: ${{ vars.RESEND_FROM_ADDRESS }}
+          # Email transport: Gmail SMTP. Reuses the same secrets the legacy
+          # single-user workflows use. Sends to any recipient the user sets as
+          # their notification_email — no custom domain needed (Resend retired).
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
           # Top-section verdict providers. Prefer the multi-user-dedicated keys
           # so the worker has its OWN daily token budget and can't be starved by
           # the legacy pipeline (which shares the 100K/day Groq TPD). Falls back
