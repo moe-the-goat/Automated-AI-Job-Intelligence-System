@@ -1,6 +1,6 @@
 ﻿# Web App Redesign — Consolidated Task List
 
-> ## ✅ STATUS (2026-06-12): 37 of 38 tasks implemented and green.
+> ## ✅ STATUS (2026-06-12): 37 of 38 tasks implemented and green, all activated and deployed.
 >
 > All of Phases 0–6 plus **W1** and **W2** are built and pass both QA gates:
 > - **Web** (`job-alerts-app`): tsc ✓ · ESLint ✓ · Vitest **126/126** ✓ · `next build` ✓
@@ -12,17 +12,18 @@
 > route in the web app, and the worker mints a per-(user,run) token and
 > embeds the "Rate today's matches" CTA in the email.
 >
-> **⚠ Manual activation steps (deploy order matters):**
-> 1. Apply `job-alerts-app/migrations/0011_job_results_origin.sql` then
+> **Activation steps — all done (2026-06-12):**
+> 1. ✅ Applied `job-alerts-app/migrations/0011_job_results_origin.sql` then
 >    `0012_email_feedback_tokens.sql` in the Supabase SQL Editor.
-> 2. Add `, origin` to `JOB_FIELDS` in
->    `src/app/dashboard/(workspace)/feedback/_lib/feedback-data.ts` (a marked one-line TODO).
-> 3. Deploy the web app, then set the repo Variable **APP_BASE_URL** (e.g.
->    `https://<app>.vercel.app`) on the worker repo and push the worker change.
-> Until then: grid shows one untagged section, emails go out without the
-> feedback link — by design, nothing breaks.
+> 2. ✅ Added `, origin` to `JOB_FIELDS` in
+>    `src/app/dashboard/(workspace)/feedback/_lib/feedback-data.ts`.
+> 3. ✅ Deployed the web app, set the repo Variable **APP_BASE_URL** on the worker
+>    repo, and pushed the worker change. Both repos are pushed and live.
 >
-> **Still open:** 0.2 (before/after screenshots — needs the app running).
+> **Skipped:** 0.2 (before/after screenshots). The redesign was already implemented
+> and deployed before screenshots were taken, so there's no "before" UI left to
+> compare against — capturing only an "after" shot wouldn't serve the original
+> "prove the 10x improvement honestly" purpose. Not pursued.
 
 > **Source:** the genuinely-useful ideas distilled from BOTH design research docs
 > ("Redesigning Multi-User Workflow Web Design" — the JavaFX-hallucination one, ~40% useful;
@@ -58,8 +59,8 @@
 
 - [x] **0.1 — Agree the scope.** Confirm we're building the filtered list below, not the
   excluded items. One persona, isolated users, no collaboration.
-- [ ] **0.2 — Snapshot the current UI.** Screenshot the current dashboard / results / preferences
-  pages so "before vs after" is provable (honest, not invented "10x" claims).
+- [~] **0.2 — Snapshot the current UI.** *(Skipped — redesign already shipped and
+  deployed before screenshots were taken; no "before" UI remains to compare against.)*
 - [x] **0.3 — Confirm no scope creep into the worker.** All tasks here are frontend; the DB
   schema already exposes everything we need (`match_percentage`, `tech_fit`,
   `experience_fit`, `logistics_fit`, `ai_verdict`, `description_excerpt`, `similarity`,
