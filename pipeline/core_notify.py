@@ -356,6 +356,28 @@ def _feedback_link_html():
     )
 
 
+def _feedback_cta_html(url):
+    """Tokenized per-run feedback CTA for the multi-user email (task W2).
+
+    Unlike `_feedback_link_html` (legacy, env-driven, one shared page), this
+    takes an explicit per-(user,run) URL minted by the runner. Table-based
+    button so it renders in every email client. Returns '' when no URL.
+    """
+    if not url:
+        return ""
+    return (
+        '<table role="presentation" cellpadding="0" cellspacing="0" '
+        'style="margin: 10px 0 6px;"><tr><td '
+        'style="background:#16a34a;border-radius:8px;">'
+        f'<a href="{url}" style="display:inline-block;padding:10px 18px;'
+        'color:#ffffff;font-weight:600;text-decoration:none;font-size:14px;">'
+        "Rate today&rsquo;s matches &rarr;</a></td></tr></table>"
+        '<div style="color:#6b7280;font-size:12px;margin:0 0 14px;">'
+        "One tap per job &mdash; Applied / Not for me / Block &mdash; trains "
+        "tomorrow&rsquo;s scoring. Private link, no sign-in, expires in 30 days.</div>"
+    )
+
+
 def _feedback_link_md():
     """Markdown equivalent of `_feedback_link_html` for the GitHub Issue body."""
     url = os.environ.get("FEEDBACK_PAGE_URL", "").strip()
@@ -364,12 +386,17 @@ def _feedback_link_md():
     return f"[Give feedback on today's jobs]({url}) — steers tomorrow's scoring.\n\n"
 
 
-def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None):
+def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None,
+                      feedback_url=None):
     """Generates the final HTML payload for the daily email.
 
     `lower_ranked_df` (A3) is an optional dataframe of jobs that survived
     filtering but didn't make the AI top-N — rendered as a compact summary
     so the long tail is visible without burning AI quota.
+
+    `feedback_url` (W2, multi-user) is the tokenized per-(user,run) feedback
+    page minted by multi_user_runner; when set it replaces the legacy
+    env-driven `_feedback_link_html` block and adds a footer repeat.
     """
     internships_df = sort_by_match_percentage(internships_df.copy() if not internships_df.empty else pd.DataFrame())
     jobs_df = sort_by_match_percentage(jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
@@ -379,7 +406,7 @@ def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None):
     jobs_df = filter_by_match_threshold(jobs_df)
 
     html = "<h2>Automated AI Job Alerts</h2>"
-    html += _feedback_link_html()
+    html += _feedback_cta_html(feedback_url) if feedback_url else _feedback_link_html()
     html += f"<div><b>Pipeline Stats:</b> Scraped: {stats['scraped']} &rarr; Filtered to: {stats['filtered']} &rarr; AI Approved: {stats['approved']}</div>"
     html += (
         "<div style='color: #666; font-size: 12px; margin-top:4px;'>"
@@ -418,6 +445,17 @@ def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None):
             else:
                 html += "<div style='color: #666; font-size: 12px;'>Survived deterministic filters but ranked below the AI cutoff. Score = similarity weighted by region, trust, and role tier. Spam/suspicious companies are hidden here.</div>"
             html += _render_lower_ranked_html(lower_ranked_df)
+
+    if feedback_url:
+        # Footer repeat — after scrolling a long digest the reader shouldn't
+        # have to hunt back to the top to give feedback.
+        html += (
+            f'<br><p style="margin: 12px 0;"><a href="{feedback_url}" '
+            'style="color: #2563eb; font-weight: 600; text-decoration: none;">'
+            "Rate today&rsquo;s matches &rarr;</a> "
+            '<span style="color: #6b7280; font-size: 13px;">'
+            "(one tap per job &mdash; steers tomorrow&rsquo;s scoring)</span></p>"
+        )
 
     return html
 

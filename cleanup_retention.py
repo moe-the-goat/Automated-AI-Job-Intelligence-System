@@ -19,6 +19,10 @@ is ON DELETE SET NULL (the append-only feedback row + its embedding survive, so
 the RAG corpus is intact), and bookmarked rows are excluded up front so no
 bookmark is ever orphaned.
 
+Also purges expired email_feedback_tokens (W2): one row per (user, run) email,
+useless the moment expires_at passes — the RPCs reject them anyway, so this is
+pure hygiene.
+
 Global, service-role, idempotent. Safe to re-run; --dry-run reports counts
 without deleting.
 
@@ -238,8 +242,12 @@ def main(argv: Optional[list] = None) -> int:
     embeds = purge_by_timestamp(
         client, "job_embeddings", "embedded_at", args.embeddings_days, dry_run=args.dry_run
     )
-    logger.info("Cleanup %s: seen_jobs=%d, job_results=%d, job_embeddings=%d.",
-                "preview" if args.dry_run else "done", seen, results, embeds)
+    # days=0 → expires_at < now(): exactly the already-expired tokens (W2).
+    tokens = purge_by_timestamp(
+        client, "email_feedback_tokens", "expires_at", 0, dry_run=args.dry_run
+    )
+    logger.info("Cleanup %s: seen_jobs=%d, job_results=%d, job_embeddings=%d, email_feedback_tokens=%d.",
+                "preview" if args.dry_run else "done", seen, results, embeds, tokens)
     return 0
 
 

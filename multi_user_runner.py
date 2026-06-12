@@ -76,6 +76,7 @@ from pipeline.core_feedback_supabase import (
     RAG_FEEDBACK_THRESHOLD,
     RAG_TOP_K,
     count_feedback_entries,
+    create_feedback_token,
     ensure_feedback_embeddings,
     load_candidate_preferences,
     load_feedback_embeddings,
@@ -493,6 +494,27 @@ def _persist_job_results(client, run_id: int, user_id: str,
             inserted += len(rows[i:i + chunk])
         return inserted
     except Exception as e:
+        # Deploy-order safety net for W1: if the live schema predates
+        # migration 0011 (no `origin` column), strip the key and retry once
+        # rather than losing the whole run's results. Loud on purpose —
+        # the migration should have been applied before this code shipped.
+        if "origin" in str(e).lower():
+            logger.error(
+                "INSERT job_results rejected `origin` for run %s — migration "
+                "0011 is NOT applied. Retrying without provenance: %s",
+                run_id, e,
+            )
+            stripped = [{k: v for k, v in r.items() if k != "origin"} for r in rows]
+            try:
+                chunk = 100
+                inserted = 0
+                for i in range(0, len(stripped), chunk):
+                    client.table("job_results").insert(stripped[i:i + chunk]).execute()
+                    inserted += len(stripped[i:i + chunk])
+                return inserted
+            except Exception as e2:
+                logger.error("Retry without origin also failed for run %s: %s", run_id, e2)
+                return 0
         logger.error("Bulk INSERT job_results failed for run %s: %s", run_id, e)
         return 0
 
@@ -524,6 +546,7 @@ def _jobs_to_rows(df: pd.DataFrame, run_id: int, user_id: str, *, ai_evaluated: 
             "pre_flagged_low_quality": bool(row.get("pre_flagged_low_quality", False)),
             "pre_flagged_trusted": bool(row.get("pre_flagged_trusted", False)),
             "similarity": _coerce_similarity(row.get("similarity")),
+            "origin": _safe_origin(row.get("origin")),
         })
     return out
 
@@ -572,6 +595,19 @@ def _safe_effort(v):
         return None
     s = str(v).strip().lower()
     return s if s in _VALID_EFFORTS else None
+
+
+_VALID_ORIGINS = {"global", "local"}
+
+
+def _safe_origin(v):
+    """Coerce the provenance tag to the schema's CHECK ('global'|'local').
+    Anything else — including pandas NaN, which str()s to 'nan' — maps to
+    None so a pre-W1 frame or a malformed value never fails the insert."""
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    return s if s in _VALID_ORIGINS else None
 
 
 def _compute_next_run(frequency_hours, *, now=None) -> datetime:
@@ -635,12 +671,20 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool, lo
         preferences_for, _mode = _build_preferences_provider(user_id, feedback_embed_key)
 
         # 2. Scrape — global (per-user searches + public APIs) and shared local.
+        # Tag provenance HERE, before the merge, so the origin survives the
+        # URL-dedup concat and lands in job_results (task W1 — the web app
+        # splits Local vs Global/Remote sections on this). The local rows'
+        # fine-grained `source` (ddg_linkedin / telegram / jobs_ps …) is
+        # collapsed to one 'local' value; source itself stays worker-side.
         global_jobs = _scrape_for_user(user, api_cache)
+        if not global_jobs.empty:
+            global_jobs["origin"] = "global"
         local_jobs = pd.DataFrame()
         if local_cache is not None:
             raw_local = local_cache.get()
             if raw_local:
                 local_jobs = pd.DataFrame(raw_local)
+                local_jobs["origin"] = "local"
         stats["scraped"] = int(len(global_jobs) + len(local_jobs))
         if global_jobs.empty and local_jobs.empty:
             logger.info("User %s: no jobs scraped this tick.", user_id)
@@ -745,10 +789,28 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool, lo
             )
             internships_df = valid_top[intern_mask]
             jobs_df = valid_top[~intern_mask]
+
+            # W2: mint the tokenized feedback-page link for this (user, run).
+            # APP_BASE_URL unset or token insert failing (e.g. migration 0012
+            # not applied) degrades to the same email without a link — the
+            # send itself must never be blocked by the feedback feature.
+            feedback_url = None
+            app_base = os.environ.get("APP_BASE_URL", "").strip().rstrip("/")
+            if app_base:
+                fb_token = create_feedback_token(user_id, run_id, client=client)
+                if fb_token:
+                    feedback_url = f"{app_base}/f/{fb_token}"
+            else:
+                logger.info(
+                    "User %s: APP_BASE_URL not set — email goes out without a feedback link.",
+                    user_id,
+                )
+
             html = format_email_html(
                 internships_df, jobs_df,
                 {"scraped": stats["scraped"], "filtered": stats["filtered"], "approved": stats["approved"]},
                 lower_ranked_df=lower_ranked,
+                feedback_url=feedback_url,
             )
             ok, _info = send_via_resend(
                 user["notification_email"],

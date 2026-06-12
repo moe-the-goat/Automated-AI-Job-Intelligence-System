@@ -141,5 +141,9 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_EMBED_API_KEY: ${{ secrets.GEMINI_EMBED_API_KEY }}
           GEMINI_EMBED2_API_KEY: ${{ secrets.GEMINI_EMBED2_API_KEY }}
+          # W2: public origin of the deployed web app (e.g. https://<app>.vercel.app).
+          # Set as a repo Variable. When unset, emails simply omit the tokenized
+          # "Rate today's matches" feedback link — never a failure.
+          APP_BASE_URL: ${{ vars.APP_BASE_URL }}
         run: |
           python multi_user_runner.py ${{ steps.flags.outputs.flags }}

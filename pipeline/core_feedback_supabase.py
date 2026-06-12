@@ -26,6 +26,9 @@ The RAG_FEEDBACK_THRESHOLD / RAG_TOP_K constants are re-exported from the
 old module so both paths stay in lockstep when we tune them.
 """
 
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from pipeline.logging_setup import get_logger
@@ -34,15 +37,55 @@ from pipeline.core_supabase import get_service_client
 
 logger = get_logger(__name__)
 
+# Lifetime of an email feedback link (task W2). Must stay in sync with the
+# default on email_feedback_tokens.expires_at (migration 0012) and the copy
+# in the email CTA / web page.
+FEEDBACK_TOKEN_TTL_DAYS = 30
+
 __all__ = [
     "RAG_FEEDBACK_THRESHOLD",
     "RAG_TOP_K",
+    "FEEDBACK_TOKEN_TTL_DAYS",
     "load_candidate_preferences",
     "count_feedback_entries",
     "load_feedback_embeddings",
     "ensure_feedback_embeddings",
     "format_entry_text",
+    "create_feedback_token",
 ]
+
+
+def create_feedback_token(user_id: str, run_id: int, *, client=None,
+                          ttl_days: int = FEEDBACK_TOKEN_TTL_DAYS) -> Optional[str]:
+    """Mint the secret behind one email's feedback page (task W2).
+
+    Returns the RAW url-safe token for embedding in the email URL, or None on
+    any failure — the caller degrades to an email without a feedback link.
+    Only the SHA-256 hex lands in email_feedback_tokens: a read of the table
+    (or a leaked backup) cannot reconstruct working links. The matching hash
+    check lives in the SECURITY DEFINER RPCs from migration 0012.
+    """
+    if not user_id or not run_id:
+        return None
+    client = client or get_service_client()
+    token = secrets.token_urlsafe(32)   # 256 bits of entropy, 43 url-safe chars
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+    try:
+        client.table("email_feedback_tokens").insert({
+            "token_hash": token_hash,
+            "user_id": user_id,
+            "run_id": run_id,
+            "expires_at": expires_at.isoformat(),
+        }).execute()
+        return token
+    except Exception as e:
+        logger.error(
+            "create_feedback_token failed for user %s run %s — the email goes "
+            "out WITHOUT a feedback link (is migration 0012 applied?): %s",
+            user_id, run_id, e,
+        )
+        return None
 
 
 def format_entry_text(entry: dict) -> str:
