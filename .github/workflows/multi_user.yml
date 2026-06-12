@@ -55,6 +55,14 @@ on:
         options:
           - "true"
           - "false"
+      manual:
+        description: "Mark as a user 'Run now' dispatch (stamps run_trigger=manual, cancels today's scheduled tick). Use with user_id."
+        required: false
+        type: choice
+        default: "false"
+        options:
+          - "true"
+          - "false"
 
 # Never let two runs overlap: if a tick is still processing when the next hour
 # fires, the new run waits instead of double-processing users (which would
@@ -117,6 +125,9 @@ jobs:
           fi
           if [ "${{ github.event.inputs.skip_due_check }}" = "true" ]; then
             FLAGS="$FLAGS --skip-due-check"
+          fi
+          if [ "${{ github.event.inputs.manual }}" = "true" ]; then
+            FLAGS="$FLAGS --manual"
           fi
 
           echo "Resolved flags: '$FLAGS' (dry_run=$DRY)"

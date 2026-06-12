@@ -21,6 +21,10 @@ CLI:
     python multi_user_runner.py --user-id <uuid>     # process one specific user
     python multi_user_runner.py --skip-due-check     # ignore next_run_at gating
                                                        (use with --user-id for forced replays)
+    python multi_user_runner.py --user-id <uuid> --skip-due-check --manual
+                                                     # user "Run now": stamps the run
+                                                       manual + cancels today's scheduled
+                                                       tick (still bounded by the 2/day budget)
 
 Env (in addition to the scraper's existing secrets):
     SUPABASE_URL
@@ -37,6 +41,7 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -106,6 +111,19 @@ WHITELIST_ONLY = True
 # of their run (a claim), so an overlapping cron tick can't re-select a user
 # whose run is still in flight. On failure we pull it back to a shorter retry.
 FAILURE_RETRY_HOURS = 2
+
+# Per-user daily run budget. Each user gets this many runs per local day
+# (Asia/Jerusalem), counting BOTH the scheduled cron tick and any manual
+# "Run now" dispatches — so a user who lets the schedule fire has one manual
+# run left, and a user who triggers two manual runs gets no scheduled one.
+# Enforced HERE (the worker spends the quota: API tokens + mail) so it can't
+# be bypassed by hitting the dispatch endpoint directly; the dashboard only
+# mirrors the count for display.
+MAX_RUNS_PER_DAY = 2
+
+# The locale the daily budget resets in — matches the project's 9 AM
+# Jerusalem schedule, so "today" lines up with the user's day, not UTC.
+RUN_BUDGET_TZ = "Asia/Jerusalem"
 
 # Include the Palestinian local-market sources (Telegram, jobs.ps, per-company
 # ATS/DDG/JobSpy) in every user's run. The local market is the SAME for everyone,
@@ -444,19 +462,39 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
     return users
 
 
-def _insert_run(client, user_id: str) -> Optional[int]:
-    """Create the runs row with status='running' and return its id."""
+def _insert_run(client, user_id: str, *, trigger: str = "scheduled") -> Optional[int]:
+    """Create the runs row with status='running' and return its id.
+
+    `trigger` records whether this was the scheduled cron tick or a manual
+    user dispatch (runs.run_trigger). Falls back to a trigger-less insert if
+    the column doesn't exist yet (migration 0014 not applied), so a partial
+    deploy degrades to the old behavior instead of failing every run.
+    """
+    if trigger not in ("scheduled", "manual"):
+        trigger = "scheduled"
+    payload = {"user_id": user_id, "status": "running", "run_trigger": trigger}
     try:
-        resp = (
-            client.table("runs")
-            .insert({"user_id": user_id, "status": "running"})
-            .execute()
-        )
+        resp = client.table("runs").insert(payload).execute()
         rows = resp.data or []
         return rows[0]["id"] if rows else None
     except Exception as e:
-        logger.error("INSERT runs failed for user %s: %s", user_id, e)
-        return None
+        # Most likely cause pre-migration: column run_trigger does not exist.
+        # Retry once without it so runs keep working during the deploy window.
+        logger.warning(
+            "INSERT runs with run_trigger failed for %s (%s) — retrying without it.",
+            user_id, e,
+        )
+        try:
+            resp = (
+                client.table("runs")
+                .insert({"user_id": user_id, "status": "running"})
+                .execute()
+            )
+            rows = resp.data or []
+            return rows[0]["id"] if rows else None
+        except Exception as e2:
+            logger.error("INSERT runs failed for user %s: %s", user_id, e2)
+            return None
 
 
 def _finalize_run(client, run_id: int, *,
@@ -635,11 +673,59 @@ def _set_next_run(client, user_id: str, when: datetime):
         logger.error("UPDATE preferences.next_run_at failed for %s: %s", user_id, e)
 
 
+def _budget_day_start_utc(*, now=None) -> datetime:
+    """The UTC instant of the most recent local-midnight in RUN_BUDGET_TZ.
+
+    The daily run budget resets at midnight Jerusalem; runs.started_at is
+    stored in UTC, so we convert that local-midnight back to UTC for the
+    `started_at >= …` count. Mirrors the runs_used_today SQL RPC exactly so
+    the worker's enforcement and the dashboard's display never disagree.
+    """
+    now = now or datetime.now(timezone.utc)
+    tz = ZoneInfo(RUN_BUDGET_TZ)
+    local_now = now.astimezone(tz)
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(timezone.utc)
+
+
+def _next_budget_day_start_utc(*, now=None) -> datetime:
+    """The UTC instant of the NEXT local-midnight — i.e. when the budget next
+    resets. Used to park a user's next_run_at past today so an exhausted or
+    manually-triggered user isn't re-selected again today."""
+    return _budget_day_start_utc(now=now) + timedelta(days=1)
+
+
+def _runs_used_today(client, user_id: str, *, now=None) -> int:
+    """How many runs this user has started since local-midnight Jerusalem.
+
+    Counts runs rows directly — the same source of truth the dashboard reads
+    via the runs_used_today RPC. Returns a large sentinel on query failure so
+    a transient DB error fails CLOSED (skips the run) rather than handing out
+    free runs; the scheduled tick will simply try again next hour.
+    """
+    day_start = _budget_day_start_utc(now=now)
+    try:
+        resp = (
+            client.table("runs")
+            .select("id", count="exact")
+            .eq("user_id", user_id)
+            .gte("started_at", day_start.isoformat())
+            .execute()
+        )
+        if resp.count is not None:
+            return int(resp.count)
+        return len(resp.data or [])
+    except Exception as e:
+        logger.error("Count runs-today failed for %s: %s — failing closed.", user_id, e)
+        return MAX_RUNS_PER_DAY  # treat as exhausted so we don't over-spend
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-user pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool, local_cache=None):
+def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
+                  local_cache=None, trigger: str = "scheduled"):
     """End-to-end pipeline for one user. Never raises — failures are logged
     and recorded on the runs row so other users in the batch still execute.
 
@@ -647,9 +733,31 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool, lo
     jobs collected once per tick. When provided, local jobs are filtered with the
     lighter local=True rules and merged with the user's globally-filtered jobs
     before CV ranking, so each user sees local jobs personalized to their CV.
+
+    `trigger` is 'scheduled' (cron) or 'manual' (a user "Run now" dispatch).
+    It's stamped on the runs row and decides the post-run next_run_at handling.
     """
     user_id = user["user_id"]
-    run_id = _insert_run(client, user_id)
+
+    # Daily-budget gate. Counts BOTH scheduled and manual runs since local
+    # midnight Jerusalem; at/over the cap we skip WITHOUT creating a run row
+    # (so the skip itself doesn't burn a slot). This is the authoritative
+    # enforcement point — the dashboard's count is only a mirror.
+    used = _runs_used_today(client, user_id)
+    if used >= MAX_RUNS_PER_DAY:
+        logger.info(
+            "User %s: daily run budget exhausted (%d/%d) — skipping %s run; "
+            "budget resets at local midnight.",
+            user_id, used, MAX_RUNS_PER_DAY, trigger,
+        )
+        # Park a scheduled tick past today so the cron doesn't keep re-selecting
+        # this user every hour for the rest of the day. A manual dispatch that
+        # hits the cap simply no-ops (the user is told 0 runs left in the UI).
+        if trigger == "scheduled":
+            _set_next_run(client, user_id, _next_budget_day_start_utc())
+        return
+
+    run_id = _insert_run(client, user_id, trigger=trigger)
     if run_id is None:
         logger.error("Could not create run row for %s — skipping.", user_id)
         return
@@ -659,7 +767,19 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool, lo
     # user mid-flight (the workflow `concurrency` guard is the first line of
     # defense; this is the data-layer backstop, e.g. for a manual dispatch that
     # overlaps the schedule). On failure we pull it back to a short retry below.
-    _set_next_run(client, user_id, _compute_next_run(user["frequency_hours"]))
+    #
+    # On a MANUAL run we additionally cancel today's still-pending scheduled
+    # tick: a manual run consumes one of the 2 daily slots, so if the user's
+    # next scheduled run is still later TODAY we push it past local midnight.
+    # This is what makes "manual now → today's scheduled one is cancelled"
+    # hold exactly, instead of the user getting an extra run. (If their cadence
+    # already lands tomorrow, next_run_at is left at the normal claim value.)
+    if trigger == "manual":
+        scheduled_next = _compute_next_run(user["frequency_hours"])
+        next_budget_day = _next_budget_day_start_utc()
+        _set_next_run(client, user_id, max(scheduled_next, next_budget_day))
+    else:
+        _set_next_run(client, user_id, _compute_next_run(user["frequency_hours"]))
 
     tracker = SupabaseJobTracker(user_id, client=client)
     stats = {"scraped": 0, "filtered": 0, "ai_evaluated": 0, "approved": 0, "lower_ranked": 0}
@@ -863,6 +983,10 @@ def main(argv: Optional[list] = None) -> int:
                         help="Process only this user (UUID). Useful for onboarding / replays.")
     parser.add_argument("--skip-due-check", action="store_true",
                         help="Ignore preferences.next_run_at gating (use with --user-id).")
+    parser.add_argument("--manual", action="store_true",
+                        help="Mark this run as a user-initiated manual dispatch "
+                             "(stamps run_trigger='manual' and cancels today's "
+                             "pending scheduled run). Use with --user-id.")
     args = parser.parse_args(argv)
 
     configure_logging()
@@ -885,11 +1009,18 @@ def main(argv: Optional[list] = None) -> int:
     api_cache = _ApiCache()
     # Shared local-market jobs, collected once on first use this tick.
     local_cache = _LocalJobsCache() if INCLUDE_LOCAL_SOURCES else None
+    # A manual dispatch targets exactly one user (--user-id); guard against
+    # --manual being passed for a whole-batch run, which would mis-stamp every
+    # scheduled tick as manual.
+    trigger = "manual" if (args.manual and args.user_id) else "scheduled"
+    if args.manual and not args.user_id:
+        logger.warning("--manual ignored: it requires --user-id. Treating as scheduled.")
     tick_start = time.time()
     for user in users:
         user_start = time.time()
-        logger.info("--- Starting user %s ---", user["user_id"])
-        _run_for_user(user, client, api_cache, dry_run=args.dry_run, local_cache=local_cache)
+        logger.info("--- Starting user %s (%s) ---", user["user_id"], trigger)
+        _run_for_user(user, client, api_cache, dry_run=args.dry_run,
+                      local_cache=local_cache, trigger=trigger)
         logger.info(
             "--- Finished user %s in %.1fs ---",
             user["user_id"], time.time() - user_start,
