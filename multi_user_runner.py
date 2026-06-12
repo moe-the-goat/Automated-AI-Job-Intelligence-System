@@ -298,7 +298,26 @@ def _build_preferences_provider(user_id: str, feedback_embed_key: str):
 
     if entry_count >= RAG_FEEDBACK_THRESHOLD:
         embeddings = load_feedback_embeddings(user_id)
-        logger.info("User %s: RAG mode (%d feedback entries).", user_id, entry_count)
+        loaded = len(embeddings.get("entries", []))
+        if loaded == 0:
+            # entry_count says the corpus is past the RAG threshold, but the
+            # embedding join returned nothing. That's not "no feedback" — it's a
+            # load failure (e.g. the feedback↔feedback_embeddings FK missing from
+            # PostgREST's schema cache, PGRST200). Without this guard the run
+            # logs a cheerful "RAG mode (N entries)" while every verdict gets
+            # ZERO feedback context. Make the degradation impossible to miss.
+            logger.error(
+                "User %s: RAG mode selected (%d feedback entries) but the embedding "
+                "corpus loaded EMPTY — RAG retrieval will return no context this run. "
+                "Check the feedback↔feedback_embeddings relationship / PostgREST schema "
+                "cache (see migration 0010).",
+                user_id, entry_count,
+            )
+        else:
+            logger.info(
+                "User %s: RAG mode (%d feedback entries, %d embedded).",
+                user_id, entry_count, loaded,
+            )
 
         def preferences_for(row):
             return retrieve_relevant_feedback(row, embeddings, feedback_embed_key, top_k=RAG_TOP_K)
