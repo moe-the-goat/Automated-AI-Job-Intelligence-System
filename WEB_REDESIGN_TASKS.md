@@ -24,6 +24,15 @@
 > and deployed before screenshots were taken, so there's no "before" UI left to
 > compare against — capturing only an "after" shot wouldn't serve the original
 > "prove the 10x improvement honestly" purpose. Not pursued.
+>
+> **Re-theme (2026-06-12, commit `9704d5a`):** the user judged the shipped warm
+> palette (amber-on-black + glow + serif hero) as AI-slop. After a 4-way style
+> comparison the app was re-themed to **Direction A — neutral utilitarian**
+> (Linear/GitHub): neutral charcoals `#0e1116`, one muted blue accent `#539bf5`
+> used sparingly, GitHub-muted success/warning/danger, Geist-only (Instrument
+> Serif removed), zero glows/gradients, faux browser chrome removed from the
+> marketing previews. Tokens renamed sage→success, terracotta→danger,
+> amber→warning. The Phase 1 palette description above is superseded by this.
 
 > **Source:** the genuinely-useful ideas distilled from BOTH design research docs
 > ("Redesigning Multi-User Workflow Web Design" — the JavaFX-hallucination one, ~40% useful;
