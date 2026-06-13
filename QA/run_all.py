@@ -28,7 +28,7 @@ from pathlib import Path
 QA_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = QA_DIR.parent
 
-# Make `core_*`, `scraper`, `local_companies` importable from inside tests.
+# Make the top-level entry points + `pipeline.*` importable from inside tests.
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(QA_DIR))
 

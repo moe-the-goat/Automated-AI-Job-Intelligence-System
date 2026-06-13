@@ -21,14 +21,16 @@ GATHERS the raw local jobs.
 """
 
 import os
-from datetime import datetime, timezone
+import re
+import time
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 
 import pandas as pd
 
 from pipeline.logging_setup import get_logger
 from pipeline.core_ats import extract_linkedin_handle, get_jobs_for_company as get_ats_jobs, AtsCache
-from pipeline.url_validation import probe_urls_alive_batch
+from pipeline.url_validation import probe_urls_alive_batch, is_specific_job_url_like
 
 logger = get_logger(__name__)
 
@@ -65,6 +67,130 @@ def extract_domain(url):
         return domain.replace("www.", "")
     except Exception:
         return ""
+
+
+# LinkedIn activity IDs are snowflake-like: the top ~41 bits encode a UNIX
+# timestamp in MILLISECONDS. Right-shifting the 64-bit ID by 22 strips the low
+# sequence bits and yields a millisecond timestamp.
+# Verified: 7397959444342575104 >> 22 = 1763830509824 ms -> 2025-11-22 UTC.
+_LINKEDIN_ACTIVITY_RE = re.compile(r"activity-(\d+)")
+_LINKEDIN_HANDLE_RE = re.compile(r"linkedin\.com/posts/([a-z0-9\-]+?)(?:_|/)")
+
+
+def linkedin_post_date(url):
+    """Decode the post date from a LinkedIn activity URL. None if undecodable.
+
+    BUG HISTORY: an earlier version treated the shifted value as seconds, which
+    overflowed fromtimestamp() and made this always return None — so the date
+    filter never fired and months-old posts slipped through. Fixed by /1000.
+    """
+    match = _LINKEDIN_ACTIVITY_RE.search(url or "")
+    if not match:
+        return None
+    try:
+        activity_id = int(match.group(1))
+        ts_milliseconds = activity_id >> 22
+        return datetime.fromtimestamp(ts_milliseconds / 1000, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def linkedin_handle_matches(url, company_name):
+    """True if the post URL's handle contains a meaningful chunk of the company
+    name. Prevents DDG false positives where a generic first word (e.g.
+    'Future') matches a totally unrelated post.
+    """
+    match = _LINKEDIN_HANDLE_RE.search((url or "").lower())
+    if not match:
+        return False
+    handle = match.group(1)
+    name_tokens = re.findall(r"[a-z]+", company_name.lower())
+    return any(len(tok) >= 3 and tok in handle for tok in name_tokens)
+
+
+def ddg_search_for_jobs(company_name, domain, linkedin_handle=None):
+    """Search for recent job posts on LinkedIn and the company website.
+
+    Uses `web_search` (Google Programmable Search when configured, else
+    DuckDuckGo) so the local pipeline isn't reliant on IP-blockable scraping.
+    When `linkedin_handle` is provided, the LinkedIn query is the precise
+    site:linkedin.com/company/{handle}/posts form.
+
+    Moved here from local_companies.py (2026-06-14 cleanup) so the multi-user
+    path no longer reaches into the legacy single-user entry point.
+    """
+    from pipeline.core_websearch import web_search
+    jobs_found = []
+
+    short_name = company_name.split()[0] if len(company_name.split()) > 0 else company_name
+
+    # 1. LinkedIn Posts (handle-precise when available, else name search).
+    try:
+        if linkedin_handle:
+            q1 = f'site:linkedin.com/company/{linkedin_handle}/posts (hiring OR vacancy OR "looking for" OR job)'
+            logger.info("Searching LinkedIn Posts (handle '%s') for: %s...", linkedin_handle, company_name)
+        else:
+            q1 = f'site:linkedin.com/posts {short_name} (hiring OR vacancy OR "looking for" OR job)'
+            logger.info("Searching LinkedIn Posts for: %s (using '%s')...", company_name, short_name)
+        res1 = web_search(q1, max_results=3, timelimit="w")  # past week (DDG fallback only)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=LOCAL_LOOKBACK_DAYS)
+        for r in res1:
+            title = r.get("title", "")
+            body = r.get("body", "")
+            link = r.get("href", "")
+
+            # Require a REAL, DATEABLE post: no activity id -> not a post (skip);
+            # older than the lookback -> skip.
+            post_date = linkedin_post_date(link)
+            if post_date is None:
+                logger.info("Skipping non-post LinkedIn URL for %s: %s", company_name, link[:80])
+                continue
+            if post_date < cutoff:
+                logger.info("Skipping old post for %s: posted %s", company_name, post_date.date())
+                continue
+            if not linkedin_handle_matches(link, company_name):
+                logger.info("Skipping unrelated post for %s: handle mismatch (%s)", company_name, link[:80])
+                continue
+
+            jobs_found.append({
+                "title": title[:120] if title else f"{company_name} — LinkedIn hiring post",
+                "company": company_name,
+                "location": "Local/Remote",
+                "job_url": link,
+                "description": body,
+                "job_type": "fulltime",
+                "source": "ddg_linkedin",
+            })
+    except Exception as e:
+        logger.warning("DDG LinkedIn search failed for %s: %s", company_name, e)
+
+    # 2. Company Website (require a SPECIFIC job-detail URL, not a landing page).
+    if domain:
+        try:
+            q2 = f"site:{domain} (hiring OR careers OR jobs OR vacancy)"
+            logger.info("Searching Website (%s) for: %s...", domain, company_name)
+            res2 = web_search(q2, max_results=3, timelimit="w")
+            for r in res2:
+                title = r.get("title", "")
+                body = r.get("body", "")
+                link = r.get("href", "")
+                if not is_specific_job_url_like(link):
+                    logger.info("Skipping non-specific URL for %s: %s", company_name, link[:80])
+                    continue
+                jobs_found.append({
+                    "title": title[:120] if title else f"{company_name} — careers page listing",
+                    "company": company_name,
+                    "location": "Local/Remote",
+                    "job_url": link,
+                    "description": body,
+                    "job_type": "fulltime",
+                    "source": "ddg_website",
+                })
+        except Exception as e:
+            logger.warning("DDG Website search failed for %s: %s", company_name, e)
+
+    time.sleep(1)  # be nice to the search API
+    return jobs_found
 
 
 def is_linkedin_only_website(url):
@@ -165,9 +291,6 @@ def collect_local_raw_jobs(*, gemini_key=None, lookback_days=LOCAL_LOOKBACK_DAYS
 
     Returns (raw_jobs, stats) where stats has per-source counts for logging.
     """
-    # Lazy imports for the heavy / optional providers.
-    from local_companies import ddg_search_for_jobs  # the provider-abstracted DDG helper
-
     raw_jobs = []
     stats = {"ats_jobs": 0, "ddg_jobs": 0, "jobspy_jobs": 0, "telegram_jobs": 0, "jobsps_jobs": 0}
 

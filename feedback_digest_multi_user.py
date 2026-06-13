@@ -36,9 +36,10 @@ from pipeline.core_feedback_supabase import (
     count_feedback_entries,
     format_entry_text,
 )
-# Reuse the prompt verbatim so single-user and multi-user digests stay
-# semantically aligned — same instruction → comparable preference profiles.
-from feedback_digest import SUMMARY_PROMPT
+# Shared prompt (lives in core_feedback) so the multi-user digest stays
+# semantically aligned with the single-user one — same instruction → comparable
+# preference profiles.
+from pipeline.core_feedback import SUMMARY_PROMPT
 
 logger = get_logger(__name__)
 

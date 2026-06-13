@@ -97,9 +97,11 @@ logger = get_logger(__name__)
 # Tuning knobs (mirror scraper.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
-AI_EVAL_TOP_N = 30                  # smaller default per-user budget than the global scraper (55)
+AI_EVAL_TOP_N = 55                  # matched to the legacy global scraper so the
+                                    # finalized-job count is comparable (was 30 —
+                                    # too few cleared the bar, ~8-9 vs the old ~20+)
 WILDCARD_COUNT = 5
-LOWER_RANKED_EVAL_LIMIT = 15        # smaller than scraper.py (25) — multiplied by N users
+LOWER_RANKED_EVAL_LIMIT = 25        # matched to scraper.py (was 15)
 DESCRIPTION_EXCERPT_CHARS = 1000    # persisted to job_results so Tab B survives URL rot
 
 # Closed-beta gate: only users with profiles.is_whitelisted = true are

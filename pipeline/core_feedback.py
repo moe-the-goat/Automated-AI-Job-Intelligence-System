@@ -57,6 +57,42 @@ RAG_FEEDBACK_THRESHOLD = 50
 RAG_TOP_K = 5
 
 
+# Prompt that turns a candidate's feedback history into a preference profile for
+# the digest path (below the RAG threshold). Lives here as the shared source of
+# truth so both the single-user digest and feedback_digest_multi_user.py use the
+# identical wording (moved here 2026-06-14 cleanup; was in feedback_digest.py).
+SUMMARY_PROMPT = """You are analyzing a candidate's job-search feedback history to build a
+deep, useful preference profile. The profile will be injected into a recruiter-screen
+prompt that scores future job listings against the candidate's CV. Your output IS
+the profile — write it as if a thoughtful recruiter is describing the candidate's
+preferences to another recruiter.
+
+Each feedback entry below records the candidate's reaction to one job that the
+pipeline surfaced. Possible feedback types:
+
+  applied         — submitted an application; treat as a clear positive signal
+  bookmarked      — interested but did not apply yet
+  not_relevant    — irrelevant to the search; treat as a clear negative signal
+  block_company   — never show this company again
+  wrong_location  — geographically incompatible (look for location patterns)
+  other           — read the note; the candidate left a free-form explanation
+
+FEEDBACK HISTORY (chronological, most recent last):
+{entries}
+
+Write a CANDIDATE PREFERENCE PROFILE in 5 to 8 sentences. Cover:
+  1. Role categories the candidate consistently engages with.
+  2. Role categories they consistently reject (and why, if the notes say).
+  3. Specific companies, industries, or company-size patterns they block or favor.
+  4. Tech-stack or seniority patterns visible in the notes and feedback.
+  5. Inferred preferences future scoring should weight more or less.
+
+Be concrete and specific. Cite role types, technologies, and company traits by name.
+Do not invent information not present in the entries. Output prose only — no JSON,
+no bullet lists, no markdown headers.
+"""
+
+
 class LogsRepoAuthError(RuntimeError):
     """Raised when the LOGS_REPO_TOKEN is rejected (401/403) by the GitHub Contents API.
 

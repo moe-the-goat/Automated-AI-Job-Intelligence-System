@@ -15,7 +15,7 @@ If this test ever fails, someone has reintroduced the bug. Don't "fix" it
 by removing the test — trace why the dates aren't decoding correctly.
 """
 from datetime import datetime, timezone, timedelta
-from local_companies import linkedin_post_date, LOCAL_LOOKBACK_DAYS
+from pipeline.core_local_sources import linkedin_post_date, LOCAL_LOOKBACK_DAYS
 
 
 # Two real activity URLs from the email the user flagged on 2026-05-16:

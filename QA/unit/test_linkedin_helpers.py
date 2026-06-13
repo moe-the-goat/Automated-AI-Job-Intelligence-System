@@ -5,7 +5,7 @@ old posts slip into the email. The regression for that lives in
 regression/test_date_decoder_ms_bug.py — this file is the everyday coverage.
 """
 from datetime import datetime, timezone, timedelta
-from local_companies import linkedin_post_date, linkedin_handle_matches, LOCAL_LOOKBACK_DAYS
+from pipeline.core_local_sources import linkedin_post_date, linkedin_handle_matches, LOCAL_LOOKBACK_DAYS
 
 
 def test_post_date_decodes_iconnect_url():
