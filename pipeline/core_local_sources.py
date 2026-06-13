@@ -21,6 +21,7 @@ GATHERS the raw local jobs.
 """
 
 import os
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -35,6 +36,13 @@ logger = get_logger(__name__)
 # Local lookback window (days) — wide on purpose; local postings are sparse, and
 # the seen-jobs tracker prevents the overlap from producing duplicate emails.
 LOCAL_LOOKBACK_DAYS = 7
+
+# ATS APIs (Greenhouse/Lever/…) return EVERY open posting, including ones a
+# company forgot to close — these still answer 200 so the dead-URL probe can't
+# catch them. Drop ATS jobs whose date_posted is older than this so a stale
+# listing (e.g. an Innotic role left up for months) never reaches the AI/email.
+# A real local role rarely stays genuinely open past two months.
+ATS_MAX_AGE_DAYS = 60
 
 # Public Telegram job channels (read via t.me/s/<handle> — no login/token).
 TELEGRAM_JOB_CHANNELS = [
@@ -57,6 +65,75 @@ def extract_domain(url):
         return domain.replace("www.", "")
     except Exception:
         return ""
+
+
+def is_linkedin_only_website(url):
+    """True when a company's 'jobs website' is just a LinkedIn URL, not a real
+    careers page.
+
+    Entries like "Aurora Technologies" list a linkedin.com/company/... URL as
+    their jobs website and have no scrapeable careers page. ATS detection fails,
+    and the per-company DDG/website dance can then only ever return old or
+    non-specific LinkedIn URLs — pure search noise (and captcha/429 hits) with
+    zero usable jobs. We skip that dance for these. ATS + JobSpy still run.
+    """
+    s = str(url or "").strip().lower()
+    if not s or s == "nan":
+        return False
+    return "linkedin.com" in extract_domain(s)
+
+
+def _parse_job_date(raw):
+    """Best-effort parse of an ATS date_posted into an aware UTC datetime.
+
+    ATS fetchers emit a mix of ISO-8601 (Greenhouse updated_at, Ashby,
+    Workable) and date-only strings. Returns None when unparseable — the
+    caller treats None as "unknown, keep" so a missing/odd date never silently
+    drops a real job.
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    # Normalize a trailing Z to +00:00 for fromisoformat.
+    iso = s.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        # Fall back to a plain date (YYYY-MM-DD) prefix.
+        try:
+            dt = datetime.fromisoformat(s[:10])
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def drop_stale_ats_jobs(raw_jobs, max_age_days=ATS_MAX_AGE_DAYS):
+    """Drop ATS-sourced jobs older than max_age_days by their date_posted.
+
+    Only ATS rows (source startswith 'ats_') are aged out — they come from APIs
+    that return every open posting including forgotten ones. A row with no
+    parseable date is KEPT (we never drop on uncertainty). Other sources
+    (ddg/jobspy/telegram/jobs.ps) are recency-filtered upstream and untouched.
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - max_age_days * 86400
+    before = len(raw_jobs)
+    kept = []
+    dropped = 0
+    for j in raw_jobs:
+        if str(j.get("source", "")).startswith("ats_"):
+            dt = _parse_job_date(j.get("date_posted"))
+            if dt is not None and dt.timestamp() < cutoff:
+                dropped += 1
+                continue
+        kept.append(j)
+    if dropped:
+        logger.info(
+            "Stale-ATS filter: dropped %d job(s) older than %d days (of %d).",
+            dropped, max_age_days, before,
+        )
+    return kept
 
 
 def load_local_companies():
@@ -120,18 +197,31 @@ def collect_local_raw_jobs(*, gemini_key=None, lookback_days=LOCAL_LOOKBACK_DAYS
                     )
                     if ats_jobs:
                         logger.info("ATS yielded %d job(s) for %s", len(ats_jobs), company_name)
+                        # Tag the source so the stale-ATS filter can target these
+                        # (core_ats doesn't set a source field itself).
+                        for j in ats_jobs:
+                            j.setdefault("source", "ats_api")
                         stats["ats_jobs"] += len(ats_jobs)
                         raw_jobs.extend(ats_jobs)
                 except Exception as e:
                     logger.warning("ATS scrape failed for %s: %s", company_name, str(e)[:120])
 
             # DDG (LinkedIn posts + careers) via core_websearch (Google/DDG).
-            try:
-                ddg_jobs = ddg_search_for_jobs(company_name, domain, linkedin_handle=linkedin_handle)
-                stats["ddg_jobs"] += len(ddg_jobs)
-                raw_jobs.extend(ddg_jobs)
-            except Exception as e:
-                logger.warning("DDG search failed for %s: %s", company_name, str(e)[:120])
+            # Skip companies whose only 'website' is a LinkedIn URL — ATS can't
+            # detect them and the DDG dance returns only old / non-specific links
+            # (pure noise + captcha hits) for zero usable jobs.
+            if is_linkedin_only_website(website):
+                logger.info(
+                    "Skipping per-company DDG for %s — website is LinkedIn-only (no careers page).",
+                    company_name,
+                )
+            else:
+                try:
+                    ddg_jobs = ddg_search_for_jobs(company_name, domain, linkedin_handle=linkedin_handle)
+                    stats["ddg_jobs"] += len(ddg_jobs)
+                    raw_jobs.extend(ddg_jobs)
+                except Exception as e:
+                    logger.warning("DDG search failed for %s: %s", company_name, str(e)[:120])
 
             # JobSpy (LinkedIn, name-matched to avoid generic results).
             try:
@@ -174,7 +264,9 @@ def collect_local_raw_jobs(*, gemini_key=None, lookback_days=LOCAL_LOOKBACK_DAYS
     except Exception as e:
         logger.warning("jobs.ps sweep failed: %s", e)
 
-    # Ghost-listing HEAD-probe: drop dead DDG URLs before the AI sees them.
+    # Drop stale ATS listings (still 200 in the API but long abandoned) and
+    # dead DDG URLs (404/410) before the AI sees them.
+    raw_jobs = drop_stale_ats_jobs(raw_jobs)
     raw_jobs = drop_dead_ddg_urls(raw_jobs)
     return raw_jobs, stats
 
