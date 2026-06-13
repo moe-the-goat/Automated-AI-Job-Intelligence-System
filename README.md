@@ -2,6 +2,10 @@
 
 A daily, fully-autonomous pipeline that scrapes the global remote job market, filters out the noise, scores each surviving role against a candidate's CV with a multi-LLM recruiter heuristic, and delivers a short, honest shortlist by email every morning. It runs for several people at once, learns from how each of them reacts, and costs nothing to operate.
 
+![The Job Alerts web app: same morning picks in your inbox and on a personal dashboard](README_Pic.png)
+
+*The front door people actually use, built in the companion [web-app repo](https://github.com/moe-the-goat/job-alerts-app). This repository is the engine behind it.*
+
 The system is the answer to a specific problem: existing job aggregators assume geographic centrality and a default candidate profile. Their idea of "best fit for you" is calibrated for that profile. I built a sifter that injects explicit constraints into an unoptimized search market, replacing manual triage with a deterministic, observable, tested pipeline that runs on free infrastructure.
 
 This repository is the engine: the scraping, filtering, scoring, learning, and email-sending worker. The website people actually sign up and log into is a separate Next.js app, and the two repos are meant to be read together. There is a link to the second one further down, at the point where the story crosses over into it.
