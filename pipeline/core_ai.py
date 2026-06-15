@@ -633,16 +633,22 @@ def _build_verdict_prompt(row, cv_text, description, web_search_context="", lear
 DISQUALIFYING reasons. Default to skepticism. A 90+ score is reserved for cases where
 you cannot reasonably imagine why the candidate would NOT be considered.
 
-CANDIDATE CV SUMMARY:
+CANDIDATE CV (read it fully — everything you score MUST come from this CV, not assumptions):
 {cv_text[:3000]}
 
-CANDIDATE FACTS (use directly when scoring):
-- Location: Birzeit, Palestine (UTC+2)
-- Professional employment: 0 years (academic projects, coursework, Udacity nanodegrees only)
-- Status: 4th-year Computer Engineering student, graduating Feb 2027
-- Strongest specific assets: RAG (LangChain/FAISS/Ollama), FastAPI deployment,
-  PyTorch computer vision, MSR-VTT text-to-video retrieval (Recall@10 60.5%),
-  Arabic CNN (98.86% test accuracy)
+HOW TO READ THE CV (derive these from the CV above before scoring — do NOT invent):
+- LOCATION: the candidate is based in Palestine (UTC+2). This is fixed for every
+  candidate on this platform; use it for LOGISTICS_FIT below.
+- PROFESSIONAL EXPERIENCE: count real work experience from the CV — jobs and
+  internships. If the CV states years of experience, use that. If it does not,
+  INFER from internships and substantial projects: no internship and no related
+  work experience → treat as 0 professional years (a student/new-grad profile);
+  internships and strong projects raise the effective level. Projects DO count as
+  evidence of ability, but they are not the same as professional years — weigh
+  them as project experience, not employment.
+- STRONGEST ASSETS: identify the candidate's actual strongest skills, tools, and
+  projects FROM THE CV (languages, frameworks, domains, named projects). Use
+  THESE — not any assumed stack — when judging TECH_FIT and when naming matches.
 {preferences_block}
 JOB:
 - Title: {title}
@@ -677,20 +683,33 @@ EVALUATION RULES (apply rigorously, default to deducting points):
      logistics_fit <= 15. Note it explicitly in the verdict.
    - Explicit exclusion of Palestine / Middle East → same: is_valid=false, logistics_fit <= 15.
 
-2. EXPERIENCE_FIT (0-100) — required experience vs candidate's 0 professional years:
-   - "Internship" / "0-1 year" / "entry-level" → 85-100
-   - "1-2 years required" → 50-70 (candidate has projects but no professional years)
-   - "3+ years" → 20-40 (likely is_valid=false unless project-equivalents accepted)
-   - "5+ years" / "Senior" → set is_valid=false AND experience_fit <= 25
+2. EXPERIENCE_FIT (0-100) — the role's REQUIRED experience vs the candidate's
+   experience as derived from the CV (professional years inferred per the rules
+   above; projects count as project experience, not employment years):
+   - Role wants "Internship" / "0-1 year" / "entry-level" → 85-100 for a
+     student / new-grad profile; higher if the CV shows relevant internships.
+   - Role wants "1-2 years" → score by what the CV actually shows: a candidate
+     with relevant internships/projects lands mid-high (60-80); one with nothing
+     relevant lands lower (40-60).
+   - Role wants "3+ years" → 20-40 unless the CV shows comparable real experience
+     (then score it on the evidence); likely is_valid=false for a pure-projects
+     profile unless the role explicitly accepts project-equivalents.
+   - Role wants "5+ years" / "Senior" → unless the CV genuinely shows senior-level
+     experience, set is_valid=false AND experience_fit <= 25.
 
-3. TECH_FIT (0-100) — overlap between candidate's STRONGEST assets and job's REQUIRED stack:
-   - Direct overlap (role explicitly wants RAG / LLM apps / FastAPI / PyTorch CV / video retrieval) → 85-100
-     and the verdict MUST name the specific CV project.
-   - Adjacent overlap (generic Python ML/data role, no specific match) → 60-80
-   - Pure Web/Frontend role (React/HTML/CSS heavy) → max 60 (candidate is backend-heavy)
-   - Cloud-ML / heavy AWS/GCP role → max 60 (candidate is local-Ollama-centric)
-   - DevOps / SRE / Quant Finance → max 40 (fundamental mismatch)
-   - Generic Python presence alone is NOT 90+. Require specific overlap to clear 85.
+3. TECH_FIT (0-100) — overlap between the candidate's STRONGEST assets (as found in
+   the CV) and the job's REQUIRED stack. Judge against what THIS candidate's CV
+   actually shows, not any assumed stack:
+   - Direct overlap (the role explicitly wants skills/tools/domains the CV clearly
+     demonstrates) → 85-100, and the verdict MUST name the specific CV skill or
+     project that matches.
+   - Adjacent overlap (same broad area as the CV, but no specific named match) → 60-80.
+   - The role's core stack is a domain the CV does NOT demonstrate (e.g. a heavy
+     frontend role for a backend-only CV, or vice versa) → max 60.
+   - Fundamental mismatch (the role's core discipline is absent from the CV, e.g.
+     DevOps/SRE/Quant for a CV with none of it) → max 40.
+   - A single shared language or buzzword alone is NOT 90+. Require specific,
+     demonstrated overlap to clear 85.
 
 4. SUSPICIOUS POSTING — set suspicious=true if ANY of these hold:
    - Company name fits the pattern "[Random Word] IT Solution/Service/Solutions/Services/Jobs/Mentor"
@@ -724,10 +743,13 @@ EVALUATION RULES (apply rigorously, default to deducting points):
 
 8. VERDICT — write as a senior recruiter would: structured, specific, no fluff.
    Required structure (3-5 sentences, in this order):
-   a) MATCH: name 1-2 SPECIFIC CV assets (projects or technologies, by name) that
-      directly address what the job asks for. E.g.,
-      "Your RAG project (LangChain + FAISS + Ollama) directly matches their stated
-       need for LLM-integrated app development."
+   a) MATCH: name 1-2 SPECIFIC assets FROM THIS CANDIDATE'S CV (projects or
+      technologies, by their real name as written in the CV) that directly address
+      what the job asks for. Pull the names from the CV above — never invent a
+      project the CV doesn't mention. E.g. (illustrative format only — use the
+      candidate's ACTUAL projects/skills):
+      "Their [named CV project] using [CV technologies] directly matches the role's
+       stated need for [requirement from the job]."
    b) REMOTE: in ONE sentence, state WHY this role is geographically accessible to
       the candidate in Palestine. This is MANDATORY for every verdict. Examples:
       "Listed as worldwide remote with no country restrictions."
@@ -737,9 +759,9 @@ EVALUATION RULES (apply rigorously, default to deducting points):
       only for specific countries that do not include Palestine, write that it is
       geo-restricted and set is_valid=false. E.g., "Remote is UK/US-only — candidate
       in Palestine is excluded."
-   c) GAP: name the SPECIFIC missing requirement that the candidate doesn't have.
-      E.g., "Their stack also requires React/TypeScript frontend — your CV shows
-      backend-only experience."
+   c) GAP: name the SPECIFIC missing requirement the candidate doesn't have, judged
+      against THIS CV. E.g., "The role also requires [requirement] — the CV shows
+      no evidence of it."
    d) (Optional) SECOND MATCH/GAP: a secondary positive or concern.
    e) (Required only if is_valid=false) CLOSING REASON: explicitly state the
       disqualifier (work auth, geo exclusion, senior-only, scam suspicion).
@@ -747,7 +769,8 @@ EVALUATION RULES (apply rigorously, default to deducting points):
    STRICT VOCABULARY RULES:
    - Generic phrases are FORBIDDEN: "strong technical match", "strong Python skills",
      "good fit", "well-aligned". Be specific or don't say it.
-   - Cite projects and tech BY NAME (MSR-VTT, FAISS, FastAPI, Ollama, etc.).
+   - Cite the candidate's projects and tech BY NAME, using the real names from THIS
+     CV (whatever they are) — never a project the CV doesn't contain.
    - When citing a gap, name the missing tech/experience SPECIFICALLY ("no AWS production
      experience", "no React frontend background"), not vaguely ("limited experience").
 
