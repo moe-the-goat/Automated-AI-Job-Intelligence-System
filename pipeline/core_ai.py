@@ -307,7 +307,10 @@ def get_full_job_description(url):
             lines = (line.strip() for line in text.splitlines())
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             return '\n'.join(chunk for chunk in chunks if chunk)
-    except:
+    except Exception:
+        # Best-effort enrichment — any fetch/parse failure just means no extra
+        # description text. Narrowed from a bare `except:` so KeyboardInterrupt /
+        # SystemExit still propagate instead of being silently swallowed.
         pass
     return ""
 

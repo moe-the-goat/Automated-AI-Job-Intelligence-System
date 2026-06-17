@@ -81,28 +81,65 @@ def _cv_hash(text):
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
 
 
-def _read_cached_embedding(text):
-    """Return cached embedding if its hash matches the current CV; else None."""
+# Cap on how many distinct CV embeddings we keep cached. The cache is a map
+# keyed by CV-content hash, so each user's CV is its own entry — multi-user runs
+# no longer evict each other (the old single-slot file made every user re-embed,
+# defeating the cache). 50 covers a comfortably large beta; the oldest entries
+# are dropped when the cap is exceeded.
+CV_EMBEDDING_CACHE_MAX_ENTRIES = 50
+
+
+def _read_cache_map():
+    """Load the {cv_hash: {"embedding": [...], "ts": float}} cache map.
+
+    Tolerates the LEGACY single-entry shape ({"cv_hash", "embedding"}) by
+    migrating it into the map form on read, so an existing cache file isn't lost.
+    Returns {} on any failure.
+    """
     if not os.path.exists(CV_EMBEDDING_CACHE):
-        return None
+        return {}
     try:
         with open(CV_EMBEDDING_CACHE, "r", encoding="utf-8") as f:
-            cached = json.load(f)
-        if cached.get("cv_hash") == _cv_hash(text):
-            return cached.get("embedding")
+            data = json.load(f)
     except Exception as e:
         logger.warning("CV embedding cache read failed: %s", e)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    # Legacy single-entry file → wrap it into the keyed map.
+    if "cv_hash" in data and "embedding" in data:
+        return {data["cv_hash"]: {"embedding": data["embedding"], "ts": 0}}
+    return data
+
+
+def _read_cached_embedding(text):
+    """Return this CV's cached embedding (keyed by content hash); else None."""
+    entry = _read_cache_map().get(_cv_hash(text))
+    if isinstance(entry, dict):
+        return entry.get("embedding")
     return None
 
 
 def _write_cached_embedding(text, embedding):
-    """Persist embedding + hash to disk. Best-effort; ignored on failure."""
+    """Persist this CV's embedding into the keyed cache map. Best-effort.
+
+    Per-user safe: writing one CV's vector never evicts another's, unlike the
+    old single-slot file. Caps the map size, dropping the oldest entries first.
+    """
     try:
+        cache = _read_cache_map()
+        cache[_cv_hash(text)] = {"embedding": list(embedding), "ts": time.time()}
+        if len(cache) > CV_EMBEDDING_CACHE_MAX_ENTRIES:
+            # Drop oldest by timestamp until back under the cap.
+            for h, _ in sorted(cache.items(), key=lambda kv: kv[1].get("ts", 0))[
+                : len(cache) - CV_EMBEDDING_CACHE_MAX_ENTRIES
+            ]:
+                cache.pop(h, None)
         d = os.path.dirname(CV_EMBEDDING_CACHE)
         if d:                                   # skip makedirs when cache is at cwd root
             os.makedirs(d, exist_ok=True)
         with open(CV_EMBEDDING_CACHE, "w", encoding="utf-8") as f:
-            json.dump({"cv_hash": _cv_hash(text), "embedding": list(embedding)}, f)
+            json.dump(cache, f)
     except Exception as e:
         logger.warning("CV embedding cache write failed: %s", e)
 

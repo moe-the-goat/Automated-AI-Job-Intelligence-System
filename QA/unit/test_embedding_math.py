@@ -79,6 +79,45 @@ def test_cv_embedding_cache_roundtrip():
             os.remove(test_cache_path)
 
 
+def test_cv_embedding_cache_is_per_user_no_eviction():
+    """Two different CVs must COEXIST in the cache — writing one must not evict
+    the other. This is the multi-user fix: the old single-slot file made every
+    user re-embed because each write overwrote the previous user's entry."""
+    import pipeline.core_embedding as _ce
+    test_cache_path = "_test_cv_embedding_multi.json"
+    original_path = _ce.CV_EMBEDDING_CACHE
+    _ce.CV_EMBEDDING_CACHE = test_cache_path
+    try:
+        _write_cached_embedding("user A cv text", [0.1, 0.1])
+        _write_cached_embedding("user B cv text", [0.9, 0.9])
+        # Both still resolve — B's write did not evict A.
+        assert _read_cached_embedding("user A cv text") == [0.1, 0.1]
+        assert _read_cached_embedding("user B cv text") == [0.9, 0.9]
+    finally:
+        _ce.CV_EMBEDDING_CACHE = original_path
+        if os.path.exists(test_cache_path):
+            os.remove(test_cache_path)
+
+
+def test_cv_embedding_cache_migrates_legacy_single_entry():
+    """An existing legacy file ({"cv_hash","embedding"}) must still be readable
+    after the switch to the keyed-map format, so no cache is lost on upgrade."""
+    import json as _json
+    import pipeline.core_embedding as _ce
+    test_cache_path = "_test_cv_embedding_legacy.json"
+    original_path = _ce.CV_EMBEDDING_CACHE
+    _ce.CV_EMBEDDING_CACHE = test_cache_path
+    try:
+        text = "legacy cv"
+        with open(test_cache_path, "w", encoding="utf-8") as f:
+            _json.dump({"cv_hash": _cv_hash(text), "embedding": [0.5, 0.5]}, f)
+        assert _read_cached_embedding(text) == [0.5, 0.5]
+    finally:
+        _ce.CV_EMBEDDING_CACHE = original_path
+        if os.path.exists(test_cache_path):
+            os.remove(test_cache_path)
+
+
 # ---------------------------------------------------------------------------
 # attach_similarity with region/trust weighting (2026-05-17)
 # ---------------------------------------------------------------------------
