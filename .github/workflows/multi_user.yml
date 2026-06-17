@@ -28,10 +28,17 @@ name: Multi-User Job Alerts
 # Next.js dashboard, and there's no GitHub-Issue routing.
 
 on:
+  # TRIGGERING: the PRIMARY, reliable trigger is an external cron (cron-job.org)
+  # that POSTs to this workflow's workflow_dispatch every 30 min — GitHub's own
+  # `schedule` below is best-effort and routinely skips/delays ticks, which made
+  # runs land hours late. The `schedule` is kept as a FREE BACKUP: if the
+  # external service ever dies, GitHub's flaky cron still eventually fires, so we
+  # degrade to "late" rather than "never". Running both is safe — the
+  # `concurrency` guard + per-user next_run_at claim prevent any double-run.
   schedule:
-    # Top of every hour. Per-user cadence is enforced inside the runner via
+    # Backup only (see above). Per-user cadence is enforced inside the runner via
     # preferences.next_run_at, so a daily user only sees one productive tick
-    # every 24h — the other 23 are short no-op DB scans.
+    # every 24h — the other ticks are short no-op DB scans.
     - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
