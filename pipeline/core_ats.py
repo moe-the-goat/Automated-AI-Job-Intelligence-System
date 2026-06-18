@@ -744,7 +744,21 @@ def _gemini_structure_jobs(text_content, careers_url, company_name, gemini_api_k
         client = genai.Client(api_key=gemini_api_key)
         response = client.models.generate_content(model=model, contents=prompt)
         text = getattr(response, "text", "") or ""
+        # Tally this call into the usage tracker. These careers-page extraction
+        # calls were previously invisible to the dashboard — they're the bulk of
+        # Gemini Flash Lite RPD, so leaving them untracked badly under-counts
+        # usage. Best-effort: tracking must never break extraction.
+        try:
+            from pipeline.core_llm_usage import get_tracker, extract_tokens
+            get_tracker().record("Gemini", model, ok=True, tokens=extract_tokens(response))
+        except Exception:
+            pass
     except Exception as e:
+        try:
+            from pipeline.core_llm_usage import get_tracker
+            get_tracker().record("Gemini", model, ok=False)
+        except Exception:
+            pass
         logger.warning("%s+Gemini extraction failed for %s: %s", source_label, company_name, str(e)[:120])
         return []
     jobs = parse_jina_jobs_response(text, company_name)

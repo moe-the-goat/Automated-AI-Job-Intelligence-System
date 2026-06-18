@@ -8,6 +8,9 @@ Wave-3 additions cover the BS4-before-Jina tiered fallback:
   extract_text_from_html — pure BS4 wrapper (no network)
   extract_jobs_from_careers_page — orchestrator (guard-rail tests only)
 """
+import sys
+import types
+
 from pipeline.core_ats import (
     parse_jina_jobs_response,
     extract_jobs_via_jina,
@@ -15,6 +18,8 @@ from pipeline.core_ats import (
     extract_jobs_from_careers_page,
     BS_MIN_USEFUL_CHARS,
 )
+import pipeline.core_ats as core_ats
+from pipeline.core_llm_usage import get_tracker
 
 
 # ---------------------------------------------------------------------------
@@ -201,3 +206,87 @@ def test_tiered_returns_empty_when_no_api_key():
 def test_tiered_returns_empty_when_no_careers_url():
     assert extract_jobs_from_careers_page("", "Co", gemini_api_key="fake", html="<p>x</p>") == []
     assert extract_jobs_from_careers_page(None, "Co", gemini_api_key="fake", html="<p>x</p>") == []
+
+
+# ---------------------------------------------------------------------------
+# Usage tracking — careers-page Gemini calls must be tallied (regression for
+# the dashboard under-counting Gemini RPD: these calls used to be invisible).
+# ---------------------------------------------------------------------------
+
+class _FakeUsage:
+    total_token_count = 123
+
+
+class _FakeResponse:
+    text = '{"jobs": [{"title": "Engineer", "job_url": "u"}]}'
+    usage_metadata = _FakeUsage()
+
+
+class _install_fake_genai:
+    """Context manager that stubs `google.genai` in sys.modules so
+    _gemini_structure_jobs makes no real network call. Restores on exit.
+
+    Plain try/finally rather than pytest's monkeypatch — the QA runner calls
+    test functions directly without fixture injection.
+    """
+
+    def __init__(self, *, raise_exc=None):
+        self._raise_exc = raise_exc
+        self._saved = {}
+
+    def __enter__(self):
+        raise_exc = self._raise_exc
+
+        class _FakeModels:
+            def generate_content(self, *, model, contents):
+                if raise_exc:
+                    raise raise_exc
+                return _FakeResponse()
+
+        class _FakeClient:
+            def __init__(self, *, api_key):
+                self.models = _FakeModels()
+
+        fake_genai = types.SimpleNamespace(Client=_FakeClient)
+        google_mod = types.ModuleType("google")
+        google_mod.genai = fake_genai
+        for name, mod in (("google", google_mod), ("google.genai", fake_genai)):
+            self._saved[name] = sys.modules.get(name)
+            sys.modules[name] = mod
+        return self
+
+    def __exit__(self, *exc):
+        for name, original in self._saved.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+        return False
+
+
+def test_structure_jobs_records_successful_usage():
+    with _install_fake_genai():
+        get_tracker().snapshot_and_reset()  # start clean
+        jobs = core_ats._gemini_structure_jobs(
+            "some careers page text", "https://co/careers", "Co", "fake-key", "BS4"
+        )
+        assert len(jobs) == 1
+        rows = get_tracker().snapshot_and_reset()
+    gem = next(r for r in rows if r["provider"] == "Gemini")
+    assert gem["model"] == "gemini-3.1-flash-lite"
+    assert gem["requests"] == 1
+    assert gem["requests_failed"] == 0
+    assert gem["tokens"] == 123
+
+
+def test_structure_jobs_records_failed_usage():
+    with _install_fake_genai(raise_exc=RuntimeError("503 unavailable")):
+        get_tracker().snapshot_and_reset()  # start clean
+        jobs = core_ats._gemini_structure_jobs(
+            "some careers page text", "https://co/careers", "Co", "fake-key", "BS4"
+        )
+        assert jobs == []
+        rows = get_tracker().snapshot_and_reset()
+    gem = next(r for r in rows if r["provider"] == "Gemini")
+    assert gem["requests"] == 1
+    assert gem["requests_failed"] == 1
