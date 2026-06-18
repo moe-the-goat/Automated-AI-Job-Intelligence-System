@@ -18,8 +18,20 @@ the call helpers so unit tests don't need them installed.
 import time
 
 from pipeline.logging_setup import get_logger
+from pipeline.core_llm_usage import get_tracker, extract_tokens
 
 logger = get_logger(__name__)
+
+
+def _record_usage(provider, model, response):
+    """Tally a successful call into the in-memory usage tracker. Best-effort —
+    usage tracking must never break a verdict, so any failure is swallowed."""
+    try:
+        get_tracker().record(
+            provider, model, ok=True, tokens=extract_tokens(response)
+        )
+    except Exception:
+        pass
 
 
 # Model picks based on the actual free-tier menus on each provider.
@@ -111,6 +123,7 @@ def _call_cerebras(prompt, api_key):
         response = client.chat.completions.create(reasoning_effort="low", **kwargs)
     except TypeError:
         response = client.chat.completions.create(**kwargs)
+    _record_usage("Cerebras", _CEREBRAS_MODEL, response)
     return response.choices[0].message.content
 
 
@@ -124,6 +137,7 @@ def _call_groq(prompt, api_key):
         temperature=0.3,
         max_tokens=_MAX_OUTPUT_TOKENS,
     )
+    _record_usage("Groq", _GROQ_MODEL, response)
     return response.choices[0].message.content
 
 
@@ -140,6 +154,7 @@ def _call_gemini(prompt, api_key):
             max_output_tokens=_MAX_OUTPUT_TOKENS,
         ),
     )
+    _record_usage("Gemini", _GEMINI_VERDICT_MODEL, response)
     return response.text
 
 
@@ -173,17 +188,53 @@ def call_gemini_verdict(prompt, api_key, max_attempts=3, label=""):
     raise last_exc if last_exc else RuntimeError("Gemini call exhausted with no exception")
 
 
+# Round-robin cursors so multiple keys per provider (multiple accounts) are
+# spread evenly across calls — this is what makes a 2nd Cerebras/Groq account
+# actually carry load instead of sitting idle. Module-level so rotation persists
+# across the many calls in a run.
+_KEY_CURSOR = {"Cerebras": 0, "Groq": 0}
+
+
+def _parse_keys(raw):
+    """Normalize a key input into a list of non-empty keys.
+
+    Accepts a single string, a comma-separated string ("k1,k2" for multiple
+    accounts), or a list. Empty / None → []. So a caller can pass one key (works
+    as before) or several (rotation kicks in)."""
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        items = raw
+    else:
+        items = str(raw).split(",")
+    return [k.strip() for k in items if k and k.strip()]
+
+
+def _next_key(provider, keys):
+    """Pick the next key for a provider in round-robin order, advancing the
+    cursor. With one key this always returns it; with two it alternates."""
+    if not keys:
+        return None
+    i = _KEY_CURSOR[provider] % len(keys)
+    _KEY_CURSOR[provider] = (i + 1) % len(keys)
+    return keys[i]
+
+
 def call_llm_with_fallback(prompt, cerebras_key, groq_key, max_attempts=4, label=""):
     """Run an LLM completion with Cerebras<->Groq ping-pong fallback.
 
-    Sequence (when both keys are present): Cerebras, Groq, Cerebras, Groq, ...
-    On a non-retryable error from one provider, still tries the other once in
-    case the failure is provider-specific (model unavailable, region block, etc.).
+    Sequence (when both providers have keys): Cerebras, Groq, Cerebras, Groq...
+    Each provider's keys are ROUND-ROBINED across calls, so passing two keys for
+    a provider (comma-separated, e.g. "k1,k2" — two accounts) spreads the load
+    evenly and effectively doubles that provider's rate-limit headroom. On a
+    non-retryable error from one provider, still tries the other once in case the
+    failure is provider-specific.
 
     Args:
         prompt: full prompt string (the existing verdict prompt from core_ai.py).
-        cerebras_key: CEREBRAS_API_KEY (may be empty/None to skip).
-        groq_key: GROQ_API_KEY (may be empty/None to skip).
+        cerebras_key: CEREBRAS_API_KEY — one key, or comma-separated for multiple
+            accounts (may be empty/None to skip Cerebras).
+        groq_key: GROQ_API_KEY — same (one or comma-separated).
         max_attempts: minimum total attempts across both providers (default 4).
         label: short tag for log lines, usually the job title.
 
@@ -194,22 +245,30 @@ def call_llm_with_fallback(prompt, cerebras_key, groq_key, max_attempts=4, label
         ValueError: if both keys are empty.
         Exception: re-raises the LAST exception after all attempts fail.
     """
-    if not cerebras_key and not groq_key:
+    cerebras_keys = _parse_keys(cerebras_key)
+    groq_keys = _parse_keys(groq_key)
+    if not cerebras_keys and not groq_keys:
         raise ValueError("Neither CEREBRAS_API_KEY nor GROQ_API_KEY is set")
 
-    # Build the alternating sequence. If only one key is present, repeat that
-    # provider for all attempts.
+    # Build the alternating provider sequence; pick each attempt's key in
+    # round-robin within that provider so multiple accounts share the load.
     providers = []
-    if cerebras_key and groq_key:
+    if cerebras_keys and groq_keys:
         for i in range(max_attempts):
             if i % 2 == 0:
-                providers.append(("Cerebras", _call_cerebras, cerebras_key))
+                providers.append(("Cerebras", _call_cerebras, _next_key("Cerebras", cerebras_keys)))
             else:
-                providers.append(("Groq", _call_groq, groq_key))
-    elif cerebras_key:
-        providers = [("Cerebras", _call_cerebras, cerebras_key)] * max_attempts
+                providers.append(("Groq", _call_groq, _next_key("Groq", groq_keys)))
+    elif cerebras_keys:
+        providers = [
+            ("Cerebras", _call_cerebras, _next_key("Cerebras", cerebras_keys))
+            for _ in range(max_attempts)
+        ]
     else:
-        providers = [("Groq", _call_groq, groq_key)] * max_attempts
+        providers = [
+            ("Groq", _call_groq, _next_key("Groq", groq_keys))
+            for _ in range(max_attempts)
+        ]
 
     last_exc = None
     for idx, (name, fn, key) in enumerate(providers):
@@ -224,6 +283,12 @@ def call_llm_with_fallback(prompt, cerebras_key, groq_key, max_attempts=4, label
             return fn(prompt, key)
         except Exception as e:
             last_exc = e
+            # Record the failed attempt against this provider (best-effort).
+            try:
+                model = _CEREBRAS_MODEL if name == "Cerebras" else _GROQ_MODEL
+                get_tracker().record(name, model, ok=False)
+            except Exception:
+                pass
             err_str = str(e)[:200]
             if _is_retryable_error(e):
                 logger.warning("[LLM %s] retryable error attempt %d: %s", name, idx + 1, err_str)

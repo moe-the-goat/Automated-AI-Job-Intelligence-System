@@ -157,6 +157,11 @@ jobs:
           # a no-op until you create the second Cerebras/Groq accounts.
           CEREBRAS_API_KEY: ${{ secrets.MULTI_CEREBRAS_API_KEY || secrets.CEREBRAS_API_KEY }}
           GROQ_API_KEY: ${{ secrets.MULTI_GROQ_API_KEY || secrets.GROQ_API_KEY }}
+          # Second accounts: the runner comma-joins these with the keys above and
+          # core_llm round-robins, so both accounts share the load (doubled RPD/RPM
+          # headroom). Optional — unset = single-key behavior.
+          CEREBRAS_API_KEY_2: ${{ secrets.CEREBRAS_API_KEY_2 }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           # Gemini (embeddings + lower-ranked verdicts) stays shared — its quota
           # profile is different and wasn't the bottleneck.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

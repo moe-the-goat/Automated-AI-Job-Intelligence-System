@@ -157,9 +157,20 @@ def _embed_text(client, text, model=EMBED_MODEL):
             model=model,
             contents=text,
         )
+        # Tally usage (best-effort; never let tracking break an embed call).
+        try:
+            from pipeline.core_llm_usage import get_tracker, extract_tokens
+            get_tracker().record("Gemini", model, ok=True, tokens=extract_tokens(response))
+        except Exception:
+            pass
         # google-genai's response shape: response.embeddings[0].values
         return list(response.embeddings[0].values)
     except Exception as e:
+        try:
+            from pipeline.core_llm_usage import get_tracker
+            get_tracker().record("Gemini", model, ok=False)
+        except Exception:
+            pass
         logger.warning("Embedding call failed (model=%s): %s", model, str(e)[:200])
         return None
 

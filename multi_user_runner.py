@@ -189,6 +189,50 @@ class _LocalJobsCache:
 # Pipeline plumbing
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _flush_llm_usage(client, user_id: str) -> None:
+    """Persist this user-run's LLM/embedding usage to llm_usage_daily and reset
+    the tracker for the next user. Upserts per (user_id, provider, model, day),
+    ADDING to today's counters via the increment RPC so multiple runs in a day
+    accumulate. Best-effort: any failure is logged, never raised.
+    """
+    try:
+        from pipeline.core_llm_usage import get_tracker
+        rows = get_tracker().snapshot_and_reset()
+        if not rows:
+            return
+        day = _budget_day_start_utc().date().isoformat()
+        for r in rows:
+            try:
+                client.rpc("bump_llm_usage", {
+                    "p_user_id": user_id,
+                    "p_provider": r["provider"],
+                    "p_model": r["model"],
+                    "p_day": day,
+                    "p_requests": r["requests"],
+                    "p_requests_failed": r["requests_failed"],
+                    "p_tokens": r["tokens"],
+                    "p_peak_rpm": r["peak_rpm"],
+                }).execute()
+            except Exception as e:
+                logger.warning(
+                    "llm_usage flush failed for %s %s/%s: %s",
+                    user_id, r["provider"], r["model"], str(e)[:120],
+                )
+    except Exception as e:
+        logger.warning("llm_usage flush skipped for %s: %s", user_id, str(e)[:120])
+
+
+def _join_keys(*env_names) -> str:
+    """Comma-join the non-empty values of the named env vars, in order.
+
+    Used to pass MULTIPLE API keys (multiple accounts) for one provider to
+    core_llm, which round-robins across them. Returns "" when none are set, "k1"
+    for one, "k1,k2" for two — all of which core_llm._parse_keys handles.
+    """
+    keys = [os.environ.get(n, "").strip() for n in env_names]
+    return ",".join(k for k in keys if k)
+
+
 def _run_ai_loop(df, cv_text, tracker, *,
                  provider, cerebras_key=None, groq_key=None,
                  gemini_key=None, preferences_for=None):
@@ -845,8 +889,12 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         # 4. CV embedding pre-rank
         gemini_key = os.environ.get("GEMINI_API_KEY", "")
         gemini_embed_key = os.environ.get("GEMINI_EMBED_API_KEY", "") or gemini_key
-        cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
-        groq_key = os.environ.get("GROQ_API_KEY", "")
+        # Two accounts per provider double the rate-limit headroom — join both
+        # keys comma-separated so core_llm round-robins across them. The second
+        # key is optional (CEREBRAS_API_KEY_2 / GROQ_API_KEY_2); falls back to a
+        # single key cleanly when it's unset.
+        cerebras_key = _join_keys("CEREBRAS_API_KEY", "CEREBRAS_API_KEY_2")
+        groq_key = _join_keys("GROQ_API_KEY", "GROQ_API_KEY_2")
 
         combined, job_embeddings = attach_similarity(
             combined, user["cv_text"], gemini_embed_key
@@ -971,6 +1019,12 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         # well before the full cadence would have allowed.
         _set_next_run(client, user_id, _compute_retry())
         tracker.save()
+
+    finally:
+        # Flush this user's LLM/embedding usage tally to Supabase, attributed to
+        # them, and reset for the next user. Runs on success AND failure so even
+        # a crashed run's spent calls are counted. Never raises into the loop.
+        _flush_llm_usage(client, user_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
