@@ -23,15 +23,23 @@ from pipeline.core_llm_usage import get_tracker, extract_tokens
 logger = get_logger(__name__)
 
 
+_usage_record_warned = False
+
+
 def _record_usage(provider, model, response):
     """Tally a successful call into the in-memory usage tracker. Best-effort —
-    usage tracking must never break a verdict, so any failure is swallowed."""
+    usage tracking must never break a verdict, so failures are swallowed. But we
+    log the FIRST failure (once) instead of silently doing nothing forever, so a
+    broken tracker is diagnosable rather than invisible."""
+    global _usage_record_warned
     try:
         get_tracker().record(
             provider, model, ok=True, tokens=extract_tokens(response)
         )
-    except Exception:
-        pass
+    except Exception as e:
+        if not _usage_record_warned:
+            _usage_record_warned = True
+            logger.warning("LLM usage record failed (first occurrence): %s", str(e)[:200])
 
 
 # Model picks based on the actual free-tier menus on each provider.

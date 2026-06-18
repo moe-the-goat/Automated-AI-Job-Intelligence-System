@@ -199,8 +199,17 @@ def _flush_llm_usage(client, user_id: str) -> None:
         from pipeline.core_llm_usage import get_tracker
         rows = get_tracker().snapshot_and_reset()
         if not rows:
+            # Visible on purpose: "no usage recorded" is itself diagnostic — it
+            # means record() never fired (vs. an RPC failure below).
+            logger.info("llm_usage: nothing to flush for %s (0 tracked calls).", user_id)
             return
+        total = sum(r["requests"] for r in rows)
+        logger.info(
+            "llm_usage: flushing %d model-rows (%d calls) for %s.",
+            len(rows), total, user_id,
+        )
         day = _budget_day_start_utc().date().isoformat()
+        ok_rows = 0
         for r in rows:
             try:
                 client.rpc("bump_llm_usage", {
@@ -213,11 +222,13 @@ def _flush_llm_usage(client, user_id: str) -> None:
                     "p_tokens": r["tokens"],
                     "p_peak_rpm": r["peak_rpm"],
                 }).execute()
+                ok_rows += 1
             except Exception as e:
                 logger.warning(
                     "llm_usage flush failed for %s %s/%s: %s",
-                    user_id, r["provider"], r["model"], str(e)[:120],
+                    user_id, r["provider"], r["model"], str(e)[:200],
                 )
+        logger.info("llm_usage: %d/%d rows written for %s.", ok_rows, len(rows), user_id)
     except Exception as e:
         logger.warning("llm_usage flush skipped for %s: %s", user_id, str(e)[:120])
 
