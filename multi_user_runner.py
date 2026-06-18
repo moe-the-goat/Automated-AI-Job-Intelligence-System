@@ -504,6 +504,10 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
             "api_hours_old": row["api_hours_old"],
             "ai_eval_top_n": row.get("ai_eval_top_n") or AI_EVAL_TOP_N,
             "search_queries": searches,
+            # The scheduled time that made this user due — used as the ANCHOR for
+            # the next run so a late fire doesn't drift the schedule (see
+            # _compute_next_run_anchored). May be None for a manual/--skip-due run.
+            "next_run_at": row.get("next_run_at"),
         })
     return users
 
@@ -698,9 +702,59 @@ def _safe_origin(v):
 
 
 def _compute_next_run(frequency_hours, *, now=None) -> datetime:
-    """When the user should next be eligible: now + their cadence (min 1h)."""
+    """When the user should next be eligible: now + their cadence (min 1h).
+
+    Used for MANUAL runs (no schedule to anchor to) and as the fallback when a
+    scheduled anchor is missing. For SCHEDULED runs use _compute_next_run_anchored
+    so a late fire doesn't drift the user's chosen time.
+    """
     now = now or datetime.now(timezone.utc)
     return now + timedelta(hours=max(1, int(frequency_hours)))
+
+
+def _parse_iso(value):
+    """Parse an ISO timestamp (Supabase returns these as strings) to an aware
+    UTC datetime. Returns None on anything unparseable."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _compute_next_run_anchored(scheduled_at, frequency_hours, *, now=None) -> datetime:
+    """Next eligible time anchored to the SCHEDULED time, not the fire time.
+
+    A daily user scheduled for 10:00 keeps landing at 10:00 even if a tick fires
+    late at 11:00 — the next run is scheduled_at + cadence (10:00 tomorrow), NOT
+    fired_at + cadence (11:00 tomorrow). This stops the schedule from drifting
+    later every time GitHub/cron fires a bit late.
+
+    Advances in whole cadence steps until strictly in the future, so a very late
+    or long-missed run catches up to the next future slot on the ORIGINAL cadence
+    rather than firing back-to-back. Falls back to now+cadence when there's no
+    usable anchor (manual / first run / unparseable value).
+    """
+    now = now or datetime.now(timezone.utc)
+    step = timedelta(hours=max(1, int(frequency_hours)))
+    anchor = _parse_iso(scheduled_at)
+    if anchor is None:
+        return now + step
+    nxt = anchor + step
+    # Catch up: if we're so late that anchor+step is already past, keep adding
+    # whole steps until the next slot is in the future (bounded loop).
+    if nxt <= now:
+        # Jump most of the way in one division, then nudge the remainder.
+        behind = (now - anchor).total_seconds()
+        steps = int(behind // step.total_seconds()) + 1
+        nxt = anchor + step * steps
+        while nxt <= now:
+            nxt += step
+    return nxt
 
 
 def _compute_retry(*, now=None) -> datetime:
@@ -825,7 +879,13 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         next_budget_day = _next_budget_day_start_utc()
         _set_next_run(client, user_id, max(scheduled_next, next_budget_day))
     else:
-        _set_next_run(client, user_id, _compute_next_run(user["frequency_hours"]))
+        # Anchor the next run to the user's SCHEDULED time, not when this tick
+        # actually fired — so a late fire (e.g. scheduled 10:00, fired 11:00)
+        # keeps the next run at 10:00, instead of drifting it to 11:00.
+        _set_next_run(
+            client, user_id,
+            _compute_next_run_anchored(user.get("next_run_at"), user["frequency_hours"]),
+        )
 
     tracker = SupabaseJobTracker(user_id, client=client)
     stats = {"scraped": 0, "filtered": 0, "ai_evaluated": 0, "approved": 0, "lower_ranked": 0}
