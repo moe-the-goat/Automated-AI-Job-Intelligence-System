@@ -42,6 +42,24 @@ def test_budget_day_start_just_after_local_midnight():
     assert start == datetime(2026, 6, 13, 0, 0, tzinfo=_JLM).astimezone(timezone.utc)
 
 
+def test_budget_day_str_is_local_calendar_date_not_utc():
+    # 2026-06-18 08:00 Jerusalem. The budget day stamp must be 2026-06-18 (the
+    # LOCAL calendar date), NOT 2026-06-17 — which is what
+    # _budget_day_start_utc().date() wrongly returned (the UTC date of the
+    # Jerusalem-midnight instant, always a day behind). This off-by-one is the
+    # bug that left the dashboard's "Today" LLM-usage view empty all day.
+    now = datetime(2026, 6, 18, 8, 0, tzinfo=_JLM).astimezone(timezone.utc)
+    assert mur._budget_day_str(now=now) == "2026-06-18"
+    # Sanity: it diverges from the old UTC-date behaviour at this instant.
+    assert mur._budget_day_start_utc(now=now).date().isoformat() == "2026-06-17"
+
+
+def test_budget_day_str_just_after_local_midnight():
+    # 00:30 Jerusalem on the 18th is still the 18th's budget day.
+    now = datetime(2026, 6, 18, 0, 30, tzinfo=_JLM).astimezone(timezone.utc)
+    assert mur._budget_day_str(now=now) == "2026-06-18"
+
+
 def test_next_budget_day_start_is_24h_after_today_start():
     now = datetime(2026, 6, 13, 20, 14, tzinfo=_JLM).astimezone(timezone.utc)
     today = mur._budget_day_start_utc(now=now)

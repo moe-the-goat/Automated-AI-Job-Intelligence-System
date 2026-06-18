@@ -208,7 +208,7 @@ def _flush_llm_usage(client, user_id: str) -> None:
             "llm_usage: flushing %d model-rows (%d calls) for %s.",
             len(rows), total, user_id,
         )
-        day = _budget_day_start_utc().date().isoformat()
+        day = _budget_day_str()
         ok_rows = 0
         for r in rows:
             try:
@@ -797,6 +797,21 @@ def _budget_day_start_utc(*, now=None) -> datetime:
     local_now = now.astimezone(tz)
     local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     return local_midnight.astimezone(timezone.utc)
+
+
+def _budget_day_str(*, now=None) -> str:
+    """The LOCAL (Jerusalem) calendar date of the current budget day, as
+    YYYY-MM-DD.
+
+    This is the day stamp for llm_usage_daily. Note it must be the LOCAL date,
+    not `_budget_day_start_utc().date()` — that returns the UTC date of the
+    Jerusalem-midnight instant, which is always the PREVIOUS calendar day (local
+    midnight falls at 21:00–22:00 UTC the day before). The web dashboard filters
+    "today" by the Jerusalem calendar date, so we must write that same date or
+    the Today view is empty all day.
+    """
+    now = now or datetime.now(timezone.utc)
+    return now.astimezone(ZoneInfo(RUN_BUDGET_TZ)).date().isoformat()
 
 
 def _next_budget_day_start_utc(*, now=None) -> datetime:
