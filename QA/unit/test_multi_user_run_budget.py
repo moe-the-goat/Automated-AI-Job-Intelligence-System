@@ -215,3 +215,23 @@ def test_insert_run_retries_without_trigger_when_column_missing():
 
 def test_max_runs_per_day_is_two():
     assert mur.MAX_RUNS_PER_DAY == 2
+
+
+# ---------------------------------------------------------------------------
+# _budget_allows_run — admin override bypasses the cap
+# ---------------------------------------------------------------------------
+
+def test_budget_allows_run_under_cap():
+    assert mur._budget_allows_run(0) is True
+    assert mur._budget_allows_run(mur.MAX_RUNS_PER_DAY - 1) is True
+
+
+def test_budget_allows_run_blocks_at_cap_without_override():
+    assert mur._budget_allows_run(mur.MAX_RUNS_PER_DAY) is False
+    assert mur._budget_allows_run(mur.MAX_RUNS_PER_DAY + 5) is False
+
+
+def test_admin_override_bypasses_cap():
+    # The whole point of the admin "Force run": run even when the user is maxed.
+    assert mur._budget_allows_run(mur.MAX_RUNS_PER_DAY, admin_override=True) is True
+    assert mur._budget_allows_run(99, admin_override=True) is True

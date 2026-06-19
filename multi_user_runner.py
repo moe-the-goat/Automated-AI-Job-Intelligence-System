@@ -850,8 +850,18 @@ def _runs_used_today(client, user_id: str, *, now=None) -> int:
 # Per-user pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _budget_allows_run(used: int, *, admin_override: bool = False) -> bool:
+    """Whether a run may proceed given how many runs the user has already used
+    today. An admin override (forced run from /admin) bypasses the 2/day cap;
+    otherwise the cap is enforced. Pure helper so the policy is unit-testable."""
+    if admin_override:
+        return True
+    return used < MAX_RUNS_PER_DAY
+
+
 def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
-                  local_cache=None, trigger: str = "scheduled"):
+                  local_cache=None, trigger: str = "scheduled",
+                  admin_override: bool = False):
     """End-to-end pipeline for one user. Never raises — failures are logged
     and recorded on the runs row so other users in the batch still execute.
 
@@ -870,7 +880,7 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
     # (so the skip itself doesn't burn a slot). This is the authoritative
     # enforcement point — the dashboard's count is only a mirror.
     used = _runs_used_today(client, user_id)
-    if used >= MAX_RUNS_PER_DAY:
+    if not _budget_allows_run(used, admin_override=admin_override):
         logger.info(
             "User %s: daily run budget exhausted (%d/%d) — skipping %s run; "
             "budget resets at local midnight.",
@@ -882,6 +892,11 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         if trigger == "scheduled":
             _set_next_run(client, user_id, _next_budget_day_start_utc())
         return
+    if admin_override and used >= MAX_RUNS_PER_DAY:
+        logger.info(
+            "User %s: admin override — running despite budget (%d/%d used today).",
+            user_id, used, MAX_RUNS_PER_DAY,
+        )
 
     run_id = _insert_run(client, user_id, trigger=trigger)
     if run_id is None:
@@ -1129,6 +1144,9 @@ def main(argv: Optional[list] = None) -> int:
                         help="Mark this run as a user-initiated manual dispatch "
                              "(stamps run_trigger='manual' and cancels today's "
                              "pending scheduled run). Use with --user-id.")
+    parser.add_argument("--admin-override", action="store_true",
+                        help="Admin forced run: bypass the 2/day budget cap. "
+                             "Use with --user-id (ignored otherwise).")
     args = parser.parse_args(argv)
 
     configure_logging()
@@ -1157,12 +1175,18 @@ def main(argv: Optional[list] = None) -> int:
     trigger = "manual" if (args.manual and args.user_id) else "scheduled"
     if args.manual and not args.user_id:
         logger.warning("--manual ignored: it requires --user-id. Treating as scheduled.")
+    # Admin override only makes sense for a single targeted user; a batch override
+    # would let the whole cohort blow past the budget, which is never intended.
+    admin_override = bool(args.admin_override and args.user_id)
+    if args.admin_override and not args.user_id:
+        logger.warning("--admin-override ignored: it requires --user-id.")
     tick_start = time.time()
     for user in users:
         user_start = time.time()
         logger.info("--- Starting user %s (%s) ---", user["user_id"], trigger)
         _run_for_user(user, client, api_cache, dry_run=args.dry_run,
-                      local_cache=local_cache, trigger=trigger)
+                      local_cache=local_cache, trigger=trigger,
+                      admin_override=admin_override)
         logger.info(
             "--- Finished user %s in %.1fs ---",
             user["user_id"], time.time() - user_start,
