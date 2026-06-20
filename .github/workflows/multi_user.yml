@@ -106,18 +106,21 @@ jobs:
         with:
           python-version: '3.10'
 
-      # Persist the ATS-detection + careers-extraction caches across ticks. The
-      # runner FS is fresh each run, so without this every productive tick
-      # re-detects ATS and re-runs the Gemini careers extraction for the same
-      # companies. The run_id key is always unique → a new cache is saved each
-      # run; restore-keys pulls the most recent prior one. Only these two files
-      # are cached (not volatile job caches like api_cache).
-      - name: Restore detection / extraction caches
+      # Persist the detection / extraction / CV-embedding caches across ticks.
+      # The runner FS is fresh each run, so without this every productive tick
+      # re-detects ATS, re-runs the Gemini careers extraction for the same
+      # companies, and re-embeds every user's (unchanged) CV. The CV cache is
+      # content-hashed, so persisting it just skips re-embedding a CV that hasn't
+      # changed — correctness is unaffected. The run_id key is always unique → a
+      # new cache is saved each run; restore-keys pulls the most recent prior one.
+      # Only these stable caches are persisted (not volatile job caches).
+      - name: Restore detection / extraction / embedding caches
         uses: actions/cache@v4
         with:
           path: |
             data/ats_cache.json
             data/careers_cache.json
+            data/cv_embedding.json
           key: worker-data-${{ github.run_id }}
           restore-keys: |
             worker-data-

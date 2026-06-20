@@ -861,7 +861,7 @@ def _budget_allows_run(used: int, *, admin_override: bool = False) -> bool:
 
 def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
                   local_cache=None, trigger: str = "scheduled",
-                  admin_override: bool = False):
+                  admin_override: bool = False, job_embed_cache=None):
     """End-to-end pipeline for one user. Never raises — failures are logged
     and recorded on the runs row so other users in the batch still execute.
 
@@ -998,7 +998,8 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         groq_key = _join_keys("GROQ_API_KEY", "GROQ_API_KEY_2")
 
         combined, job_embeddings = attach_similarity(
-            combined, user["cv_text"], gemini_embed_key
+            combined, user["cv_text"], gemini_embed_key,
+            job_embed_cache=job_embed_cache,
         )
 
         # 4b. Semantic dedup — drop "same job reposted at a new URL" against this
@@ -1169,6 +1170,11 @@ def main(argv: Optional[list] = None) -> int:
     api_cache = _ApiCache()
     # Shared local-market jobs, collected once on first use this tick.
     local_cache = _LocalJobsCache() if INCLUDE_LOCAL_SOURCES else None
+    # Shared job-embedding cache for THIS tick: a job seen by multiple due users
+    # (the global scrape is shared) is embedded once, not per user. The embedding
+    # is a pure function of the job text, so this is exact. Cleared each tick by
+    # being a fresh dict — stale jobs never leak across ticks.
+    job_embed_cache: dict = {}
     # A manual dispatch targets exactly one user (--user-id); guard against
     # --manual being passed for a whole-batch run, which would mis-stamp every
     # scheduled tick as manual.
@@ -1186,7 +1192,7 @@ def main(argv: Optional[list] = None) -> int:
         logger.info("--- Starting user %s (%s) ---", user["user_id"], trigger)
         _run_for_user(user, client, api_cache, dry_run=args.dry_run,
                       local_cache=local_cache, trigger=trigger,
-                      admin_override=admin_override)
+                      admin_override=admin_override, job_embed_cache=job_embed_cache)
         logger.info(
             "--- Finished user %s in %.1fs ---",
             user["user_id"], time.time() - user_start,

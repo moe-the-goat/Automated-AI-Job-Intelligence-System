@@ -195,17 +195,24 @@ def get_cv_embedding(cv_text, api_key):
     return vec
 
 
-def embed_jobs(rows, api_key, throttle_seconds=EMBED_THROTTLE_SECONDS):
+def embed_jobs(rows, api_key, throttle_seconds=EMBED_THROTTLE_SECONDS, cache=None):
     """Generate one embedding per row using title + truncated description.
 
     Returns a list aligned with `rows`; entries are None if the call failed
     or the row had no usable text. Throttles gently between calls.
+
+    `cache` is an optional {text_hash: embedding} dict shared across users in a
+    tick. A job's embedding is a pure function of its text, so when the SAME job
+    is seen by several users in one tick (the global scrape is shared via the API
+    cache) it's embedded ONCE and reused — cutting embedding RPD and run time,
+    which is the binding constraint as the user count grows. A cache hit also
+    skips the throttle sleep (no API call was made). cache=None preserves the old
+    per-call behavior exactly.
     """
     if not rows or not api_key:
         return [None] * len(rows or [])
 
-    from google import genai
-    client = genai.Client(api_key=api_key)
+    client = None  # created lazily on the first cache MISS — all-hit runs make no SDK call
     embeddings = []
     for row in rows:
         title = str(row.get("title", "")).strip()
@@ -214,7 +221,19 @@ def embed_jobs(rows, api_key, throttle_seconds=EMBED_THROTTLE_SECONDS):
         if not text:
             embeddings.append(None)
             continue
-        embeddings.append(_embed_text(client, text))
+
+        ck = hashlib.sha256(text.encode("utf-8")).hexdigest() if cache is not None else None
+        if ck is not None and ck in cache:
+            embeddings.append(cache[ck])
+            continue
+
+        if client is None:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+        vec = _embed_text(client, text)
+        embeddings.append(vec)
+        if ck is not None and vec is not None:
+            cache[ck] = vec
         time.sleep(throttle_seconds)
     return embeddings
 
@@ -240,7 +259,8 @@ def rank_by_similarity(cv_vec, job_vecs):
     return [cosine_similarity(cv_vec, jv) for jv in job_vecs]
 
 
-def attach_similarity(combined_jobs, cv_text, api_key, throttle_seconds=EMBED_THROTTLE_SECONDS):
+def attach_similarity(combined_jobs, cv_text, api_key, throttle_seconds=EMBED_THROTTLE_SECONDS,
+                      job_embed_cache=None):
     """Add `similarity` + `weighted_score` columns; return (df, url->embedding dict).
 
     `similarity`     — raw cosine sim against the CV embedding (for debugging /
@@ -252,6 +272,10 @@ def attach_similarity(combined_jobs, cv_text, api_key, throttle_seconds=EMBED_TH
     `api_key` should be the embedding-dedicated key (GEMINI_EMBED_API_KEY in
     production) so the embedding burst (~100 RPM peak) doesn't poison the main
     Gemini key's quota. Falls back to the main GEMINI_API_KEY if unset.
+
+    `job_embed_cache` is an optional dict shared across users within one tick so
+    a job seen by several users is embedded once (see embed_jobs). Pass the same
+    dict for every user in a tick; leave None for single-user / one-off calls.
 
     Returns a 2-tuple: (sorted_dataframe, {job_url: embedding_vector, ...}).
     The embeddings dict is what the caller feeds into drop_semantic_duplicates
@@ -276,7 +300,7 @@ def attach_similarity(combined_jobs, cv_text, api_key, throttle_seconds=EMBED_TH
         return out, {}
 
     rows = combined_jobs.to_dict("records")
-    job_vecs = embed_jobs(rows, api_key, throttle_seconds=throttle_seconds)
+    job_vecs = embed_jobs(rows, api_key, throttle_seconds=throttle_seconds, cache=job_embed_cache)
     sims = rank_by_similarity(cv_vec, job_vecs)
     weights = [compute_combined_weight(r) for r in rows]
     weighted = [s * w for s, w in zip(sims, weights)]

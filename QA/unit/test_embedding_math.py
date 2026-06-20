@@ -4,6 +4,8 @@ The embedding API call itself is mocked away in integration tests; here we
 just verify the math is right and the cache file format round-trips.
 """
 import os
+import sys
+import types
 from pipeline.core_embedding import (
     _cv_hash, _read_cached_embedding, _write_cached_embedding,
     cosine_similarity, rank_by_similarity,
@@ -168,7 +170,7 @@ def _patched_attach_similarity(df, fixed_vec=None):
     orig_embed_jobs = ce.embed_jobs
     try:
         ce.get_cv_embedding = lambda text, key: fixed_vec
-        ce.embed_jobs = lambda rows, key, throttle_seconds=0: [fixed_vec] * len(rows)
+        ce.embed_jobs = lambda rows, key, throttle_seconds=0, **_: [fixed_vec] * len(rows)
         df_out, _ = attach_similarity(df, cv_text="cv", api_key="fake-key")
         return df_out
     finally:
@@ -222,7 +224,7 @@ def test_weighted_score_demotes_india_below_worldwide_even_with_higher_raw_simil
     orig_embed = ce.embed_jobs
     try:
         ce.get_cv_embedding = lambda t, k: cv_vec
-        ce.embed_jobs = lambda rows, k, throttle_seconds=0: [
+        ce.embed_jobs = lambda rows, k, throttle_seconds=0, **_: [
             india_vec if "india" in str(r.get("location", "")).lower() else world_vec
             for r in rows
         ]
@@ -248,7 +250,7 @@ def test_attach_similarity_returns_url_to_embedding_dict():
     orig_embed = ce.embed_jobs
     try:
         ce.get_cv_embedding = lambda t, k: [1.0, 0.0]
-        ce.embed_jobs = lambda rows, k, throttle_seconds=0: [[0.1, 0.2]] * len(rows)
+        ce.embed_jobs = lambda rows, k, throttle_seconds=0, **_: [[0.1, 0.2]] * len(rows)
         df = pd.DataFrame([
             {"title": "Engineer", "job_url": "https://a/1", "description": "x"},
             {"title": "Engineer", "job_url": "https://a/2", "description": "x"},
@@ -268,7 +270,7 @@ def test_attach_similarity_skips_urls_with_failed_embeddings():
     orig_embed = ce.embed_jobs
     try:
         ce.get_cv_embedding = lambda t, k: [1.0, 0.0]
-        ce.embed_jobs = lambda rows, k, throttle_seconds=0: [[0.1, 0.2], None]
+        ce.embed_jobs = lambda rows, k, throttle_seconds=0, **_: [[0.1, 0.2], None]
         df = pd.DataFrame([
             {"title": "Engineer", "job_url": "https://a/ok", "description": "x"},
             {"title": "Engineer", "job_url": "https://a/fail", "description": "x"},
@@ -279,3 +281,86 @@ def test_attach_similarity_skips_urls_with_failed_embeddings():
         ce.embed_jobs = orig_embed
     assert "https://a/ok" in embeddings
     assert "https://a/fail" not in embeddings
+
+
+# ---------------------------------------------------------------------------
+# Shared per-tick job-embedding cache — embed each unique job ONCE per tick,
+# even when several users see it (the scaling win: cuts embedding RPD + time).
+# ---------------------------------------------------------------------------
+
+class _FakeEmbedResp:
+    def __init__(self, vec):
+        self.embeddings = [type("E", (), {"values": vec})()]
+
+
+def _stub_genai(monkeysaved):
+    """Stub google.genai so embed_jobs can build a Client without the real SDK."""
+    fake_genai = types.SimpleNamespace(Client=lambda api_key=None: object())
+    google_mod = types.ModuleType("google")
+    google_mod.genai = fake_genai
+    for name, mod in (("google", google_mod), ("google.genai", fake_genai)):
+        monkeysaved[name] = sys.modules.get(name)
+        sys.modules[name] = mod
+
+
+def _restore_modules(monkeysaved):
+    for name, mod in monkeysaved.items():
+        if mod is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = mod
+
+
+def test_embed_jobs_shared_cache_embeds_identical_job_once():
+    import pipeline.core_embedding as ce
+    saved = {}
+    _stub_genai(saved)
+    orig = ce._embed_text
+    calls = {"n": 0}
+
+    def counting_embed(client, text, model=ce.EMBED_MODEL):
+        calls["n"] += 1
+        return [0.1, 0.2, 0.3]
+
+    ce._embed_text = counting_embed
+    try:
+        cache: dict = {}
+        # User 1 sees two rows with IDENTICAL text → 1 embed (2nd is a hit).
+        rows = [
+            {"title": "Backend Engineer", "description": "Build APIs."},
+            {"title": "Backend Engineer", "description": "Build APIs."},
+        ]
+        out1 = ce.embed_jobs(rows, "key", throttle_seconds=0, cache=cache)
+        # User 2 (same tick, same shared cache) sees the SAME job → 0 new embeds.
+        out2 = ce.embed_jobs(
+            [{"title": "Backend Engineer", "description": "Build APIs."}],
+            "key", throttle_seconds=0, cache=cache,
+        )
+    finally:
+        ce._embed_text = orig
+        _restore_modules(saved)
+
+    assert calls["n"] == 1                       # embedded once across 3 identical rows
+    assert out1[0] == out1[1] == out2[0] == [0.1, 0.2, 0.3]
+
+
+def test_embed_jobs_without_cache_embeds_every_row():
+    # cache=None preserves the old behavior: every row is embedded.
+    import pipeline.core_embedding as ce
+    saved = {}
+    _stub_genai(saved)
+    orig = ce._embed_text
+    calls = {"n": 0}
+    ce._embed_text = lambda client, text, model=ce.EMBED_MODEL: (
+        calls.__setitem__("n", calls["n"] + 1) or [1.0]
+    )
+    try:
+        rows = [
+            {"title": "Same", "description": "Same"},
+            {"title": "Same", "description": "Same"},
+        ]
+        ce.embed_jobs(rows, "key", throttle_seconds=0)  # no cache
+    finally:
+        ce._embed_text = orig
+        _restore_modules(saved)
+    assert calls["n"] == 2                       # both embedded (no dedup without a cache)
