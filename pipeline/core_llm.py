@@ -218,14 +218,25 @@ def _parse_keys(raw):
     return [k.strip() for k in items if k and k.strip()]
 
 
-def _next_key(provider, keys):
-    """Pick the next key for a provider in round-robin order, advancing the
-    cursor. With one key this always returns it; with two it alternates."""
-    if not keys:
-        return None
-    i = _KEY_CURSOR[provider] % len(keys)
-    _KEY_CURSOR[provider] = (i + 1) % len(keys)
-    return keys[i]
+def _take_start(provider, n):
+    """Return the round-robin START index for THIS call and advance the cursor by
+    exactly ONE, so consecutive calls begin on the next account.
+
+    Why per-call (not per-attempt): a single call_llm_with_fallback builds a
+    multi-attempt plan that may include the same provider twice (Cerebras on
+    attempts 0 and 2). The old _next_key advanced once PER attempt, so with two
+    accounts the cursor moved by 2 each call and always landed back on account A
+    for attempt 0 — meaning the happy path (no retry) used account A every time
+    and account B only ever saw retries. Advancing by one per CALL instead makes
+    attempt-0 alternate A, B, A, B… so both accounts truly share the steady load
+    (which is what lets us halve the pacing). Within a call, extra attempts on the
+    same provider rotate onward from this start, so a retry hits a DIFFERENT
+    account than the one that just failed."""
+    if n <= 0:
+        return 0
+    start = _KEY_CURSOR[provider] % n
+    _KEY_CURSOR[provider] = (start + 1) % n
+    return start
 
 
 def call_llm_with_fallback(prompt, cerebras_key, groq_key, max_attempts=4, label=""):
@@ -258,25 +269,28 @@ def call_llm_with_fallback(prompt, cerebras_key, groq_key, max_attempts=4, label
     if not cerebras_keys and not groq_keys:
         raise ValueError("Neither CEREBRAS_API_KEY nor GROQ_API_KEY is set")
 
-    # Build the alternating provider sequence; pick each attempt's key in
-    # round-robin within that provider so multiple accounts share the load.
+    # Each provider gets ONE round-robin start index for this whole call, so
+    # consecutive calls begin on the next account (balancing the happy-path load
+    # across accounts). Within this call, repeated attempts on a provider rotate
+    # onward from its start, so a retry lands on a different account than the one
+    # that just failed.
+    cer_start = _take_start("Cerebras", len(cerebras_keys))
+    groq_start = _take_start("Groq", len(groq_keys))
+
+    # Build the alternating provider sequence (Cerebras, Groq, Cerebras, Groq…),
+    # falling back to whichever provider has keys when only one is configured.
     providers = []
-    if cerebras_keys and groq_keys:
-        for i in range(max_attempts):
-            if i % 2 == 0:
-                providers.append(("Cerebras", _call_cerebras, _next_key("Cerebras", cerebras_keys)))
-            else:
-                providers.append(("Groq", _call_groq, _next_key("Groq", groq_keys)))
-    elif cerebras_keys:
-        providers = [
-            ("Cerebras", _call_cerebras, _next_key("Cerebras", cerebras_keys))
-            for _ in range(max_attempts)
-        ]
-    else:
-        providers = [
-            ("Groq", _call_groq, _next_key("Groq", groq_keys))
-            for _ in range(max_attempts)
-        ]
+    cer_used = 0
+    groq_used = 0
+    for i in range(max_attempts):
+        if cerebras_keys and (i % 2 == 0 or not groq_keys):
+            key = cerebras_keys[(cer_start + cer_used) % len(cerebras_keys)]
+            cer_used += 1
+            providers.append(("Cerebras", _call_cerebras, key))
+        elif groq_keys:
+            key = groq_keys[(groq_start + groq_used) % len(groq_keys)]
+            groq_used += 1
+            providers.append(("Groq", _call_groq, key))
 
     last_exc = None
     for idx, (name, fn, key) in enumerate(providers):

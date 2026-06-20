@@ -591,6 +591,89 @@ class AtsCache:
 
 
 # ---------------------------------------------------------------------------
+# Careers-page extraction cache — skip the Gemini call on repeat ticks.
+# ---------------------------------------------------------------------------
+# The careers (BS4/Jina → Gemini) extraction is the bulk of Gemini Flash Lite
+# RPD. The shared local collection runs once per TICK, but with several users on
+# different schedules there are multiple productive ticks a day — each re-running
+# the SAME extraction for the same companies. This cache stores the extracted
+# job list per careers URL with a sub-day TTL so repeat ticks reuse it instead of
+# re-calling Gemini. Empty results are cached too (a page with no openings is the
+# common case for small companies — no point re-asking Gemini every tick).
+#
+# Persistence across workflow runs comes from caching data/ in CI (actions/cache
+# in multi_user.yml); within a single run it lives in memory + this file.
+CAREERS_CACHE_FILE = "data/careers_cache.json"
+# Sub-24h on purpose: long enough that all of a day's ticks share one extraction,
+# short enough that a page's new postings surface within a day.
+CAREERS_CACHE_TTL_HOURS = 18
+
+_CAREERS_CACHE = None  # lazy module-level singleton: {url: {jobs, fetched_at}}
+
+
+def _careers_cache():
+    """Lazy-load the careers cache singleton from disk (empty on any error)."""
+    global _CAREERS_CACHE
+    if _CAREERS_CACHE is None:
+        data = {}
+        if os.path.exists(CAREERS_CACHE_FILE):
+            try:
+                with open(CAREERS_CACHE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+            except Exception as e:
+                logger.warning("CareersCache load failed: %s", e)
+        _CAREERS_CACHE = data
+    return _CAREERS_CACHE
+
+
+def careers_cache_get(url):
+    """Return the cached job list for a careers URL, or None on miss/stale.
+
+    None means "not cached / expired → go extract". An empty LIST is a valid
+    cached result (the page had no jobs last time) and is returned as []."""
+    if not url:
+        return None
+    entry = _careers_cache().get(url)
+    if not entry:
+        return None
+    ts = entry.get("fetched_at")
+    if ts:
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            age_h = (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
+            if age_h > CAREERS_CACHE_TTL_HOURS:
+                return None
+        except Exception:
+            return None
+    jobs = entry.get("jobs")
+    return jobs if isinstance(jobs, list) else None
+
+
+def careers_cache_set(url, jobs):
+    """Cache the extracted job list (possibly empty) for a careers URL."""
+    if not url:
+        return
+    _careers_cache()[url] = {
+        "jobs": jobs if isinstance(jobs, list) else [],
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def save_careers_cache():
+    """Persist the careers cache to disk. Best-effort; called once per run."""
+    if _CAREERS_CACHE is None:
+        return
+    try:
+        d = os.path.dirname(CAREERS_CACHE_FILE)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(CAREERS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_CAREERS_CACHE, f, indent=2)
+    except Exception as e:
+        logger.warning("CareersCache save failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # 5. Custom-careers-page fallback (Wave 2 + Wave 3) — for pages with no ATS
 # ---------------------------------------------------------------------------
 #
@@ -792,24 +875,41 @@ def extract_jobs_from_careers_page(careers_url, company_name, gemini_api_key,
             Gemini, return results.
 
     Returns [] only if both tiers fail. Side effect: prints which tier won.
+
+    Cached per careers URL (CAREERS_CACHE_TTL_HOURS) so repeat ticks in the same
+    day reuse the result instead of re-calling Gemini — even an empty result is
+    cached, since a page with no openings is the common case for small companies.
     """
     if not careers_url or not gemini_api_key:
         return []
+
+    cached = careers_cache_get(careers_url)
+    if cached is not None:
+        logger.info(
+            "Careers cache hit for %s (%d job(s)) — skipping Gemini extraction.",
+            company_name, len(cached),
+        )
+        return cached
+
     if html is None:
         html = fetch_careers_page(careers_url)
 
+    jobs = []
     bs_text = extract_text_from_html(html)
     if len(bs_text) >= BS_MIN_USEFUL_CHARS:
         jobs = _gemini_structure_jobs(bs_text, careers_url, company_name, gemini_api_key,
                                       source_label="BS4", model=model)
-        if jobs:
-            return jobs
-        # BS extraction yielded text but no jobs — could be the model missed them,
-        # or the page legitimately has no openings. Fall through to Jina anyway
-        # because Jina sometimes surfaces JS-injected job links the SSR markup hid.
-        logger.info("BS4 extraction returned 0 jobs for %s; trying Jina", company_name)
+        if not jobs:
+            # BS extraction yielded text but no jobs — could be the model missed
+            # them, or the page legitimately has no openings. Fall through to Jina
+            # anyway: it sometimes surfaces JS-injected job links the SSR hid.
+            logger.info("BS4 extraction returned 0 jobs for %s; trying Jina", company_name)
 
-    return extract_jobs_via_jina(careers_url, company_name, gemini_api_key, model=model)
+    if not jobs:
+        jobs = extract_jobs_via_jina(careers_url, company_name, gemini_api_key, model=model)
+
+    careers_cache_set(careers_url, jobs)
+    return jobs
 
 
 # ---------------------------------------------------------------------------

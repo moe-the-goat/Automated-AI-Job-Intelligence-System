@@ -290,3 +290,52 @@ def test_structure_jobs_records_failed_usage():
     gem = next(r for r in rows if r["provider"] == "Gemini")
     assert gem["requests"] == 1
     assert gem["requests_failed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Careers extraction cache — repeat ticks reuse the result, skipping Gemini.
+# ---------------------------------------------------------------------------
+
+def test_careers_cache_roundtrip_and_empty_is_a_hit():
+    core_ats._CAREERS_CACHE = {}  # isolate from any on-disk cache
+    core_ats.careers_cache_set("u1", [{"title": "X"}])
+    assert core_ats.careers_cache_get("u1") == [{"title": "X"}]
+    # An empty list is a VALID cached result (page had no openings), not a miss.
+    core_ats.careers_cache_set("u2", [])
+    assert core_ats.careers_cache_get("u2") == []
+    # An unknown URL is a miss.
+    assert core_ats.careers_cache_get("never-seen") is None
+
+
+def test_careers_cache_expires_after_ttl():
+    from datetime import datetime, timezone, timedelta
+    core_ats._CAREERS_CACHE = {}
+    stale = (
+        datetime.now(timezone.utc) - timedelta(hours=core_ats.CAREERS_CACHE_TTL_HOURS + 1)
+    ).isoformat()
+    core_ats._CAREERS_CACHE["u"] = {"jobs": [{"title": "old"}], "fetched_at": stale}
+    assert core_ats.careers_cache_get("u") is None  # stale → miss → will re-extract
+    fresh = datetime.now(timezone.utc).isoformat()
+    core_ats._CAREERS_CACHE["u"] = {"jobs": [{"title": "new"}], "fetched_at": fresh}
+    assert core_ats.careers_cache_get("u") == [{"title": "new"}]
+
+
+def test_careers_cache_hit_skips_second_gemini_call():
+    # First extraction calls Gemini; a second call for the same URL is served from
+    # cache and makes NO Gemini call (verified via the usage tracker).
+    core_ats._CAREERS_CACHE = {}
+    url = "https://co/careers-cache-e2e"
+    big_html = (
+        "<html><body><main>"
+        + ("Backend Engineer role in Ramallah, apply now. " * 40)
+        + "</main></body></html>"
+    )
+    with _install_fake_genai():
+        get_tracker().snapshot_and_reset()
+        jobs1 = core_ats.extract_jobs_from_careers_page(url, "Co", "fake-key", html=big_html)
+        rows1 = get_tracker().snapshot_and_reset()
+        jobs2 = core_ats.extract_jobs_from_careers_page(url, "Co", "fake-key", html=big_html)
+        rows2 = get_tracker().snapshot_and_reset()
+    assert len(jobs1) == 1 and jobs1 == jobs2
+    assert any(r["provider"] == "Gemini" for r in rows1)       # first extracted
+    assert not any(r["provider"] == "Gemini" for r in rows2)   # second was cached

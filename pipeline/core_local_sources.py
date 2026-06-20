@@ -29,7 +29,12 @@ from urllib.parse import urlparse
 import pandas as pd
 
 from pipeline.logging_setup import get_logger
-from pipeline.core_ats import extract_linkedin_handle, get_jobs_for_company as get_ats_jobs, AtsCache
+from pipeline.core_ats import (
+    extract_linkedin_handle,
+    get_jobs_for_company as get_ats_jobs,
+    AtsCache,
+    save_careers_cache,
+)
 from pipeline.url_validation import probe_urls_alive_batch, is_specific_job_url_like
 
 logger = get_logger(__name__)
@@ -363,6 +368,9 @@ def collect_local_raw_jobs(*, gemini_key=None, lookback_days=LOCAL_LOOKBACK_DAYS
                 logger.warning("JobSpy failed for %s: %s", company_name, str(e)[:120])
 
         ats_cache.save()
+        # Persist the careers-extraction cache too, so later ticks in the day
+        # reuse extractions instead of re-calling Gemini (see core_ats).
+        save_careers_cache()
 
     # Public Telegram channels.
     if TELEGRAM_JOB_CHANNELS:
