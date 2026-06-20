@@ -829,45 +829,6 @@ def _apply_india_scam_check(result, row, company):
     return result
 
 
-# ---------------------------------------------------------------------------
-# AI-call pacing — stay under each provider's free-tier per-account RPM.
-# ---------------------------------------------------------------------------
-# Free-tier requests-per-minute PER ACCOUNT. The top section round-robins across
-# accounts (see core_llm._take_start), so K accounts give an effective K×RPM and
-# the safe gap between evals SHRINKS as accounts are added — deriving the pace
-# from the key count means adding a 3rd account auto-speeds the run with no edit.
-_CEREBRAS_RPM_PER_ACCOUNT = 5
-_GROQ_RPM_PER_ACCOUNT = 30
-_PACE_SAFETY = 1.10  # 10% headroom over the theoretical minimum interval
-
-
-def _count_keys(raw) -> int:
-    """Number of comma-separated, non-empty API keys (accounts) in `raw`."""
-    if not raw:
-        return 0
-    return len([k for k in str(raw).split(",") if k.strip()])
-
-
-def _eval_pace_seconds(cerebras_key, groq_key) -> float:
-    """Seconds to sleep before each top-section eval so no single account exceeds
-    its free-tier RPM.
-
-    The top section calls Cerebras first, round-robining across its accounts, so
-    each account is hit only every K-th eval. The safe per-account gap is
-    (60 / RPM) × safety; dividing by the account count gives the per-EVAL gap.
-    One account → ~13.2s (matches the old fixed 13s); two → ~6.6s, halving the
-    pacing for free. Falls back to Groq's higher limit when no Cerebras key."""
-    n_cer = _count_keys(cerebras_key)
-    if n_cer:
-        per_account = (60.0 / _CEREBRAS_RPM_PER_ACCOUNT) * _PACE_SAFETY
-        return max(1.0, per_account / n_cer)
-    n_groq = _count_keys(groq_key)
-    if n_groq:
-        per_account = (60.0 / _GROQ_RPM_PER_ACCOUNT) * _PACE_SAFETY
-        return max(1.0, per_account / n_groq)
-    return 0.0
-
-
 def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferences=""):
     """
     Evaluate a single job posting against the candidate's CV using qwen-3-235b
@@ -901,11 +862,9 @@ def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferenc
         learned_preferences=learned_preferences,
     )
 
-    # Pacing — derived from how many accounts we round-robin across, so two
-    # Cerebras accounts run ~2× faster than one (see _eval_pace_seconds). One
-    # account reproduces the old ~13s; two accounts → ~6.6s.
-    time.sleep(_eval_pace_seconds(cerebras_key, groq_key))
-
+    # Pacing is handled per-account at the call site (core_llm._throttle), which
+    # spaces calls under each account's free-tier RPM and absorbs call duration —
+    # no fixed pre-call sleep needed here.
     try:
         response_text = call_llm_with_fallback(
             prompt,
@@ -949,7 +908,8 @@ def evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences=""):
     lower-ranked path also benefits from the user's historical signals.
 
     Returns the same (result, evaluated_bool) shape so callers can treat both
-    paths uniformly. Pacing is 4s per call (15 RPM Gemini Flash Lite free tier).
+    paths uniformly. Pacing is handled per-account in core_llm._throttle (15 RPM
+    Gemini Flash Lite free tier).
     """
     if not gemini_key:
         return _error_result("No GEMINI_API_KEY provided"), False
@@ -964,9 +924,8 @@ def evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences=""):
         learned_preferences=learned_preferences,
     )
 
-    # Pacing: Gemini Flash Lite free tier is 15 RPM = 4s/call minimum.
-    time.sleep(4)
-
+    # Pacing handled per-account at the call site (core_llm._throttle, 15 RPM for
+    # Gemini Flash Lite) — no fixed pre-call sleep needed here.
     try:
         response_text = call_gemini_verdict(prompt, gemini_key, max_attempts=3, label=title)
         result = _parse_ai_response(response_text)

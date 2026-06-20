@@ -114,8 +114,60 @@ def _is_retryable_error(exc):
 _MAX_OUTPUT_TOKENS = 2048
 
 
+# ---------------------------------------------------------------------------
+# Adaptive per-account rate limiting.
+# ---------------------------------------------------------------------------
+# Pacing lives HERE, at the call site, keyed by (provider, account) — not as a
+# fixed sleep in the caller. Why this is better than a flat pre-call sleep:
+#   * Per ACCOUNT: round-robined accounts each get their own RPM budget, so two
+#     accounts genuinely run at 2× the rate (the budget isn't shared away).
+#   * Absorbs call duration: we sleep only until the account's next slot, so the
+#     time the previous call spent on the network counts toward the interval
+#     instead of being added on top — shorter wall-clock when calls aren't free.
+#   * Provider-aware: the Groq fallback (30 RPM) waits far less than Cerebras
+#     (5 RPM), and Gemini (15 RPM) gets its own budget — all from one mechanism.
+# State is module-level so the budget is enforced across every call in the run
+# (and across users in a tick — the RPM ceiling is global per account).
+import threading
+
+_RPM_PER_ACCOUNT = {"Cerebras": 5, "Groq": 30, "Gemini": 15}
+_RATE_SAFETY = 1.10  # 10% headroom under the published per-account RPM
+_RATE_STATE = {}     # (provider, api_key) -> next-allowed monotonic timestamp
+_RATE_LOCK = threading.Lock()
+
+
+def _min_interval(provider):
+    """Minimum seconds between calls on ONE account for this provider."""
+    rpm = _RPM_PER_ACCOUNT.get(provider, 5)
+    return (60.0 / rpm) * _RATE_SAFETY
+
+
+def _reserve(now, next_allowed, interval):
+    """Pure core of the limiter: given the clock and an account's next-allowed
+    time, return (wait_seconds, new_next_allowed). Reserves this call's slot so
+    concurrent callers serialize. Kept pure so it's unit-testable without sleeping."""
+    wait = max(0.0, next_allowed - now)
+    new_next = max(now, next_allowed) + interval
+    return wait, new_next
+
+
+def _throttle(provider, api_key, *, sleeper=time.sleep, clock=time.monotonic):
+    """Block until this (provider, account) may make another call under its
+    free-tier RPM. No-op when api_key is falsy (nothing to bill)."""
+    if not api_key:
+        return
+    interval = _min_interval(provider)
+    key = (provider, api_key)
+    with _RATE_LOCK:
+        wait, new_next = _reserve(clock(), _RATE_STATE.get(key, 0.0), interval)
+        _RATE_STATE[key] = new_next
+    if wait > 0:
+        sleeper(wait)
+
+
 def _call_cerebras(prompt, api_key):
     """Single Cerebras call. Raises on any error (caller decides retry policy)."""
+    _throttle("Cerebras", api_key)
     from cerebras.cloud.sdk import Cerebras
     client = Cerebras(api_key=api_key)
     kwargs = dict(
@@ -137,6 +189,7 @@ def _call_cerebras(prompt, api_key):
 
 def _call_groq(prompt, api_key):
     """Single Groq call. Raises on any error (caller decides retry policy)."""
+    _throttle("Groq", api_key)
     from groq import Groq
     client = Groq(api_key=api_key)
     response = client.chat.completions.create(
@@ -151,6 +204,7 @@ def _call_groq(prompt, api_key):
 
 def _call_gemini(prompt, api_key):
     """Single Gemini Flash Lite call. Raises on any error (caller decides retry policy)."""
+    _throttle("Gemini", api_key)
     from google import genai
     from google.genai import types
     client = genai.Client(api_key=api_key)

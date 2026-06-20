@@ -6,7 +6,8 @@ Locks:
   - extract_tokens reads both OpenAI-style and Gemini-style responses
   - key rotation (_parse_keys / _take_start) spreads calls across accounts so
     the happy path alternates accounts (not always the first)
-  - pacing (_eval_pace_seconds) shrinks as accounts are added
+  - adaptive pacing (_reserve / _throttle) spaces calls per account and absorbs
+    call duration
 """
 
 from pipeline.core_llm_usage import _UsageTracker, extract_tokens
@@ -15,8 +16,11 @@ from pipeline.core_llm import (
     _take_start,
     _KEY_CURSOR,
     call_llm_with_fallback,
+    _reserve,
+    _throttle,
+    _min_interval,
+    _RATE_STATE,
 )
-from pipeline.core_ai import _count_keys, _eval_pace_seconds
 
 
 # --- usage tracker ----------------------------------------------------------
@@ -140,25 +144,63 @@ def test_happy_path_alternates_cerebras_accounts():
     assert used == ["A", "B", "A", "B"]
 
 
-# --- pacing -----------------------------------------------------------------
+# --- adaptive pacing (per-account rate limiter) -----------------------------
 
-def test_count_keys():
-    assert _count_keys("A,B") == 2
-    assert _count_keys("A") == 1
-    assert _count_keys("") == 0
-    assert _count_keys(None) == 0
-    assert _count_keys("A, , B") == 2
-
-
-def test_pace_halves_with_two_cerebras_accounts():
-    one = _eval_pace_seconds("A", "g1")
-    two = _eval_pace_seconds("A,B", "g1")
-    # One account ≈ the old ~13s; two accounts ≈ half that.
-    assert 12.5 <= one <= 14.0
-    assert abs(two - one / 2) < 0.01
+def test_reserve_first_call_no_wait():
+    # An account that's never been called waits 0 and reserves now + interval.
+    wait, nxt = _reserve(now=100.0, next_allowed=0.0, interval=12.0)
+    assert wait == 0.0
+    assert nxt == 112.0
 
 
-def test_pace_falls_back_to_groq_when_no_cerebras():
-    # Groq's 30 RPM is far higher → much shorter gap than Cerebras.
-    pace = _eval_pace_seconds("", "g1")
-    assert 1.0 <= pace <= 3.0
+def test_reserve_absorbs_call_duration():
+    # If 5s of wall-clock already elapsed since the slot was reserved, the next
+    # call waits only the REMAINDER of the interval, not a full interval.
+    wait, nxt = _reserve(now=105.0, next_allowed=112.0, interval=12.0)
+    assert wait == 7.0          # 112 - 105, not a fresh 12
+    assert nxt == 124.0         # 112 + 12
+
+
+def test_reserve_idle_gap_resets_baseline():
+    # If the account has been idle past its next-allowed time, no wait and the
+    # new baseline is anchored at now (not the stale past timestamp).
+    wait, nxt = _reserve(now=200.0, next_allowed=112.0, interval=12.0)
+    assert wait == 0.0
+    assert nxt == 212.0
+
+
+def test_min_interval_scales_with_rpm():
+    # Higher RPM → shorter minimum gap. Groq (30) is far quicker than Cerebras (5).
+    assert _min_interval("Cerebras") > _min_interval("Gemini") > _min_interval("Groq")
+
+
+def test_throttle_spaces_two_calls_on_same_account():
+    # Two back-to-back calls on the same account: the first doesn't wait (so
+    # sleeper isn't called), the second sleeps ~one interval. _throttle only
+    # invokes the sleeper when there's a positive wait.
+    _RATE_STATE.clear()
+    slept = []
+    fake_clock = lambda: 1000.0
+    fake_sleep = lambda s: slept.append(s)
+    _throttle("Cerebras", "acctA", sleeper=fake_sleep, clock=fake_clock)
+    _throttle("Cerebras", "acctA", sleeper=fake_sleep, clock=fake_clock)
+    assert len(slept) == 1                           # only the second waited
+    assert abs(slept[0] - _min_interval("Cerebras")) < 0.01
+
+
+def test_throttle_independent_accounts_dont_block_each_other():
+    # Round-robin's whole point: account B isn't throttled by account A's call.
+    _RATE_STATE.clear()
+    slept = []
+    fake_clock = lambda: 5000.0
+    fake_sleep = lambda s: slept.append(s)
+    _throttle("Cerebras", "A", sleeper=fake_sleep, clock=fake_clock)
+    _throttle("Cerebras", "B", sleeper=fake_sleep, clock=fake_clock)
+    assert slept == []                               # neither waits (different accounts)
+
+
+def test_throttle_noop_without_key():
+    _RATE_STATE.clear()
+    slept = []
+    _throttle("Cerebras", "", sleeper=lambda s: slept.append(s), clock=lambda: 0.0)
+    assert slept == []
