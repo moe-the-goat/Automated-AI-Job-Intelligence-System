@@ -448,3 +448,38 @@ def test_finalize_run_no_email_status_omits_columns():
     client = _UpdateClient()
     mur._finalize_run(client, 1, status="success", approved=0)
     assert "email_status" not in client.rec["final"]
+
+
+# ---------------------------------------------------------------------------
+# _filter_by_min_match — per-user min-match digest threshold (email-only)
+# ---------------------------------------------------------------------------
+
+def test_min_match_zero_returns_all():
+    import pandas as pd
+    df = pd.DataFrame([{"match_percentage": 30}, {"match_percentage": 90}])
+    out = mur._filter_by_min_match(df, 0)
+    assert len(out) == 2
+
+
+def test_min_match_filters_below_threshold():
+    import pandas as pd
+    df = pd.DataFrame([
+        {"title": "a", "match_percentage": 40},
+        {"title": "b", "match_percentage": 70},
+        {"title": "c", "match_percentage": 85},
+    ])
+    out = mur._filter_by_min_match(df, 70)
+    assert sorted(out["title"]) == ["b", "c"]  # 40 dropped; 70 kept (inclusive)
+
+
+def test_min_match_treats_missing_as_zero():
+    import pandas as pd
+    df = pd.DataFrame([{"title": "a", "match_percentage": None}, {"title": "b", "match_percentage": 80}])
+    out = mur._filter_by_min_match(df, 50)
+    assert list(out["title"]) == ["b"]  # NA → 0 → excluded
+
+
+def test_min_match_empty_frame_is_safe():
+    import pandas as pd
+    out = mur._filter_by_min_match(pd.DataFrame(), 50)
+    assert out.empty

@@ -551,26 +551,40 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
     # preferences.user_id is an FK to profiles. We CANNOT embed search_queries
     # here — it has no FK to preferences (both only reference profiles), so
     # PostgREST rejects the join (PGRST200). search_queries is loaded separately.
-    query = (
-        client.table("preferences")
-        .select(
-            "user_id, frequency_hours, is_active, next_run_at, "
-            "notification_email, ai_eval_top_n, api_hours_old, "
-            "profiles!inner(cv_text, is_whitelisted)"
-        )
-        .eq("is_active", True)
+    # Base columns + the optional digest-pref columns. min_match_percentage is
+    # newer (migration 0021); if the live schema predates it the SELECT errors, so
+    # we retry with the base columns and treat the threshold as 0 (no filter).
+    _base_cols = (
+        "user_id, frequency_hours, is_active, next_run_at, "
+        "notification_email, ai_eval_top_n, api_hours_old, "
+        "profiles!inner(cv_text, is_whitelisted)"
     )
+    _ext_cols = _base_cols + ", min_match_percentage"
 
-    if only_user_id:
-        query = query.eq("user_id", only_user_id)
-    elif not skip_due_check:
-        query = query.lte("next_run_at", now_iso)
+    def _run_pref_query(cols):
+        q = client.table("preferences").select(cols).eq("is_active", True)
+        if only_user_id:
+            q = q.eq("user_id", only_user_id)
+        elif not skip_due_check:
+            q = q.lte("next_run_at", now_iso)
+        return q.execute()
 
     try:
-        resp = query.execute()
+        resp = _run_pref_query(_ext_cols)
     except Exception as e:
-        logger.critical("Failed to load due users: %s", e)
-        return []
+        if "min_match_percentage" in str(e):
+            logger.warning(
+                "preferences SELECT rejected min_match_percentage (migration 0021 "
+                "not applied?) — retrying without it (threshold treated as 0)."
+            )
+            try:
+                resp = _run_pref_query(_base_cols)
+            except Exception as e2:
+                logger.critical("Failed to load due users: %s", e2)
+                return []
+        else:
+            logger.critical("Failed to load due users: %s", e)
+            return []
 
     pref_rows = resp.data or []
     if not pref_rows:
@@ -625,6 +639,8 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
             "frequency_hours": row["frequency_hours"],
             "api_hours_old": row["api_hours_old"],
             "ai_eval_top_n": row.get("ai_eval_top_n") or AI_EVAL_TOP_N,
+            # Per-user minimum match % for the EMAIL digest (0 = no filter).
+            "min_match_percentage": int(row.get("min_match_percentage") or 0),
             "search_queries": searches,
             # The scheduled time that made this user due — used as the ANCHOR for
             # the next run so a late fire doesn't drift the schedule (see
@@ -982,6 +998,17 @@ def _runs_used_today(client, user_id: str, *, now=None) -> int:
 # Per-user pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _filter_by_min_match(df, min_match: int):
+    """Rows with match_percentage >= min_match. A 0/negative floor returns the
+    frame unchanged (the default — no filtering). Rows with a missing/NA match
+    are treated as 0, so they're excluded once a real floor is set. Used to honor
+    a user's min-match digest preference for the EMAIL only."""
+    if min_match <= 0 or df is None or df.empty or "match_percentage" not in df.columns:
+        return df
+    pct = pd.to_numeric(df["match_percentage"], errors="coerce").fillna(0)
+    return df[pct >= min_match].reset_index(drop=True)
+
+
 def _budget_allows_run(used: int, *, admin_override: bool = False) -> bool:
     """Whether a run may proceed given how many runs the user has already used
     today. An admin override (forced run from /admin) bypasses the 2/day cap;
@@ -1203,14 +1230,25 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         persisted = _persist_job_results(client, run_id, user_id, valid_top, lower_ranked)
         logger.info("User %s: persisted %d job_results row(s).", user_id, persisted)
 
-        # 9. Send email (skipped on --dry-run)
-        if not dry_run and not valid_top.empty:
-            intern_mask = (
-                valid_top["title"].str.lower().str.contains("intern", na=False)
-                | valid_top.get("job_type", pd.Series(dtype=str)).astype(str).str.lower().str.contains("internship", na=False)
+        # 9. Send email (skipped on --dry-run). Honor the user's min-match floor
+        # for the EMAIL ONLY — every result is still persisted above, so the
+        # dashboard shows the full set for review/feedback; the digest is curated.
+        min_match = int(user.get("min_match_percentage") or 0)
+        email_top = _filter_by_min_match(valid_top, min_match)
+        email_lower = _filter_by_min_match(lower_ranked, min_match)
+        if min_match > 0:
+            logger.info(
+                "User %s: min_match=%d%% → emailing %d/%d top + %d/%d lower-ranked.",
+                user_id, min_match, len(email_top), len(valid_top),
+                len(email_lower), len(lower_ranked),
             )
-            internships_df = valid_top[intern_mask]
-            jobs_df = valid_top[~intern_mask]
+        if not dry_run and not email_top.empty:
+            intern_mask = (
+                email_top["title"].str.lower().str.contains("intern", na=False)
+                | email_top.get("job_type", pd.Series(dtype=str)).astype(str).str.lower().str.contains("internship", na=False)
+            )
+            internships_df = email_top[intern_mask]
+            jobs_df = email_top[~intern_mask]
 
             # W2: mint the tokenized feedback-page link for this (user, run).
             # APP_BASE_URL unset or token insert failing (e.g. migration 0012
@@ -1231,7 +1269,7 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
             html = format_email_html(
                 internships_df, jobs_df,
                 {"scraped": stats["scraped"], "filtered": stats["filtered"], "approved": stats["approved"]},
-                lower_ranked_df=lower_ranked,
+                lower_ranked_df=email_lower,
                 feedback_url=feedback_url,
             )
             ok, _info = send_email_transport(
