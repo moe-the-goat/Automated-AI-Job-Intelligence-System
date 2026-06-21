@@ -79,66 +79,142 @@ on:
           - "true"
           - "false"
 
-# Never let two runs overlap: if a tick is still processing when the next hour
-# fires, the new run waits instead of double-processing users (which would
-# duplicate job_results and race seen_jobs). cancel-in-progress: false so an
-# in-flight pipeline is allowed to finish cleanly.
-concurrency:
-  group: multi-user-runner
-  cancel-in-progress: false
+# Shared env for ALL jobs (so the two stages don't duplicate the key list).
+# Secrets resolve here once and are available to both the collect-local and the
+# sharded process jobs. API accounts use their NATURAL names so the runner's
+# _discover_keys finds them all (base → MULTI_ legacy → _2/_3…). To ADD an
+# account: create the next secret in sequence (e.g. GEMINI_EMBED_API_KEY_3) — the
+# slot below already points at it, so NO workflow edit is needed. A secret that
+# doesn't exist resolves to "" and is skipped (discovery stops at the first gap,
+# so keep numbering contiguous). Extra empty slots are pre-wired for headroom.
+env:
+  ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node24
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+  EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+  # Cerebras (account #2 historically lives in MULTI_CEREBRAS_API_KEY).
+  CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+  MULTI_CEREBRAS_API_KEY: ${{ secrets.MULTI_CEREBRAS_API_KEY }}
+  CEREBRAS_API_KEY_2: ${{ secrets.CEREBRAS_API_KEY_2 }}
+  CEREBRAS_API_KEY_3: ${{ secrets.CEREBRAS_API_KEY_3 }}
+  CEREBRAS_API_KEY_4: ${{ secrets.CEREBRAS_API_KEY_4 }}
+  CEREBRAS_API_KEY_5: ${{ secrets.CEREBRAS_API_KEY_5 }}
+  # Groq (fallback only — low value to scale; #2 in MULTI_GROQ_API_KEY).
+  GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+  MULTI_GROQ_API_KEY: ${{ secrets.MULTI_GROQ_API_KEY }}
+  GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+  GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
+  # Gemini Flash Lite (lower-ranked verdicts) — rotated across accounts.
+  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+  GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+  # Gemini embeddings (CV + job pre-rank) — the daily-RPD bottleneck.
+  GEMINI_EMBED_API_KEY: ${{ secrets.GEMINI_EMBED_API_KEY }}
+  GEMINI_EMBED_API_KEY_2: ${{ secrets.GEMINI_EMBED_API_KEY_2 }}
+  GEMINI_EMBED_API_KEY_3: ${{ secrets.GEMINI_EMBED_API_KEY_3 }}
+  # Feedback-RAG embeddings (separate vector space) — stays single.
+  GEMINI_EMBED2_API_KEY: ${{ secrets.GEMINI_EMBED2_API_KEY }}
+  # Public origin of the deployed web app (repo Variable). Unset → emails just
+  # omit the tokenized feedback link.
+  APP_BASE_URL: ${{ vars.APP_BASE_URL }}
 
 jobs:
-  multi-user-run:
+  # ── Stage 1: scrape the shared Palestinian local-market jobs ONCE ──────────
+  # The local market is identical for every user, so it's collected a single time
+  # here and handed to the parallel shards via an artifact — they don't each
+  # re-hit DDG / JobSpy / the careers Gemini extraction. The QA gate runs here and
+  # gates the whole workflow (process-users `needs` this job).
+  collect-local:
     runs-on: ubuntu-latest
-    env:
-      ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node24
-    # Read-only for code; no commits, no issues — the runner persists
-    # everything to Supabase.
     permissions:
       contents: read
-
+    concurrency:
+      group: multi-user-collect
+      cancel-in-progress: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
-      # Persist the detection / extraction / CV-embedding caches across ticks.
-      # The runner FS is fresh each run, so without this every productive tick
-      # re-detects ATS, re-runs the Gemini careers extraction for the same
-      # companies, and re-embeds every user's (unchanged) CV. The CV cache is
-      # content-hashed, so persisting it just skips re-embedding a CV that hasn't
-      # changed — correctness is unaffected. The run_id key is always unique → a
-      # new cache is saved each run; restore-keys pulls the most recent prior one.
-      # Only these stable caches are persisted (not volatile job caches).
-      - name: Restore detection / extraction / embedding caches
+      # ATS-detection + careers-extraction caches persist across ticks here (this
+      # is the only stage that scrapes careers pages). run_id key is unique →
+      # always saves; restore-keys pulls the latest prior cache.
+      - name: Restore detection / extraction caches
         uses: actions/cache@v4
         with:
           path: |
             data/ats_cache.json
             data/careers_cache.json
-            data/cv_embedding.json
           key: worker-data-${{ github.run_id }}
           restore-keys: |
             worker-data-
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      # Same gate as the single-user workflow — abort BEFORE wasting a Supabase
-      # round-trip if any regression slipped through.
+      # The single QA gate for the whole workflow — process-users `needs` this, so
+      # a regression aborts before any user is processed.
       - name: QA gate
         run: python QA/run_all.py
+      - name: Collect local-market jobs (once)
+        run: python multi_user_runner.py --collect-local-only --local-jobs-file data/local_jobs.json
+      - name: Upload local jobs for the shards
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-jobs
+          path: data/local_jobs.json
+          retention-days: 1
 
-      # Resolve the dry-run flag once, here, so the run step itself is a simple
-      # `python multi_user_runner.py $FLAGS` and the decision is visible in
-      # the job log. Manual dispatch input wins; otherwise fall back to the
-      # repo Variable; otherwise default to dry-run (safe default).
+  # ── Stage 2: process users in PARALLEL shards ─────────────────────────────
+  # Each shard handles a disjoint slice of users AND a disjoint slice of every
+  # provider's accounts (see _shard_slice), so they run truly in parallel with no
+  # rate-limit collisions. shard-count is the matrix size (strategy.job-total).
+  # IMPORTANT: keep the matrix size ≤ the smallest provider account pool, or two
+  # shards would share an account. With 2 Gemini-embed / Flash-Lite / Groq
+  # accounts, 2 shards is the safe maximum today.
+  process-users:
+    needs: collect-local
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    concurrency:
+      group: multi-user-shard-${{ matrix.shard }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      # CV-embedding cache is used HERE (attach_similarity). Per-shard key — each
+      # shard handles disjoint users, so disjoint CVs; no cross-shard collision.
+      - name: Restore CV-embedding cache
+        uses: actions/cache@v4
+        with:
+          path: data/cv_embedding.json
+          key: worker-cv-${{ github.run_id }}-shard-${{ matrix.shard }}
+          restore-keys: |
+            worker-cv-shard-${{ matrix.shard }}-
+            worker-cv-
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Download shared local jobs
+        uses: actions/download-artifact@v4
+        with:
+          name: local-jobs
+          path: data
+      # Resolve the dispatch flags (dry-run / targeted user / manual / override).
+      # Manual-dispatch input wins; else the repo Variable; else dry-run (safe).
       - name: Resolve runtime flags
         id: flags
         run: |
@@ -169,51 +245,9 @@ jobs:
 
           echo "Resolved flags: '$FLAGS' (dry_run=$DRY)"
           echo "flags=$FLAGS" >> "$GITHUB_OUTPUT"
-
-      - name: Run multi-user worker
-        env:
-          # Supabase (new)
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # Email transport: Gmail SMTP. Reuses the same secrets the legacy
-          # single-user workflows use. Sends to any recipient the user sets as
-          # their notification_email — no custom domain needed (Resend retired).
-          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
-          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
-          # API accounts — passed through with their NATURAL names so the runner's
-          # _discover_keys can find them all (base → MULTI_ legacy → _2/_3…) and
-          # round-robin. To ADD an account: create the next secret in sequence
-          # (e.g. GEMINI_EMBED_API_KEY_3) — the slot below already points at it, so
-          # NO workflow edit is needed. A secret that doesn't exist resolves to ""
-          # and is skipped (discovery stops at the first gap, so keep numbering
-          # contiguous). Extra empty slots are pre-wired for headroom.
-          #
-          # Cerebras (account #2 historically lives in MULTI_CEREBRAS_API_KEY).
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          MULTI_CEREBRAS_API_KEY: ${{ secrets.MULTI_CEREBRAS_API_KEY }}
-          CEREBRAS_API_KEY_2: ${{ secrets.CEREBRAS_API_KEY_2 }}
-          CEREBRAS_API_KEY_3: ${{ secrets.CEREBRAS_API_KEY_3 }}
-          CEREBRAS_API_KEY_4: ${{ secrets.CEREBRAS_API_KEY_4 }}
-          CEREBRAS_API_KEY_5: ${{ secrets.CEREBRAS_API_KEY_5 }}
-          # Groq (fallback only — low value to scale; #2 in MULTI_GROQ_API_KEY).
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          MULTI_GROQ_API_KEY: ${{ secrets.MULTI_GROQ_API_KEY }}
-          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
-          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
-          # Gemini Flash Lite (lower-ranked verdicts) — now rotated across accounts.
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
-          GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
-          # Gemini embeddings (CV + job pre-rank) — the daily-RPD bottleneck, so
-          # the highest-leverage place to add accounts.
-          GEMINI_EMBED_API_KEY: ${{ secrets.GEMINI_EMBED_API_KEY }}
-          GEMINI_EMBED_API_KEY_2: ${{ secrets.GEMINI_EMBED_API_KEY_2 }}
-          GEMINI_EMBED_API_KEY_3: ${{ secrets.GEMINI_EMBED_API_KEY_3 }}
-          # Feedback-RAG embeddings (separate vector space) — stays single.
-          GEMINI_EMBED2_API_KEY: ${{ secrets.GEMINI_EMBED2_API_KEY }}
-          # W2: public origin of the deployed web app (e.g. https://<app>.vercel.app).
-          # Set as a repo Variable. When unset, emails simply omit the tokenized
-          # "Rate today's matches" feedback link — never a failure.
-          APP_BASE_URL: ${{ vars.APP_BASE_URL }}
+      - name: Run shard
         run: |
-          python multi_user_runner.py ${{ steps.flags.outputs.flags }}
+          python multi_user_runner.py ${{ steps.flags.outputs.flags }} \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ strategy.job-total }} \
+            --local-jobs-file data/local_jobs.json

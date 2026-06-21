@@ -307,3 +307,76 @@ def test_discover_keys_single_and_empty():
         assert mur._discover_keys("GEMINI_API_KEY") == "g1"
     with _EnvPatch({}, absent=["NOPE_API_KEY", "NOPE_API_KEY_2"]):
         assert mur._discover_keys("NOPE_API_KEY") == ""
+
+
+# ---------------------------------------------------------------------------
+# Sharding — disjoint users + disjoint account slices across parallel shards
+# ---------------------------------------------------------------------------
+
+def test_user_shard_is_stable_and_in_range():
+    # Same id → same shard every time; always within [0, count).
+    for uid in ("u-abc", "11111111-1111-1111-1111-111111111111", "x"):
+        s1 = mur._user_shard(uid, 2)
+        s2 = mur._user_shard(uid, 2)
+        assert s1 == s2
+        assert 0 <= s1 < 2
+
+
+def test_user_shard_partitions_disjointly_and_covers_everyone():
+    # Every user lands in exactly one shard; the shards together cover all users.
+    users = [f"user-{i}" for i in range(200)]
+    count = 3
+    buckets = {0: [], 1: [], 2: []}
+    for u in users:
+        buckets[mur._user_shard(u, count)].append(u)
+    # disjoint + complete
+    assert sum(len(v) for v in buckets.values()) == len(users)
+    seen = set()
+    for v in buckets.values():
+        assert not (set(v) & seen)  # no overlap
+        seen |= set(v)
+    # roughly balanced (each bucket gets a non-trivial share of 200)
+    assert all(len(v) > 30 for v in buckets.values())
+
+
+def test_user_shard_count_one_is_zero():
+    assert mur._user_shard("anything", 1) == 0
+
+
+def test_shard_slice_disjoint_no_account_shared():
+    keys = "a,b,c,d"
+    s0 = mur._shard_slice(keys, 0, 2)
+    s1 = mur._shard_slice(keys, 1, 2)
+    assert s0 == "a,c"
+    assert s1 == "b,d"
+    # No account appears in two shards (the whole point — no RPM collision).
+    assert not (set(s0.split(",")) & set(s1.split(",")))
+
+
+def test_shard_slice_no_sharding_returns_all():
+    assert mur._shard_slice("a,b,c", 0, 1) == "a,b,c"
+
+
+def test_shard_slice_single_key_shared_when_unavoidable():
+    # One key, two shards: can't split → both get it (degrades, doesn't crash).
+    assert mur._shard_slice("only", 0, 2) == "only"
+    assert mur._shard_slice("only", 1, 2) == "only"
+
+
+def test_shard_slice_more_shards_than_keys_no_empty_shard():
+    # 2 keys, 3 shards: shard 2 would slice empty → falls back to a key so it can
+    # still run (misconfig guard; matrix should be ≤ account count).
+    assert mur._shard_slice("a,b", 2, 3) != ""
+
+
+def test_local_jobs_file_roundtrip():
+    import tempfile
+    jobs = [{"title": "Eng", "company": "Acme"}, {"title": "Dev", "company": "Beta"}]
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "sub", "local.json")  # nested → exercises makedirs
+        mur._dump_local_jobs(p, jobs)
+        assert mur._load_local_jobs(p) == jobs
+
+
+def test_load_local_jobs_missing_file_is_empty():
+    assert mur._load_local_jobs("/no/such/file_xyz.json") == []

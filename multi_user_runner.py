@@ -35,6 +35,8 @@ Env (in addition to the scraper's existing secrets):
 """
 
 import argparse
+import hashlib
+import json
 import os
 import sys
 import time
@@ -159,30 +161,72 @@ class _ApiCache:
 
 
 class _LocalJobsCache:
-    """Collects the Palestinian local-market jobs ONCE per cron tick.
+    """Supplies the Palestinian local-market jobs ONCE per cron tick.
 
-    The local market is identical for every user, so we scrape it a single time
-    and hand the same raw list to each user's pipeline (where per-user CV ranking
-    + RAG decides what surfaces). Lazy: nothing runs until the first user asks.
+    The local market is identical for every user, so it's gathered a single time
+    and the same raw list is handed to each user's pipeline (where per-user CV
+    ranking + RAG decides what surfaces).
+
+    Two modes:
+      * default — lazily SCRAPE on first ask (single-job runs).
+      * from_file — LOAD a pre-collected list from JSON (sharded runs: a separate
+        'collect-local' job scrapes once and shares the result via an artifact, so
+        the parallel shards don't each re-scrape DDG/JobSpy/careers).
     """
-    def __init__(self):
-        self._jobs = None  # None = not yet collected
+    def __init__(self, from_file: Optional[str] = None):
+        self._jobs = None  # None = not yet resolved
+        self._from_file = from_file
 
     def get(self) -> list:
-        if self._jobs is None:
-            try:
-                gemini_key = os.environ.get("GEMINI_API_KEY", "")
-                jobs, st = collect_local_raw_jobs(gemini_key=gemini_key)
-                self._jobs = jobs
-                logger.info(
-                    "Local cache: %d raw local job(s) collected this tick (ats=%d ddg=%d jobspy=%d telegram=%d jobs_ps=%d).",
-                    len(jobs), st["ats_jobs"], st["ddg_jobs"], st["jobspy_jobs"],
-                    st["telegram_jobs"], st["jobsps_jobs"],
-                )
-            except Exception as e:
-                logger.warning("Local cache: collection failed: %s. Treating as empty.", e)
-                self._jobs = []
+        if self._jobs is not None:
+            return self._jobs
+        if self._from_file:
+            self._jobs = _load_local_jobs(self._from_file)
+            logger.info("Local cache: loaded %d job(s) from %s.", len(self._jobs), self._from_file)
+            return self._jobs
+        try:
+            gemini_key = os.environ.get("GEMINI_API_KEY", "")
+            jobs, st = collect_local_raw_jobs(gemini_key=gemini_key)
+            self._jobs = jobs
+            logger.info(
+                "Local cache: %d raw local job(s) collected this tick (ats=%d ddg=%d jobspy=%d telegram=%d jobs_ps=%d).",
+                len(jobs), st["ats_jobs"], st["ddg_jobs"], st["jobspy_jobs"],
+                st["telegram_jobs"], st["jobsps_jobs"],
+            )
+        except Exception as e:
+            logger.warning("Local cache: collection failed: %s. Treating as empty.", e)
+            self._jobs = []
         return self._jobs
+
+
+def _dump_local_jobs(path: str, jobs: list) -> None:
+    """Write collected local jobs to JSON for the sharded 'process' jobs to read.
+    Best-effort: on failure write an empty list so downstream still runs."""
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(jobs or [], f)
+    except Exception as e:
+        logger.warning("Could not write local jobs to %s: %s", path, e)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump([], f)
+        except Exception:
+            pass
+
+
+def _load_local_jobs(path: str) -> list:
+    """Read pre-collected local jobs from JSON. [] on any failure (a shard with
+    no local jobs still processes its users' global jobs)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.warning("Could not read local jobs from %s: %s — treating as empty.", path, e)
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -275,6 +319,40 @@ def _discover_keys(base: str, legacy: str = None) -> str:
             seen.add(v)
             out.append(v)
     return ",".join(out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sharding — split a tick's work across N parallel runner jobs (matrix). Each
+# shard processes a DISJOINT set of users AND uses a DISJOINT slice of each
+# provider's accounts, so the shards run truly in parallel without colliding on
+# any account's rate limit. shard_count must be ≤ the smallest provider account
+# pool (else two shards would share an account); the workflow matrix sets it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _user_shard(user_id: str, shard_count: int) -> int:
+    """Stable shard assignment for a user: hash(user_id) mod shard_count. Stable
+    across ticks (no DB coordination needed) and evenly distributed."""
+    if shard_count <= 1:
+        return 0
+    h = int(hashlib.sha256(str(user_id).encode("utf-8")).hexdigest(), 16)
+    return h % shard_count
+
+
+def _shard_slice(csv: str, shard_index: int, shard_count: int) -> str:
+    """Take this shard's disjoint slice of a provider's discovered keys.
+
+    keys[shard_index::shard_count] gives non-overlapping slices across shards, so
+    no account is used by two shards (no rate-limit collision). With one key or no
+    sharding the full list is returned. If there are FEWER keys than shards (a
+    misconfiguration — shard_count should be ≤ the account pool), we fall back to
+    a round-robin pick so the shard still has a key to work with."""
+    keys = [k for k in (csv or "").split(",") if k]
+    if shard_count <= 1 or len(keys) <= 1:
+        return csv or ""
+    sliced = keys[shard_index::shard_count]
+    if not sliced:
+        sliced = [keys[shard_index % len(keys)]]
+    return ",".join(sliced)
 
 
 def _run_ai_loop(df, cv_text, tracker, *,
@@ -894,7 +972,8 @@ def _budget_allows_run(used: int, *, admin_override: bool = False) -> bool:
 
 def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
                   local_cache=None, trigger: str = "scheduled",
-                  admin_override: bool = False, job_embed_cache=None):
+                  admin_override: bool = False, job_embed_cache=None,
+                  shard_index: int = 0, shard_count: int = 1):
     """End-to-end pipeline for one user. Never raises — failures are logged
     and recorded on the runs row so other users in the batch still execute.
 
@@ -1025,15 +1104,20 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         # _2/_3…), so adding an account is just a new secret — no code change.
         # core_llm round-robins across the comma-joined set and rate-limits each
         # account independently, so every account adds real headroom.
-        cerebras_key = _discover_keys("CEREBRAS_API_KEY", "MULTI_CEREBRAS_API_KEY")
-        groq_key = _discover_keys("GROQ_API_KEY", "MULTI_GROQ_API_KEY")
+        # When sharded, each shard takes a DISJOINT slice of every provider's
+        # accounts so parallel shards never contend for the same account's RPM.
+        cerebras_key = _shard_slice(
+            _discover_keys("CEREBRAS_API_KEY", "MULTI_CEREBRAS_API_KEY"), shard_index, shard_count)
+        groq_key = _shard_slice(
+            _discover_keys("GROQ_API_KEY", "MULTI_GROQ_API_KEY"), shard_index, shard_count)
         # Gemini Flash Lite (lower-ranked verdicts) — rotated across accounts.
-        gemini_key = _discover_keys("GEMINI_API_KEY")
+        gemini_key = _shard_slice(_discover_keys("GEMINI_API_KEY"), shard_index, shard_count)
         # Gemini embeddings (CV + job pre-rank) — its own account pool; the
         # embedding RPD is the capacity bottleneck, so a 2nd embed account here is
         # the highest-leverage scale-up. Falls back to the verdict keys if no
         # dedicated embed key is set.
-        gemini_embed_key = _discover_keys("GEMINI_EMBED_API_KEY") or gemini_key
+        gemini_embed_key = _shard_slice(
+            _discover_keys("GEMINI_EMBED_API_KEY"), shard_index, shard_count) or gemini_key
 
         combined, job_embeddings = attach_similarity(
             combined, user["cv_text"], gemini_embed_key,
@@ -1186,9 +1270,48 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--admin-override", action="store_true",
                         help="Admin forced run: bypass the 2/day budget cap. "
                              "Use with --user-id (ignored otherwise).")
+    # --- Sharding (parallel matrix jobs) ---
+    parser.add_argument("--shard-index", type=int, default=0,
+                        help="This shard's index in [0, shard-count). Processes only "
+                             "users whose hash maps to it, using a disjoint key slice.")
+    parser.add_argument("--shard-count", type=int, default=1,
+                        help="Total number of parallel shards (matrix size). 1 = no sharding.")
+    parser.add_argument("--collect-local-only", action="store_true",
+                        help="Collect the shared local-market jobs, write them to "
+                             "--local-jobs-file, and exit. The 'collect-local' stage of "
+                             "the sharded workflow uses this so local sources are scraped ONCE.")
+    parser.add_argument("--local-jobs-file", default=None,
+                        help="Path to the shared local-jobs JSON. With --collect-local-only "
+                             "it's the OUTPUT; otherwise it's READ instead of re-scraping.")
     args = parser.parse_args(argv)
 
     configure_logging()
+
+    # Normalize shard params defensively (a bad matrix value shouldn't crash).
+    shard_count = args.shard_count if args.shard_count and args.shard_count > 0 else 1
+    shard_index = args.shard_index if 0 <= args.shard_index < shard_count else 0
+
+    # Stage 1 of the sharded workflow: scrape local jobs once and hand off via a
+    # file (uploaded as an artifact). No Supabase / users needed here.
+    if args.collect_local_only:
+        out = args.local_jobs_file or "data/local_jobs.json"
+        if not INCLUDE_LOCAL_SOURCES:
+            logger.info("Local sources disabled — writing empty local-jobs file.")
+            _dump_local_jobs(out, [])
+            return 0
+        try:
+            gemini_key = os.environ.get("GEMINI_API_KEY", "")
+            jobs, st = collect_local_raw_jobs(gemini_key=gemini_key)
+            logger.info(
+                "collect-local: %d job(s) (ats=%d ddg=%d jobspy=%d telegram=%d jobs_ps=%d) → %s",
+                len(jobs), st["ats_jobs"], st["ddg_jobs"], st["jobspy_jobs"],
+                st["telegram_jobs"], st["jobsps_jobs"], out,
+            )
+        except Exception as e:
+            logger.warning("collect-local failed: %s — writing empty list.", e)
+            jobs = []
+        _dump_local_jobs(out, jobs)
+        return 0
 
     try:
         client = get_service_client()
@@ -1201,13 +1324,22 @@ def main(argv: Optional[list] = None) -> int:
         only_user_id=args.user_id,
         skip_due_check=args.skip_due_check,
     )
+    # Keep only the users that belong to THIS shard (disjoint across shards). A
+    # targeted --user-id run still routes to its hash-assigned shard, so the other
+    # shards no-op rather than double-processing.
+    if shard_count > 1:
+        users = [u for u in users if _user_shard(u["user_id"], shard_count) == shard_index]
+        logger.info("Shard %d/%d: %d user(s) after sharding.", shard_index, shard_count, len(users))
     logger.info("Multi-user runner: %d user(s) to process.", len(users))
     if not users:
         return 0
 
     api_cache = _ApiCache()
-    # Shared local-market jobs, collected once on first use this tick.
-    local_cache = _LocalJobsCache() if INCLUDE_LOCAL_SOURCES else None
+    # Shared local-market jobs: loaded from the collect-local artifact when sharded
+    # (so shards don't each re-scrape), otherwise scraped once on first use.
+    local_cache = (
+        _LocalJobsCache(from_file=args.local_jobs_file) if INCLUDE_LOCAL_SOURCES else None
+    )
     # Shared job-embedding cache for THIS tick: a job seen by multiple due users
     # (the global scrape is shared) is embedded once, not per user. The embedding
     # is a pure function of the job text, so this is exact. Cleared each tick by
@@ -1230,7 +1362,8 @@ def main(argv: Optional[list] = None) -> int:
         logger.info("--- Starting user %s (%s) ---", user["user_id"], trigger)
         _run_for_user(user, client, api_cache, dry_run=args.dry_run,
                       local_cache=local_cache, trigger=trigger,
-                      admin_override=admin_override, job_embed_cache=job_embed_cache)
+                      admin_override=admin_override, job_embed_cache=job_embed_cache,
+                      shard_index=shard_index, shard_count=shard_count)
         logger.info(
             "--- Finished user %s in %.1fs ---",
             user["user_id"], time.time() - user_start,
