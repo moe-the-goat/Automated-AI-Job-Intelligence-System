@@ -380,3 +380,71 @@ def test_local_jobs_file_roundtrip():
 
 def test_load_local_jobs_missing_file_is_empty():
     assert mur._load_local_jobs("/no/such/file_xyz.json") == []
+
+
+# ---------------------------------------------------------------------------
+# _finalize_run — email-delivery outcome (Tier D) + pre-migration degradation
+# ---------------------------------------------------------------------------
+
+class _UpdateQuery:
+    def __init__(self, rec, *, reject_email=False):
+        self._rec = rec
+        self._reject_email = reject_email
+
+    def update(self, payload):
+        self._payload = dict(payload)
+        return self
+
+    def eq(self, *_a):
+        return self
+
+    def execute(self):
+        self._rec["attempts"].append(self._payload)
+        if self._reject_email and "email_status" in self._payload:
+            raise RuntimeError('column "email_status" does not exist')
+        self._rec["final"] = self._payload
+        return _CountResp([{"id": 1}], with_count=False)
+
+
+class _UpdateClient:
+    def __init__(self, *, reject_email=False):
+        self.rec = {"attempts": [], "final": None}
+        self._reject_email = reject_email
+
+    def table(self, _name):
+        return _UpdateQuery(self.rec, reject_email=self._reject_email)
+
+
+def test_finalize_run_records_email_status():
+    client = _UpdateClient()
+    mur._finalize_run(client, 1, status="success", approved=3,
+                      email_status="sent", email_error=None)
+    assert client.rec["final"]["status"] == "success"
+    assert client.rec["final"]["email_status"] == "sent"
+    assert client.rec["final"]["email_error"] is None
+
+
+def test_finalize_run_records_email_failure_with_error():
+    client = _UpdateClient()
+    mur._finalize_run(client, 1, status="success",
+                      email_status="failed", email_error="SMTP 535 auth")
+    assert client.rec["final"]["email_status"] == "failed"
+    assert client.rec["final"]["email_error"] == "SMTP 535 auth"
+
+
+def test_finalize_run_degrades_when_email_columns_missing():
+    # Pre-migration-0020 schema: the email_status update is rejected, but the run
+    # must still finalize via the retry WITHOUT those columns.
+    client = _UpdateClient(reject_email=True)
+    mur._finalize_run(client, 1, status="success", approved=2,
+                      email_status="sent")
+    assert len(client.rec["attempts"]) == 2          # first with, retry without
+    assert "email_status" not in client.rec["final"] # the retry dropped it
+    assert client.rec["final"]["status"] == "success"  # run still finalized
+
+
+def test_finalize_run_no_email_status_omits_columns():
+    # When no email outcome is passed (early-return paths), the columns aren't set.
+    client = _UpdateClient()
+    mur._finalize_run(client, 1, status="success", approved=0)
+    assert "email_status" not in client.rec["final"]

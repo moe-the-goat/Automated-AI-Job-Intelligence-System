@@ -673,19 +673,40 @@ def _finalize_run(client, run_id: int, *,
                   status: str,
                   scraped: int = 0, filtered: int = 0,
                   ai_evaluated: int = 0, approved: int = 0,
-                  lower_ranked: int = 0, error: Optional[str] = None):
+                  lower_ranked: int = 0, error: Optional[str] = None,
+                  email_status: Optional[str] = None,
+                  email_error: Optional[str] = None):
+    payload = {
+        "status": status,
+        "ended_at": datetime.now(timezone.utc).isoformat(),
+        "scraped": scraped,
+        "filtered": filtered,
+        "ai_evaluated": ai_evaluated,
+        "approved": approved,
+        "lower_ranked": lower_ranked,
+        "error": (error or "")[:2000] if error else None,
+    }
+    # Email-delivery outcome (Tier D). Added separately so a pre-migration-0020
+    # schema (no email_status/email_error) still finalizes the run via the retry
+    # below rather than losing the whole update.
+    if email_status is not None:
+        payload["email_status"] = email_status
+        payload["email_error"] = (email_error or "")[:1000] if email_error else None
     try:
-        client.table("runs").update({
-            "status": status,
-            "ended_at": datetime.now(timezone.utc).isoformat(),
-            "scraped": scraped,
-            "filtered": filtered,
-            "ai_evaluated": ai_evaluated,
-            "approved": approved,
-            "lower_ranked": lower_ranked,
-            "error": (error or "")[:2000] if error else None,
-        }).eq("id", run_id).execute()
+        client.table("runs").update(payload).eq("id", run_id).execute()
     except Exception as e:
+        if email_status is not None and ("email_status" in str(e) or "email_error" in str(e)):
+            logger.warning(
+                "UPDATE runs rejected email columns for run %s (migration 0020 not "
+                "applied?) — retrying without them: %s", run_id, str(e)[:160],
+            )
+            for k in ("email_status", "email_error"):
+                payload.pop(k, None)
+            try:
+                client.table("runs").update(payload).eq("id", run_id).execute()
+                return
+            except Exception as e2:
+                e = e2
         logger.error("UPDATE runs failed for run %s: %s", run_id, e)
 
 
@@ -1042,6 +1063,10 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
 
     tracker = SupabaseJobTracker(user_id, client=client)
     stats = {"scraped": 0, "filtered": 0, "ai_evaluated": 0, "approved": 0, "lower_ranked": 0}
+    # Email-delivery outcome (Tier D). Defaults to "none" (no email this run) and
+    # is set to sent/failed/skipped in the email block below.
+    email_status = "none"
+    email_error = None
 
     try:
         # 1. Build the RAG / digest preferences provider
@@ -1214,9 +1239,17 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
                 "Your Daily Job Alerts",
                 html,
             )
-            if not ok:
-                logger.warning("User %s: email send failed — marking run success but email skipped.", user_id)
+            # Record delivery outcome (Tier D) so the admin can see send failures —
+            # a run can "succeed" while its email silently fails (e.g. SMTP auth).
+            if ok:
+                email_status = "sent"
+            else:
+                email_status = "failed"
+                email_error = str(_info)[:1000] if _info else "send returned not-ok"
+                logger.warning("User %s: email send failed — run success, email FAILED: %s",
+                               user_id, email_error)
         elif dry_run:
+            email_status = "skipped"
             logger.info("User %s: --dry-run, email not sent.", user_id)
 
         # Remember the embeddings of jobs that survived to delivery so the next
@@ -1229,7 +1262,8 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         if survivors:
             save_job_embedding_history(user_id, survivors, client=client)
 
-        _finalize_run(client, run_id, status="success", **stats)
+        _finalize_run(client, run_id, status="success", **stats,
+                      email_status=email_status, email_error=email_error)
         tracker.save()
 
     except Exception as e:
