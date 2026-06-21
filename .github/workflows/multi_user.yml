@@ -180,22 +180,36 @@ jobs:
           # their notification_email — no custom domain needed (Resend retired).
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
-          # Top-section verdict providers. Prefer the multi-user-dedicated keys
-          # so the worker has its OWN daily token budget and can't be starved by
-          # TWO accounts per provider, both actually used: the runner comma-joins
-          # KEY + KEY_2 and core_llm round-robins across them, doubling RPD/RPM
-          # headroom. We have two existing secrets per provider, so wire BOTH in:
-          #   slot 1 = MULTI_* (or the plain key if MULTI_* is unset)
-          #   slot 2 = the plain key (the other account)
-          # If only one secret exists, slot 2 is empty and it degrades to single-key.
-          CEREBRAS_API_KEY: ${{ secrets.MULTI_CEREBRAS_API_KEY || secrets.CEREBRAS_API_KEY }}
-          CEREBRAS_API_KEY_2: ${{ secrets.MULTI_CEREBRAS_API_KEY && secrets.CEREBRAS_API_KEY || '' }}
-          GROQ_API_KEY: ${{ secrets.MULTI_GROQ_API_KEY || secrets.GROQ_API_KEY }}
-          GROQ_API_KEY_2: ${{ secrets.MULTI_GROQ_API_KEY && secrets.GROQ_API_KEY || '' }}
-          # Gemini (embeddings + lower-ranked verdicts) stays shared — its quota
-          # profile is different and wasn't the bottleneck.
+          # API accounts — passed through with their NATURAL names so the runner's
+          # _discover_keys can find them all (base → MULTI_ legacy → _2/_3…) and
+          # round-robin. To ADD an account: create the next secret in sequence
+          # (e.g. GEMINI_EMBED_API_KEY_3) — the slot below already points at it, so
+          # NO workflow edit is needed. A secret that doesn't exist resolves to ""
+          # and is skipped (discovery stops at the first gap, so keep numbering
+          # contiguous). Extra empty slots are pre-wired for headroom.
+          #
+          # Cerebras (account #2 historically lives in MULTI_CEREBRAS_API_KEY).
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          MULTI_CEREBRAS_API_KEY: ${{ secrets.MULTI_CEREBRAS_API_KEY }}
+          CEREBRAS_API_KEY_2: ${{ secrets.CEREBRAS_API_KEY_2 }}
+          CEREBRAS_API_KEY_3: ${{ secrets.CEREBRAS_API_KEY_3 }}
+          CEREBRAS_API_KEY_4: ${{ secrets.CEREBRAS_API_KEY_4 }}
+          CEREBRAS_API_KEY_5: ${{ secrets.CEREBRAS_API_KEY_5 }}
+          # Groq (fallback only — low value to scale; #2 in MULTI_GROQ_API_KEY).
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MULTI_GROQ_API_KEY: ${{ secrets.MULTI_GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
+          # Gemini Flash Lite (lower-ranked verdicts) — now rotated across accounts.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+          GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+          # Gemini embeddings (CV + job pre-rank) — the daily-RPD bottleneck, so
+          # the highest-leverage place to add accounts.
           GEMINI_EMBED_API_KEY: ${{ secrets.GEMINI_EMBED_API_KEY }}
+          GEMINI_EMBED_API_KEY_2: ${{ secrets.GEMINI_EMBED_API_KEY_2 }}
+          GEMINI_EMBED_API_KEY_3: ${{ secrets.GEMINI_EMBED_API_KEY_3 }}
+          # Feedback-RAG embeddings (separate vector space) — stays single.
           GEMINI_EMBED2_API_KEY: ${{ secrets.GEMINI_EMBED2_API_KEY }}
           # W2: public origin of the deployed web app (e.g. https://<app>.vercel.app).
           # Set as a repo Variable. When unset, emails simply omit the tokenized

@@ -223,21 +223,28 @@ def _call_gemini(prompt, api_key):
 def call_gemini_verdict(prompt, api_key, max_attempts=3, label=""):
     """Run a Gemini Flash Lite verdict call with simple retry on transient errors.
 
-    Used for the lower-ranked "Also Found" section verdicts. Only one provider
-    (no ping-pong), so we just sleep-and-retry on 5xx/429.
+    Used for the lower-ranked "Also Found" section verdicts. `api_key` may be a
+    single key or a comma-separated list of accounts. Multiple accounts are
+    round-robined the same way Cerebras/Groq are: consecutive calls start on the
+    next account (spreading the steady load), and a retry within a call advances
+    to a different account than the one that just failed. Per-account RPM is then
+    enforced in _call_gemini via _throttle.
     """
-    if not api_key:
+    keys = _parse_keys(api_key)
+    if not keys:
         raise ValueError("GEMINI_API_KEY is not set")
 
+    start = _take_start("GeminiVerdict", len(keys))
     last_exc = None
     for idx in range(max_attempts):
+        key = keys[(start + idx) % len(keys)]
         try:
             if idx > 0:
                 backoff = _INTER_ATTEMPT_BACKOFF_SECONDS * (2 ** (idx - 1))
                 logger.warning("[LLM Gemini RETRY %d/%d] backing off %.1fs for %s",
                                idx + 1, max_attempts, backoff, label[:55])
                 time.sleep(backoff)
-            return _call_gemini(prompt, api_key)
+            return _call_gemini(prompt, key)
         except Exception as e:
             last_exc = e
             err_str = str(e)[:200]
@@ -288,7 +295,7 @@ def _take_start(provider, n):
     account than the one that just failed."""
     if n <= 0:
         return 0
-    start = _KEY_CURSOR[provider] % n
+    start = _KEY_CURSOR.get(provider, 0) % n
     _KEY_CURSOR[provider] = (start + 1) % n
     return start
 

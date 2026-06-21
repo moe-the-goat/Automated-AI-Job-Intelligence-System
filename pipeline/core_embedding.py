@@ -175,6 +175,21 @@ def _embed_text(client, text, model=EMBED_MODEL):
         return None
 
 
+def _embed_keys(api_key):
+    """Normalize the embedding key input to a list of accounts.
+
+    `api_key` may be a single key or a comma-separated list (multiple Gemini
+    embedding accounts). Embeddings are the daily-RPD bottleneck, so rotating
+    across accounts is the main scaling lever here."""
+    if not api_key:
+        return []
+    if isinstance(api_key, (list, tuple)):
+        items = api_key
+    else:
+        items = str(api_key).split(",")
+    return [k.strip() for k in items if k and k.strip()]
+
+
 def get_cv_embedding(cv_text, api_key):
     """Return the CV embedding vector, reading from disk cache when the hash matches."""
     cached = _read_cached_embedding(cv_text)
@@ -182,12 +197,15 @@ def get_cv_embedding(cv_text, api_key):
         logger.info("CV embedding: cache hit.")
         return cached
 
-    if not api_key:
+    keys = _embed_keys(api_key)
+    if not keys:
         logger.warning("CV embedding: no API key, returning None.")
         return None
 
     from google import genai  # lazy: don't require this at import time
-    client = genai.Client(api_key=api_key)
+    # One CV embed per run (and it's cached) — account choice is immaterial; use
+    # the first. The high-volume job embeds below are what rotate across accounts.
+    client = genai.Client(api_key=keys[0])
     logger.info("CV embedding: regenerating (CV changed or first run).")
     vec = _embed_text(client, cv_text)
     if vec is not None:
@@ -209,11 +227,28 @@ def embed_jobs(rows, api_key, throttle_seconds=EMBED_THROTTLE_SECONDS, cache=Non
     skips the throttle sleep (no API call was made). cache=None preserves the old
     per-call behavior exactly.
     """
-    if not rows or not api_key:
+    keys = _embed_keys(api_key)
+    if not rows or not keys:
         return [None] * len(rows or [])
 
-    client = None  # created lazily on the first cache MISS — all-hit runs make no SDK call
+    # Round-robin across embedding accounts: each account is hit every Nth call,
+    # so its effective rate is 1/N — meaning we can pace N× faster while keeping
+    # each account under its RPM. N accounts therefore add BOTH daily-RPD ceiling
+    # (the real bottleneck) AND speed. One account reproduces the old behavior.
+    n_accounts = len(keys)
+    per_call_pace = throttle_seconds / n_accounts
+    clients = {}  # api_key -> genai.Client, created lazily on first use
+
+    def _client_for(k):
+        c = clients.get(k)
+        if c is None:
+            from google import genai
+            c = genai.Client(api_key=k)
+            clients[k] = c
+        return c
+
     embeddings = []
+    rot = 0  # local rotation index across the accounts
     for row in rows:
         title = str(row.get("title", "")).strip()
         description = str(row.get("description", "")).strip()[:JOB_TEXT_MAX_CHARS]
@@ -227,14 +262,13 @@ def embed_jobs(rows, api_key, throttle_seconds=EMBED_THROTTLE_SECONDS, cache=Non
             embeddings.append(cache[ck])
             continue
 
-        if client is None:
-            from google import genai
-            client = genai.Client(api_key=api_key)
-        vec = _embed_text(client, text)
+        key = keys[rot % n_accounts]
+        rot += 1
+        vec = _embed_text(_client_for(key), text)
         embeddings.append(vec)
         if ck is not None and vec is not None:
             cache[ck] = vec
-        time.sleep(throttle_seconds)
+        time.sleep(per_call_pace)
     return embeddings
 
 

@@ -235,3 +235,75 @@ def test_admin_override_bypasses_cap():
     # The whole point of the admin "Force run": run even when the user is maxed.
     assert mur._budget_allows_run(mur.MAX_RUNS_PER_DAY, admin_override=True) is True
     assert mur._budget_allows_run(99, admin_override=True) is True
+
+
+# ---------------------------------------------------------------------------
+# _discover_keys — auto-discover API accounts from env (base → legacy → _2/_3…)
+# ---------------------------------------------------------------------------
+
+import os
+
+
+class _EnvPatch:
+    """Set/clear env vars for the duration of a block, then restore exactly."""
+
+    def __init__(self, present: dict, absent=()):
+        self._present = present
+        self._absent = list(absent)
+        self._saved = {}
+
+    def __enter__(self):
+        for k in list(self._present) + self._absent:
+            self._saved[k] = os.environ.get(k)
+        for k, v in self._present.items():
+            os.environ[k] = v
+        for k in self._absent:
+            os.environ.pop(k, None)
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return False
+
+
+def test_discover_keys_base_legacy_and_numbered():
+    # base + MULTI_ legacy + _2 + _3, with _4 absent → all four, in order.
+    with _EnvPatch(
+        {
+            "CEREBRAS_API_KEY": "k1",
+            "MULTI_CEREBRAS_API_KEY": "k2",
+            "CEREBRAS_API_KEY_2": "k3",
+            "CEREBRAS_API_KEY_3": "k4",
+        },
+        absent=["CEREBRAS_API_KEY_4", "CEREBRAS_API_KEY_5"],
+    ):
+        assert mur._discover_keys("CEREBRAS_API_KEY", "MULTI_CEREBRAS_API_KEY") == "k1,k2,k3,k4"
+
+
+def test_discover_keys_stops_at_first_gap():
+    # _3 is set but _2 is missing → discovery stops after the base; _3 is ignored.
+    with _EnvPatch(
+        {"GEMINI_EMBED_API_KEY": "e1", "GEMINI_EMBED_API_KEY_3": "e3"},
+        absent=["GEMINI_EMBED_API_KEY_2"],
+    ):
+        assert mur._discover_keys("GEMINI_EMBED_API_KEY") == "e1"
+
+
+def test_discover_keys_dedupes_identical_values():
+    # The same key wired under two names is counted once.
+    with _EnvPatch(
+        {"GROQ_API_KEY": "same", "MULTI_GROQ_API_KEY": "same"},
+        absent=["GROQ_API_KEY_2"],
+    ):
+        assert mur._discover_keys("GROQ_API_KEY", "MULTI_GROQ_API_KEY") == "same"
+
+
+def test_discover_keys_single_and_empty():
+    with _EnvPatch({"GEMINI_API_KEY": "g1"}, absent=["GEMINI_API_KEY_2"]):
+        assert mur._discover_keys("GEMINI_API_KEY") == "g1"
+    with _EnvPatch({}, absent=["NOPE_API_KEY", "NOPE_API_KEY_2"]):
+        assert mur._discover_keys("NOPE_API_KEY") == ""

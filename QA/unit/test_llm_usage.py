@@ -16,6 +16,7 @@ from pipeline.core_llm import (
     _take_start,
     _KEY_CURSOR,
     call_llm_with_fallback,
+    call_gemini_verdict,
     _reserve,
     _throttle,
     _min_interval,
@@ -204,3 +205,48 @@ def test_throttle_noop_without_key():
     slept = []
     _throttle("Cerebras", "", sleeper=lambda s: slept.append(s), clock=lambda: 0.0)
     assert slept == []
+
+
+# --- Gemini multi-account rotation (lower-ranked verdicts) ------------------
+
+def test_gemini_verdict_rotates_across_accounts():
+    # Two Gemini accounts → consecutive verdict calls alternate accounts on the
+    # happy path (same machinery as Cerebras). Manual patch (no pytest fixtures).
+    import pipeline.core_llm as m
+    m._KEY_CURSOR["GeminiVerdict"] = 0
+    used = []
+    original = m._call_gemini
+
+    def fake_gemini(prompt, api_key):
+        used.append(api_key)
+        return "verdict"
+
+    m._call_gemini = fake_gemini
+    try:
+        for _ in range(4):
+            call_gemini_verdict("p", "gA,gB", max_attempts=3, label="t")
+    finally:
+        m._call_gemini = original
+    assert used == ["gA", "gB", "gA", "gB"]
+
+
+def test_gemini_verdict_single_account_unchanged():
+    import pipeline.core_llm as m
+    m._KEY_CURSOR["GeminiVerdict"] = 0
+    used = []
+    original = m._call_gemini
+    m._call_gemini = lambda prompt, api_key: (used.append(api_key) or "v")
+    try:
+        for _ in range(3):
+            call_gemini_verdict("p", "only", max_attempts=3, label="t")
+    finally:
+        m._call_gemini = original
+    assert used == ["only", "only", "only"]
+
+
+def test_gemini_verdict_empty_key_raises():
+    try:
+        call_gemini_verdict("p", "", max_attempts=3)
+        assert False, "Expected ValueError on empty Gemini key"
+    except ValueError:
+        pass

@@ -344,6 +344,37 @@ def test_embed_jobs_shared_cache_embeds_identical_job_once():
     assert out1[0] == out1[1] == out2[0] == [0.1, 0.2, 0.3]
 
 
+def test_embed_jobs_rotates_across_embedding_accounts():
+    # Two embedding accounts → distinct job texts are spread across both clients,
+    # doubling daily-RPD headroom (the embedding bottleneck).
+    import pipeline.core_embedding as ce
+    saved = {}
+    created_keys = []
+    fake_genai = types.SimpleNamespace(
+        Client=lambda api_key=None: created_keys.append(api_key) or object()
+    )
+    google_mod = types.ModuleType("google")
+    google_mod.genai = fake_genai
+    for name, mod in (("google", google_mod), ("google.genai", fake_genai)):
+        saved[name] = sys.modules.get(name)
+        sys.modules[name] = mod
+    orig = ce._embed_text
+    ce._embed_text = lambda client, text, model=ce.EMBED_MODEL: [0.1]
+    try:
+        rows = [
+            {"title": "A", "description": "1"},
+            {"title": "B", "description": "2"},
+            {"title": "C", "description": "3"},
+            {"title": "D", "description": "4"},
+        ]
+        ce.embed_jobs(rows, "key1,key2", throttle_seconds=0)
+    finally:
+        ce._embed_text = orig
+        _restore_modules(saved)
+    # Both accounts were used (a client was built for each).
+    assert set(created_keys) == {"key1", "key2"}
+
+
 def test_embed_jobs_without_cache_embeds_every_row():
     # cache=None preserves the old behavior: every row is embedded.
     import pipeline.core_embedding as ce

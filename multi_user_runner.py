@@ -244,6 +244,39 @@ def _join_keys(*env_names) -> str:
     return ",".join(k for k in keys if k)
 
 
+def _discover_keys(base: str, legacy: str = None) -> str:
+    """Auto-discover every API account configured for a provider and comma-join
+    them, so adding an account is a pure secrets change — no code edit.
+
+    Discovery order: `base`, then the optional `legacy` name (the historical
+    MULTI_* secret that already holds account #2 for Cerebras/Groq), then
+    `base_2`, `base_3`, … stopping at the FIRST missing number (numbering must be
+    contiguous). Duplicate values are dropped so a key wired under two names isn't
+    double-counted. Order doesn't matter — core_llm round-robins over the set.
+
+    Examples:
+      _discover_keys("CEREBRAS_API_KEY", "MULTI_CEREBRAS_API_KEY")
+        → CEREBRAS_API_KEY, MULTI_CEREBRAS_API_KEY, CEREBRAS_API_KEY_2, _3, …
+      _discover_keys("GEMINI_EMBED_API_KEY")
+        → GEMINI_EMBED_API_KEY, GEMINI_EMBED_API_KEY_2, _3, …
+    """
+    names = [base]
+    if legacy:
+        names.append(legacy)
+    n = 2
+    while os.environ.get(f"{base}_{n}", "").strip():
+        names.append(f"{base}_{n}")
+        n += 1
+
+    out, seen = [], set()
+    for nm in names:
+        v = os.environ.get(nm, "").strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return ",".join(out)
+
+
 def _run_ai_loop(df, cv_text, tracker, *,
                  provider, cerebras_key=None, groq_key=None,
                  gemini_key=None, preferences_for=None):
@@ -988,14 +1021,19 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         stats["filtered"] = int(len(combined))
 
         # 4. CV embedding pre-rank
-        gemini_key = os.environ.get("GEMINI_API_KEY", "")
-        gemini_embed_key = os.environ.get("GEMINI_EMBED_API_KEY", "") or gemini_key
-        # Two accounts per provider double the rate-limit headroom — join both
-        # keys comma-separated so core_llm round-robins across them. The second
-        # key is optional (CEREBRAS_API_KEY_2 / GROQ_API_KEY_2); falls back to a
-        # single key cleanly when it's unset.
-        cerebras_key = _join_keys("CEREBRAS_API_KEY", "CEREBRAS_API_KEY_2")
-        groq_key = _join_keys("GROQ_API_KEY", "GROQ_API_KEY_2")
+        # All providers AUTO-DISCOVER their accounts (base → MULTI_ legacy →
+        # _2/_3…), so adding an account is just a new secret — no code change.
+        # core_llm round-robins across the comma-joined set and rate-limits each
+        # account independently, so every account adds real headroom.
+        cerebras_key = _discover_keys("CEREBRAS_API_KEY", "MULTI_CEREBRAS_API_KEY")
+        groq_key = _discover_keys("GROQ_API_KEY", "MULTI_GROQ_API_KEY")
+        # Gemini Flash Lite (lower-ranked verdicts) — rotated across accounts.
+        gemini_key = _discover_keys("GEMINI_API_KEY")
+        # Gemini embeddings (CV + job pre-rank) — its own account pool; the
+        # embedding RPD is the capacity bottleneck, so a 2nd embed account here is
+        # the highest-leverage scale-up. Falls back to the verdict keys if no
+        # dedicated embed key is set.
+        gemini_embed_key = _discover_keys("GEMINI_EMBED_API_KEY") or gemini_key
 
         combined, job_embeddings = attach_similarity(
             combined, user["cv_text"], gemini_embed_key,
