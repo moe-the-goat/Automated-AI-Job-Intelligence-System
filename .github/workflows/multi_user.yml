@@ -43,10 +43,17 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Skip email sending (overrides MULTI_USER_DRY_RUN variable)."
+        # DEFAULT IS "false" ON PURPOSE. The PRIMARY trigger is an external cron
+        # that dispatches with empty inputs:{}, and GitHub then fills THIS default
+        # in for github.event.inputs.dry_run. If this defaulted to "true", every
+        # cron-driven run would silently be a dry-run and NO emails would ever
+        # send (results still persist, so it looks "successful" + shows in the
+        # dashboard — exactly the bug we hit). Keep it "false"; set "true"
+        # explicitly only for a manual smoke test.
+        description: "Skip email sending. Leave false for live runs; set true only for smoke tests."
         required: false
         type: choice
-        default: "true"
+        default: "false"
         options:
           - "true"
           - "false"
@@ -120,12 +127,53 @@ env:
   APP_BASE_URL: ${{ vars.APP_BASE_URL }}
 
 jobs:
+  # ── Stage 0: cheap due-check gate ──────────────────────────────────────────
+  # Most ticks (the external cron fires every 30 min) have NO user due, yet the
+  # local-market scrape below costs ~15 min. This gate does a single REST query
+  # for "any active user whose next_run_at has passed" and skips the rest of the
+  # workflow when there's nothing to do — so a non-productive tick is ~15s, not
+  # ~15 min. A targeted/manual dispatch (user_id or skip_due_check) always
+  # proceeds. Fail-OPEN: anything other than a clean empty result proceeds, so a
+  # transient query hiccup never makes us miss a due user.
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      proceed: ${{ steps.due.outputs.proceed }}
+    steps:
+      - name: Check for due users
+        id: due
+        run: |
+          if [ -n "${{ github.event.inputs.user_id }}" ] || [ "${{ github.event.inputs.skip_due_check }}" = "true" ]; then
+            echo "Targeted/forced dispatch — proceeding."
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+          BODY=$(curl -s -G "$SUPABASE_URL/rest/v1/preferences" \
+            --data-urlencode "select=user_id" \
+            --data-urlencode "is_active=eq.true" \
+            --data-urlencode "next_run_at=lte.$NOW" \
+            --data-urlencode "limit=1" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY")
+          if [ "$BODY" = "[]" ]; then
+            echo "No users due — skipping collect-local + processing."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Users due (or check inconclusive) — proceeding."
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   # ── Stage 1: scrape the shared Palestinian local-market jobs ONCE ──────────
   # The local market is identical for every user, so it's collected a single time
   # here and handed to the parallel shards via an artifact — they don't each
   # re-hit DDG / JobSpy / the careers Gemini extraction. The QA gate runs here and
   # gates the whole workflow (process-users `needs` this job).
   collect-local:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -176,7 +224,8 @@ jobs:
   # shards would share an account. With 2 Gemini-embed / Flash-Lite / Groq
   # accounts, 2 shards is the safe maximum today.
   process-users:
-    needs: collect-local
+    needs: [gate, collect-local]
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
