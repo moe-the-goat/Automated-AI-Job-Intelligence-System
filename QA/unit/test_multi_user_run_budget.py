@@ -483,3 +483,30 @@ def test_min_match_empty_frame_is_safe():
     import pandas as pd
     out = mur._filter_by_min_match(pd.DataFrame(), 50)
     assert out.empty
+
+
+# ---------------------------------------------------------------------------
+# _wrap_preferences_with_note — user steering note folds into scoring context
+# ---------------------------------------------------------------------------
+
+def test_wrap_preferences_prepends_user_note():
+    base = lambda row: "learned digest context"
+    wrapped = mur._wrap_preferences_with_note(base, "prioritize internships, no crypto")
+    out = wrapped({"title": "x"})
+    assert "prioritize internships, no crypto" in out
+    assert "learned digest context" in out
+    # The note comes BEFORE the learned context.
+    assert out.index("prioritize") < out.index("learned digest")
+
+
+def test_wrap_preferences_empty_note_returns_base_unchanged():
+    base = lambda row: "ctx"
+    assert mur._wrap_preferences_with_note(base, "") is base
+    assert mur._wrap_preferences_with_note(base, "   ") is base
+    assert mur._wrap_preferences_with_note(base, None) is base
+
+
+def test_wrap_preferences_handles_empty_base_context():
+    base = lambda row: ""
+    out = mur._wrap_preferences_with_note(base, "remote only")({"t": 1})
+    assert "remote only" in out

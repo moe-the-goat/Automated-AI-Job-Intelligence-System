@@ -559,7 +559,10 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
         "notification_email, ai_eval_top_n, api_hours_old, "
         "profiles!inner(cv_text, is_whitelisted)"
     )
-    _ext_cols = _base_cols + ", min_match_percentage"
+    # Optional newer columns (migrations 0021/0022). If the live schema predates
+    # either, the SELECT errors → fall back to the base columns and treat the
+    # missing prefs as their defaults (threshold 0, no note).
+    _ext_cols = _base_cols + ", min_match_percentage, preference_note"
 
     def _run_pref_query(cols):
         q = client.table("preferences").select(cols).eq("is_active", True)
@@ -572,10 +575,10 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
     try:
         resp = _run_pref_query(_ext_cols)
     except Exception as e:
-        if "min_match_percentage" in str(e):
+        if "min_match_percentage" in str(e) or "preference_note" in str(e):
             logger.warning(
-                "preferences SELECT rejected min_match_percentage (migration 0021 "
-                "not applied?) — retrying without it (threshold treated as 0)."
+                "preferences SELECT rejected a newer column (migration 0021/0022 "
+                "not applied?) — retrying with base columns (defaults applied)."
             )
             try:
                 resp = _run_pref_query(_base_cols)
@@ -641,6 +644,8 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
             "ai_eval_top_n": row.get("ai_eval_top_n") or AI_EVAL_TOP_N,
             # Per-user minimum match % for the EMAIL digest (0 = no filter).
             "min_match_percentage": int(row.get("min_match_percentage") or 0),
+            # User-authored steering note, folded into every AI verdict.
+            "preference_note": (row.get("preference_note") or "").strip(),
             "search_queries": searches,
             # The scheduled time that made this user due — used as the ANCHOR for
             # the next run so a late fire doesn't drift the schedule (see
@@ -998,6 +1003,25 @@ def _runs_used_today(client, user_id: str, *, now=None) -> int:
 # Per-user pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _wrap_preferences_with_note(base_provider, note):
+    """Wrap a preferences provider so the user's own steering note is prepended to
+    its learned context for every job. Empty/blank note → the provider is returned
+    unchanged. The note is the user's direct hand on scoring (feedback-loop UI)."""
+    note = (note or "").strip()
+    if not note:
+        return base_provider
+
+    def provider(row):
+        ctx = base_provider(row) or ""
+        header = (
+            "The candidate explicitly stated these preferences — weight them "
+            f"heavily when judging fit:\n{note}"
+        )
+        return f"{header}\n\n{ctx}".strip()
+
+    return provider
+
+
 def _filter_by_min_match(df, min_match: int):
     """Rows with match_percentage >= min_match. A 0/negative floor returns the
     frame unchanged (the default — no filtering). Rows with a missing/NA match
@@ -1102,7 +1126,12 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
             or os.environ.get("GEMINI_EMBED_API_KEY")
             or os.environ.get("GEMINI_API_KEY", "")
         )
-        preferences_for, _mode = _build_preferences_provider(user_id, feedback_embed_key)
+        base_preferences_for, _mode = _build_preferences_provider(user_id, feedback_embed_key)
+        # Fold the user's own steering note (feedback-loop UI) into the learned
+        # context for EVERY job verdict, on top of the auto-derived digest/RAG.
+        preferences_for = _wrap_preferences_with_note(
+            base_preferences_for, user.get("preference_note"),
+        )
 
         # 2. Scrape — global (per-user searches + public APIs) and shared local.
         # Tag provenance HERE, before the merge, so the origin survives the
