@@ -70,6 +70,8 @@ from pipeline.core_embedding import (
     attach_similarity,
     drop_semantic_duplicates,
     retrieve_relevant_feedback,
+    load_job_embedding_cache,
+    save_job_embedding_cache,
 )
 from pipeline.core_notify import format_email_html
 # Transport: Gmail SMTP (sends to any recipient, no domain needed). Replaced
@@ -1507,11 +1509,16 @@ def main(argv: Optional[list] = None) -> int:
     local_cache = (
         _LocalJobsCache(from_file=args.local_jobs_file) if INCLUDE_LOCAL_SOURCES else None
     )
-    # Shared job-embedding cache for THIS tick: a job seen by multiple due users
-    # (the global scrape is shared) is embedded once, not per user. The embedding
-    # is a pure function of the job text, so this is exact. Cleared each tick by
-    # being a fresh dict — stale jobs never leak across ticks.
-    job_embed_cache: dict = {}
+    # Shared job-embedding cache: dedupes embeds WITHIN a tick (a job seen by
+    # multiple due users via the shared global scrape is embedded once) AND ACROSS
+    # ticks — seeded from the disk cache the workflow persists, so the slowly-
+    # churning public feeds aren't re-embedded every tick. The embedding is a pure
+    # function of the job text (keyed by its sha256), so reuse is exact. Flushed
+    # back to disk after the loop. Empty/failed load → old per-tick-only behavior.
+    job_embed_cache: dict = load_job_embedding_cache()
+    if job_embed_cache:
+        logger.info("Job-embedding cache: seeded %d entr%s from disk.",
+                    len(job_embed_cache), "y" if len(job_embed_cache) == 1 else "ies")
     # A manual dispatch targets exactly one user (--user-id); guard against
     # --manual being passed for a whole-batch run, which would mis-stamp every
     # scheduled tick as manual.
@@ -1535,6 +1542,10 @@ def main(argv: Optional[list] = None) -> int:
             "--- Finished user %s in %.1fs ---",
             user["user_id"], time.time() - user_start,
         )
+
+    # Persist this tick's embeddings (seeded + newly computed) so the next tick
+    # reuses them instead of re-embedding the same slowly-churning feed jobs.
+    save_job_embedding_cache(job_embed_cache)
 
     logger.info(
         "Multi-user runner: %d user(s) done in %.1fs.",
