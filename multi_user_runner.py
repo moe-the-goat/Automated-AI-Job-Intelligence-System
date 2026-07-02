@@ -1202,10 +1202,16 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         filtered_parts = []
         if not global_jobs.empty:
             g = apply_pipeline_filters(global_jobs, tracker=tracker)
+            logger.info("User %s: global jobs %d scraped → %d survived filtering.",
+                        user_id, len(global_jobs), len(g))
             if not g.empty:
                 filtered_parts.append(g)
         if not local_jobs.empty:
             l = apply_pipeline_filters(local_jobs, tracker=tracker, local=True)
+            # Local is the differentiator — log scraped→survived so a big gap here
+            # (jobs lost AFTER scraping) is visible vs a collection shortfall.
+            logger.info("User %s: local jobs %d scraped → %d survived filtering.",
+                        user_id, len(local_jobs), len(l))
             if not l.empty:
                 filtered_parts.append(l)
 
