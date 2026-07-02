@@ -1300,6 +1300,9 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
                 {"scraped": stats["scraped"], "filtered": stats["filtered"], "approved": stats["approved"]},
                 lower_ranked_df=email_lower,
                 feedback_url=feedback_url,
+                # Honor the user's own min-match floor for the main tables too, so a
+                # sub-55 preference (e.g. 50) isn't silently clamped by the 55 default.
+                min_match=min_match,
             )
             ok, _info = send_email_transport(
                 user["notification_email"],
