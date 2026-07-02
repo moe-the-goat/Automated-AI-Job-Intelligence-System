@@ -63,6 +63,33 @@ def test_ddg_sourced_snippet_with_hashtag_body_passes():
     assert ok is True
 
 
+def test_telegram_short_post_passes():
+    """Telegram job posts (source='telegram') are terse by nature — must pass."""
+    row = {"title": "مطلوب مطور برمجيات",
+           "source": "telegram",
+           "description": "شركة في رام الله تطلب مطور برمجيات. للتواصل راسلنا."}
+    ok, _ = quick_viability_check(row)
+    assert ok is True
+
+
+def test_jobsps_short_listing_passes():
+    """jobs.ps listings (source='jobs_ps') can be short — must pass the pre-screen."""
+    row = {"title": "Backend Developer",
+           "source": "jobs_ps",
+           "description": "Full-time backend role in Ramallah. Apply via the portal."}
+    ok, _ = quick_viability_check(row)
+    assert ok is True
+
+
+def test_local_origin_short_description_passes():
+    """Any local-origin row is exempt from the length skip, whatever its source."""
+    row = {"title": "Web Developer",
+           "origin": "local",
+           "description": "وظيفة شاغرة لدى شركة محلية في نابلس."}
+    ok, _ = quick_viability_check(row)
+    assert ok is True
+
+
 def test_legacy_linkedin_post_prefix_still_passes():
     """Backward-compat for any cached row still carrying the old title prefix."""
     row = {"title": "LinkedIn Post: #hiring #python #react ...",
