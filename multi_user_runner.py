@@ -106,6 +106,18 @@ WILDCARD_COUNT = 5
 LOWER_RANKED_EVAL_LIMIT = 25        # matched to scraper.py (was 15)
 DESCRIPTION_EXCERPT_CHARS = 1000    # persisted to job_results so Tab B survives URL rot
 
+# Minimum ABSOLUTE CV-similarity a GLOBAL job must clear to be worth an AI
+# verdict. Ranking (weighted_score) only ORDERS jobs; on a thin day the top-N
+# can fill with textually-unrelated global jobs that then clear the 55% display
+# floor. This gate drops those cheaply (the similarity is already computed).
+# Conservative + env-overridable (SIMILARITY_FLOOR); 0 disables it. Local jobs
+# are exempt — they're pre-vetted and kept even at lower similarity. The per-run
+# log line prints the similarity distribution so this can be tuned from real data.
+try:
+    SIMILARITY_FLOOR = float(os.environ.get("SIMILARITY_FLOOR", "0.30"))
+except (TypeError, ValueError):
+    SIMILARITY_FLOOR = 0.30
+
 # Closed-beta gate: only users with profiles.is_whitelisted = true are
 # processed. The worker is the thing that spends API quota and sends mail, so
 # the whitelist is enforced HERE (not just in the UI). Set False to open up.
@@ -1033,6 +1045,35 @@ def _filter_by_min_match(df, min_match: int):
     return df[pct >= min_match].reset_index(drop=True)
 
 
+def _apply_similarity_floor(df, job_embeddings, floor):
+    """Drop GLOBAL jobs whose ABSOLUTE CV-similarity is below `floor`, before AI eval.
+
+    Ranking (weighted_score) only ORDERS jobs; on a thin day the top-N can fill
+    with textually-unrelated jobs that then clear the 55% display floor. This
+    gate removes those cheaply — the `similarity` column is already computed.
+
+    Three safety rails so it never silently empties a run:
+      * `floor` <= 0, an empty frame, or NO successful embeddings → no-op.
+      * A job whose embedding FAILED (its URL absent from `job_embeddings`) is
+        KEPT — we never drop on uncertainty (mirrors drop_semantic_duplicates).
+      * LOCAL jobs are EXEMPT — they're pre-vetted Palestinian companies and are
+        intentionally kept even at lower textual similarity (this floor targets
+        the global firehose, not the curated local market).
+    """
+    if (floor is None or floor <= 0 or df is None or df.empty
+            or not job_embeddings or "similarity" not in df.columns
+            or "job_url" not in df.columns):
+        return df
+    embedded = df["job_url"].astype(str).isin(set(job_embeddings.keys()))
+    sim = pd.to_numeric(df["similarity"], errors="coerce").fillna(0.0)
+    drop_mask = embedded & (sim < floor)
+    if "origin" in df.columns:
+        drop_mask &= df["origin"].astype(str).str.lower() != "local"
+    if not drop_mask.any():
+        return df
+    return df[~drop_mask].reset_index(drop=True)
+
+
 def _budget_allows_run(used: int, *, admin_override: bool = False) -> bool:
     """Whether a run may proceed given how many runs the user has already used
     today. An admin override (forced run from /admin) bypasses the 2/day cap;
@@ -1216,6 +1257,22 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
             if dropped:
                 logger.info("User %s: semantic dedup dropped %d reposted job(s).", user_id, dropped)
 
+        # 4c. Relevance floor — drop GLOBAL jobs too textually-dissimilar to the CV
+        # to be worth an AI verdict. Ranking only ORDERS; this GATES, so a thin day
+        # can't fill the top-N with unrelated jobs that then clear the 55% floor.
+        # Guarded (no-op on embedding outage) and exempts local jobs; the log line
+        # prints the similarity spread so SIMILARITY_FLOOR can be tuned from real data.
+        if SIMILARITY_FLOOR > 0 and job_embeddings and "similarity" in combined.columns:
+            sims = pd.to_numeric(combined["similarity"], errors="coerce").dropna()
+            before = len(combined)
+            combined = _apply_similarity_floor(combined, job_embeddings, SIMILARITY_FLOOR)
+            dropped = before - len(combined)
+            if not sims.empty:
+                logger.info(
+                    "User %s: similarity floor %.2f — sim [%.3f..%.3f] median %.3f; dropped %d/%d.",
+                    user_id, SIMILARITY_FLOOR, sims.min(), sims.max(), sims.median(), dropped, before,
+                )
+
         # 5. Split into AI-eval set + lower-ranked
         top_n = int(user.get("ai_eval_top_n") or AI_EVAL_TOP_N)
         if len(combined) > top_n:
@@ -1300,6 +1357,9 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
                 {"scraped": stats["scraped"], "filtered": stats["filtered"], "approved": stats["approved"]},
                 lower_ranked_df=email_lower,
                 feedback_url=feedback_url,
+                # Honor the user's own min-match floor for the main tables too, so a
+                # sub-55 preference (e.g. 50) isn't silently clamped by the 55 default.
+                min_match=min_match,
             )
             ok, _info = send_email_transport(
                 user["notification_email"],

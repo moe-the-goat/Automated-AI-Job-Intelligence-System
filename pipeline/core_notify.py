@@ -387,7 +387,7 @@ def _feedback_link_md():
 
 
 def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None,
-                      feedback_url=None):
+                      feedback_url=None, min_match=0):
     """Generates the final HTML payload for the daily email.
 
     `lower_ranked_df` (A3) is an optional dataframe of jobs that survived
@@ -397,13 +397,22 @@ def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None,
     `feedback_url` (W2, multi-user) is the tokenized per-(user,run) feedback
     page minted by multi_user_runner; when set it replaces the legacy
     env-driven `_feedback_link_html` block and adds a footer repeat.
+
+    `min_match` is the user's chosen minimum-match preference (0 = unset). When
+    set it BECOMES the display floor for the main tables, so a user who picks a
+    threshold below the default 55 (e.g. 50) actually sees those 50-54% jobs
+    instead of having them silently hidden by the hardcoded floor. Unset falls
+    back to MATCH_DISPLAY_THRESHOLD (55) — the curated default for users who
+    haven't expressed a preference.
     """
     internships_df = sort_by_match_percentage(internships_df.copy() if not internships_df.empty else pd.DataFrame())
     jobs_df = sort_by_match_percentage(jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
     # Drop weak fits below the display floor — keeps the email focused on jobs
-    # actually worth scanning.
-    internships_df = filter_by_match_threshold(internships_df)
-    jobs_df = filter_by_match_threshold(jobs_df)
+    # actually worth scanning. The user's own min-match preference, when set,
+    # governs this floor so it can't be silently overridden by the 55 default.
+    display_floor = min_match if (min_match and min_match > 0) else MATCH_DISPLAY_THRESHOLD
+    internships_df = filter_by_match_threshold(internships_df, display_floor)
+    jobs_df = filter_by_match_threshold(jobs_df, display_floor)
 
     # "AI Approved" must match the jobs actually listed below it, not the raw
     # pre-threshold total: a job that cleared validation but scored under the

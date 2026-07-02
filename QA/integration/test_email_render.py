@@ -44,6 +44,25 @@ def test_email_approved_count_matches_displayed_rows_not_raw_total():
     assert "Weak C" not in html
 
 
+def test_email_display_floor_honors_user_min_match_below_default():
+    """Regression: a user's min-match preference BELOW the 55 default must widen
+    the main tables, not be silently clamped by the hardcoded floor. With
+    min_match=50, a 52% job the default 55 floor would hide has to appear."""
+    df = pd.DataFrame([baseline_job_row(title="Just above pref", match_percentage=52)])
+    # No preference → the 55 default floor hides the 52% job.
+    assert "Just above pref" not in format_email_html(df, pd.DataFrame(), _stats(1))
+    # The user's 50 preference governs → it now shows.
+    assert "Just above pref" in format_email_html(df, pd.DataFrame(), _stats(1), min_match=50)
+
+
+def test_email_display_floor_honors_user_min_match_above_default():
+    """A min-match preference ABOVE 55 tightens the floor: a 70% job shows under
+    the default but is hidden when the user asked for 80."""
+    df = pd.DataFrame([baseline_job_row(title="Below high pref", match_percentage=70)])
+    assert "Below high pref" in format_email_html(df, pd.DataFrame(), _stats(1))
+    assert "Below high pref" not in format_email_html(df, pd.DataFrame(), _stats(1), min_match=80)
+
+
 def test_markdown_approved_count_matches_displayed_rows():
     """Same correction for the GitHub-Issue markdown output."""
     df = pd.DataFrame([
