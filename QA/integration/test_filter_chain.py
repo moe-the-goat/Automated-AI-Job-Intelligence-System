@@ -328,6 +328,27 @@ def test_local_still_drops_cjk_titles():
     assert len(apply_pipeline_filters(df, local=True)) == 0
 
 
+def test_local_keeps_arabic_description():
+    """Arabic is the TARGET language for the Palestinian local market, not noise.
+    An English tech title with a long Arabic body is dropped by the GLOBAL
+    description langdetect pass, but must be KEPT in local mode."""
+    arabic_desc = (
+        "نبحث عن مطور برمجيات لديه خبرة في تطوير تطبيقات الويب باستخدام بايثون "
+        "وجافاسكريبت للانضمام إلى فريقنا في رام الله. المهام تشمل بناء واجهات "
+        "برمجية وصيانة الأنظمة الحالية والعمل ضمن فريق متكامل بدوام كامل. "
+        "المتطلبات خبرة سنتين على الأقل ومعرفة جيدة بقواعد البيانات والخوارزميات."
+    )
+    df = _single_row_df("Software Engineer", description=arabic_desc, location="Ramallah")
+    # Local mode keeps it — the language filter is skipped for the local market.
+    assert len(apply_pipeline_filters(df, local=True)) == 1
+    try:
+        from langdetect import detect  # noqa: F401
+    except ImportError:
+        return  # can't prove the global-drop half without langdetect installed
+    # Global mode drops the Arabic body — proving the local skip is what saves it.
+    assert len(apply_pipeline_filters(df, local=False)) == 0
+
+
 def test_local_still_dedups_url_collisions():
     """URL dedup still runs in local mode."""
     import pandas as pd

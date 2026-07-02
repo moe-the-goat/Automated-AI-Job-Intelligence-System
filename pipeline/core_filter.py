@@ -249,8 +249,10 @@ def apply_pipeline_filters(combined_jobs, tracker=None, local=False):
     if "title" in combined_jobs.columns:
         combined_jobs = combined_jobs[~combined_jobs['title'].astype(str).str.contains(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]', na=False)]
 
-    # 3b. Catch non-English titles that aren't CJK (e.g. Italian "Posizioni", German "Entwickler").
-    if "title" in combined_jobs.columns and _HAS_LANGDETECT:
+    # 3b. Catch non-English titles that aren't CJK (e.g. Italian "Posizioni", German
+    # "Entwickler"). SKIPPED for local jobs: the Palestinian market posts in Arabic,
+    # which is the TARGET here, not noise — langdetect would wrongly drop those.
+    if "title" in combined_jobs.columns and _HAS_LANGDETECT and not local:
         before = len(combined_jobs)
         combined_jobs = combined_jobs[combined_jobs['title'].apply(_is_english_title)]
         dropped = before - len(combined_jobs)
@@ -262,7 +264,8 @@ def apply_pipeline_filters(combined_jobs, tracker=None, local=False):
     # title filter, but its body is entirely in German — the AI then evaluates
     # partial information and can score it spuriously high. We catch this only
     # for descriptions long enough to be confident in the language detection.
-    if "description" in combined_jobs.columns and _HAS_LANGDETECT:
+    # Also skipped for local jobs (Arabic descriptions are expected and wanted).
+    if "description" in combined_jobs.columns and _HAS_LANGDETECT and not local:
         before = len(combined_jobs)
         combined_jobs = combined_jobs[combined_jobs['description'].apply(_is_english_description)]
         dropped = before - len(combined_jobs)
