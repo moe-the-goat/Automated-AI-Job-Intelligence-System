@@ -121,6 +121,78 @@ def test_cv_embedding_cache_migrates_legacy_single_entry():
 
 
 # ---------------------------------------------------------------------------
+# Cross-tick job-embedding cache (Tier 3): persist embeddings by text hash so
+# slowly-churning feed jobs aren't re-embedded every tick.
+# ---------------------------------------------------------------------------
+
+def test_job_embedding_cache_roundtrip():
+    import pipeline.core_embedding as _ce
+    path = "_test_job_embed_cache.json"
+    orig = _ce.JOB_EMBEDDING_CACHE_FILE
+    _ce.JOB_EMBEDDING_CACHE_FILE = path
+    try:
+        _ce.save_job_embedding_cache({"h1": [0.1, 0.2], "h2": [0.3, 0.4]})
+        got = _ce.load_job_embedding_cache()
+        assert got == {"h1": [0.1, 0.2], "h2": [0.3, 0.4]}
+        assert "h3" not in got
+    finally:
+        _ce.JOB_EMBEDDING_CACHE_FILE = orig
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_job_embedding_cache_missing_file_is_empty():
+    import pipeline.core_embedding as _ce
+    orig = _ce.JOB_EMBEDDING_CACHE_FILE
+    _ce.JOB_EMBEDDING_CACHE_FILE = "_test_job_embed_absent.json"
+    try:
+        assert _ce.load_job_embedding_cache() == {}
+    finally:
+        _ce.JOB_EMBEDDING_CACHE_FILE = orig
+
+
+def test_job_embedding_cache_ttl_prunes_by_first_seen():
+    """An entry rolls off ~TTL days after it FIRST appeared, even though the file
+    is reloaded every tick — the original timestamp is preserved, not refreshed."""
+    from datetime import datetime, timezone, timedelta
+    import pipeline.core_embedding as _ce
+    path = "_test_job_embed_ttl.json"
+    orig = _ce.JOB_EMBEDDING_CACHE_FILE
+    _ce.JOB_EMBEDDING_CACHE_FILE = path
+    try:
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        _ce.save_job_embedding_cache({"old": [0.1]}, now=t0)
+        # Next tick, 20 days later: seed (loads 'old') + a fresh 'new', then re-save.
+        seeded = _ce.load_job_embedding_cache()
+        seeded["new"] = [0.9]
+        _ce.save_job_embedding_cache(seeded, now=t0 + timedelta(days=20))
+        got = _ce.load_job_embedding_cache()
+        assert "new" in got          # within the 14-day window
+        assert "old" not in got      # first seen 20 days ago -> pruned
+    finally:
+        _ce.JOB_EMBEDDING_CACHE_FILE = orig
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_job_embedding_cache_caps_entries():
+    import pipeline.core_embedding as _ce
+    path = "_test_job_embed_cap.json"
+    orig_path = _ce.JOB_EMBEDDING_CACHE_FILE
+    orig_max = _ce.JOB_EMBEDDING_CACHE_MAX_ENTRIES
+    _ce.JOB_EMBEDDING_CACHE_FILE = path
+    _ce.JOB_EMBEDDING_CACHE_MAX_ENTRIES = 3
+    try:
+        _ce.save_job_embedding_cache({f"h{i}": [float(i)] for i in range(10)})
+        assert len(_ce.load_job_embedding_cache()) == 3
+    finally:
+        _ce.JOB_EMBEDDING_CACHE_FILE = orig_path
+        _ce.JOB_EMBEDDING_CACHE_MAX_ENTRIES = orig_max
+        if os.path.exists(path):
+            os.remove(path)
+
+
+# ---------------------------------------------------------------------------
 # attach_similarity with region/trust weighting (2026-05-17)
 # ---------------------------------------------------------------------------
 # Ranking is now driven by weighted_score = similarity * region * trust, not by

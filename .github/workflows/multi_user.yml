@@ -243,12 +243,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      # CV-embedding cache is used HERE (attach_similarity). Per-shard key — each
-      # shard handles disjoint users, so disjoint CVs; no cross-shard collision.
-      - name: Restore CV-embedding cache
+      # Embedding caches used HERE (attach_similarity): the CV cache AND the
+      # cross-tick job-embedding cache, so slowly-churning feed jobs aren't
+      # re-embedded every tick (relieves the Gemini embedding RPD bottleneck).
+      # Per-shard key — each shard handles disjoint users; no cross-shard collision.
+      - name: Restore embedding caches
         uses: actions/cache@v4
         with:
-          path: data/cv_embedding.json
+          path: |
+            data/cv_embedding.json
+            data/job_embedding_cache.json
           key: worker-cv-${{ github.run_id }}-shard-${{ matrix.shard }}
           restore-keys: |
             worker-cv-shard-${{ matrix.shard }}-

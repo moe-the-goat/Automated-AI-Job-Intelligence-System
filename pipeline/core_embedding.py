@@ -486,6 +486,96 @@ def update_embedding_history(new_embeddings):
 
 
 # ---------------------------------------------------------------------------
+# Cross-tick job-embedding cache — persist embeddings by TEXT hash so a job whose
+# text we've already embedded isn't re-embedded on the next tick. The per-tick
+# `cache` in embed_jobs already dedupes WITHIN a tick (shared public feed); this
+# seeds that same dict from disk so the (slowly-churning) feeds don't get
+# re-embedded every tick. The workflow persists data/job_embedding_cache.json
+# across runs (like the CV cache), directly relieving the Gemini embedding RPD
+# bottleneck. Keyed identically to embed_jobs: sha256(title + "\n\n" + description).
+# ---------------------------------------------------------------------------
+
+JOB_EMBEDDING_CACHE_FILE = "data/job_embedding_cache.json"
+JOB_EMBEDDING_CACHE_TTL_DAYS = 14           # roll off texts not seen in this window
+JOB_EMBEDDING_CACHE_MAX_ENTRIES = 6000      # hard cap so the cached file stays small
+
+
+def _read_job_embed_cache_raw(path=None):
+    """Load the on-disk {text_hash: {"embedding": [...], "ts": epoch}} map, or {}."""
+    path = path or JOB_EMBEDDING_CACHE_FILE          # resolve at call time (test-overridable)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.warning("Job-embedding cache read failed (starting empty): %s", e)
+        return {}
+
+
+def load_job_embedding_cache(path=None):
+    """Return a flat {text_hash: embedding} dict to SEED embed_jobs' per-tick cache.
+
+    embed_jobs keys its cache by sha256(title + description); seeding that dict
+    with what we embedded on prior ticks means a repeat job (the public feeds
+    churn slowly) skips the Gemini call entirely. Returns {} on miss/error, so
+    it degrades to the old per-tick-only behavior.
+    """
+    raw = _read_job_embed_cache_raw(path)
+    out = {}
+    for h, entry in raw.items():
+        if isinstance(entry, dict):
+            vec = entry.get("embedding")
+        elif isinstance(entry, list):
+            vec = entry
+        else:
+            vec = None
+        if vec:
+            out[h] = vec
+    return out
+
+
+def save_job_embedding_cache(cache, path=None, now=None):
+    """Persist the {text_hash: embedding} cache to disk (TTL-pruned + capped).
+
+    `cache` is the per-tick dict embed_jobs accumulated (seeded from
+    load_job_embedding_cache + any newly-embedded jobs). Original timestamps are
+    PRESERVED for hashes already on disk, so an entry rolls off ~TTL days after it
+    FIRST appeared (not perpetually refreshed just for being reloaded), and the
+    hard cap keeps the cached file small. Best-effort — never raises.
+    """
+    if not cache:
+        return
+    path = path or JOB_EMBEDDING_CACHE_FILE          # resolve at call time (test-overridable)
+    try:
+        ts_now = (now or datetime.now(tz=timezone.utc)).timestamp()
+        prior = _read_job_embed_cache_raw(path)
+        merged = {}
+        for h, vec in cache.items():
+            if not vec:
+                continue
+            old = prior.get(h)
+            ts = old.get("ts", ts_now) if isinstance(old, dict) else ts_now
+            merged[h] = {"embedding": list(vec), "ts": ts}
+        # TTL prune, then cap to the most-recently-first-seen entries.
+        cutoff = ts_now - JOB_EMBEDDING_CACHE_TTL_DAYS * 86400
+        merged = {h: e for h, e in merged.items() if e.get("ts", 0) >= cutoff}
+        if len(merged) > JOB_EMBEDDING_CACHE_MAX_ENTRIES:
+            keep = sorted(merged.items(), key=lambda kv: kv[1].get("ts", 0), reverse=True)
+            merged = dict(keep[:JOB_EMBEDDING_CACHE_MAX_ENTRIES])
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(merged, f)
+        logger.info("Job-embedding cache: saved %d entr%s to disk.",
+                    len(merged), "y" if len(merged) == 1 else "ies")
+    except Exception as e:
+        logger.warning("Job-embedding cache write failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Feedback RAG: per-job retrieval against past user feedback (2026-05-25)
 # ---------------------------------------------------------------------------
 #
