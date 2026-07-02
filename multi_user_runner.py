@@ -371,10 +371,13 @@ def _shard_slice(csv: str, shard_index: int, shard_count: int) -> str:
 
 def _run_ai_loop(df, cv_text, tracker, *,
                  provider, cerebras_key=None, groq_key=None,
-                 gemini_key=None, preferences_for=None):
+                 gemini_key=None, preferences_for=None, experience_level="entry"):
     """Same shape as scraper._run_ai_loop, copied (not imported) so we don't
     introduce an entry-point-to-entry-point dependency. See scraper.py for
     the full design notes — the contract is identical.
+
+    `experience_level` is the user's target seniority; it gates the pre-screen's
+    senior-experience skip and is surfaced in the verdict prompt.
     """
     if df is None or df.empty:
         return df
@@ -386,7 +389,7 @@ def _run_ai_loop(df, cv_text, tracker, *,
     prescreen_skipped = 0
 
     for _, row in df.iterrows():
-        is_viable, reason = quick_viability_check(row)
+        is_viable, reason = quick_viability_check(row, experience_level=experience_level)
         if not is_viable:
             prescreen_skipped += 1
             logger.info("[SKIP] %-55s -> %s", str(row.get('title', ''))[:55], reason)
@@ -396,11 +399,13 @@ def _run_ai_loop(df, cv_text, tracker, *,
             prefs = preferences_for(row) if preferences_for else ""
             if provider == "gemini":
                 result, evaluated = evaluate_job_with_gemini(
-                    row, cv_text, gemini_key, learned_preferences=prefs
+                    row, cv_text, gemini_key, learned_preferences=prefs,
+                    experience_level=experience_level,
                 )
             else:
                 result, evaluated = evaluate_job_with_ai(
-                    row, cv_text, cerebras_key, groq_key, learned_preferences=prefs
+                    row, cv_text, cerebras_key, groq_key, learned_preferences=prefs,
+                    experience_level=experience_level,
                 )
 
         verdicts.append(result["verdict"])
@@ -573,10 +578,10 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
         "notification_email, ai_eval_top_n, api_hours_old, "
         "profiles!inner(cv_text, is_whitelisted)"
     )
-    # Optional newer columns (migrations 0021/0022). If the live schema predates
-    # either, the SELECT errors → fall back to the base columns and treat the
-    # missing prefs as their defaults (threshold 0, no note).
-    _ext_cols = _base_cols + ", min_match_percentage, preference_note"
+    # Optional newer columns (migrations 0021/0022/0023). If the live schema
+    # predates any, the SELECT errors → fall back to the base columns and treat
+    # the missing prefs as their defaults (threshold 0, no note, entry-level).
+    _ext_cols = _base_cols + ", min_match_percentage, preference_note, experience_level"
 
     def _run_pref_query(cols):
         q = client.table("preferences").select(cols).eq("is_active", True)
@@ -589,9 +594,10 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
     try:
         resp = _run_pref_query(_ext_cols)
     except Exception as e:
-        if "min_match_percentage" in str(e) or "preference_note" in str(e):
+        if ("min_match_percentage" in str(e) or "preference_note" in str(e)
+                or "experience_level" in str(e)):
             logger.warning(
-                "preferences SELECT rejected a newer column (migration 0021/0022 "
+                "preferences SELECT rejected a newer column (migration 0021/0022/0023 "
                 "not applied?) — retrying with base columns (defaults applied)."
             )
             try:
@@ -660,6 +666,9 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
             "min_match_percentage": int(row.get("min_match_percentage") or 0),
             # User-authored steering note, folded into every AI verdict.
             "preference_note": (row.get("preference_note") or "").strip(),
+            # Target seniority (entry|mid|senior; default entry) — relaxes the
+            # entry-level senior-role filters and steers EXPERIENCE_FIT scoring.
+            "experience_level": (row.get("experience_level") or "entry"),
             "search_queries": searches,
             # The scheduled time that made this user due — used as the ANCHOR for
             # the next run so a late fire doesn't drift the schedule (see
@@ -1101,6 +1110,9 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
     It's stamped on the runs row and decides the post-run next_run_at handling.
     """
     user_id = user["user_id"]
+    # The user's target seniority (default 'entry'): relaxes the entry-level
+    # senior-role filters for mid/senior users and is surfaced in the AI prompt.
+    experience_level = (user.get("experience_level") or "entry")
 
     # Daily-budget gate. Counts BOTH scheduled and manual runs since local
     # midnight Jerusalem; at/over the cap we skip WITHOUT creating a run row
@@ -1203,7 +1215,7 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         # filter (pre-vetted companies, Arabic-safe). Then merge for ranking.
         filtered_parts = []
         if not global_jobs.empty:
-            g = apply_pipeline_filters(global_jobs, tracker=tracker)
+            g = apply_pipeline_filters(global_jobs, tracker=tracker, experience_level=experience_level)
             logger.info("User %s: global jobs %d scraped → %d survived filtering.",
                         user_id, len(global_jobs), len(g))
             if not g.empty:
@@ -1302,6 +1314,7 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
             provider="cerebras_groq",
             cerebras_key=cerebras_key, groq_key=groq_key,
             preferences_for=preferences_for,
+            experience_level=experience_level,
         )
         valid_top = ai_set[ai_set["is_valid"]].reset_index(drop=True)
         stats["approved"] = int(len(valid_top))
@@ -1314,6 +1327,7 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
                 provider="gemini",
                 gemini_key=gemini_key,
                 preferences_for=preferences_for,
+                experience_level=experience_level,
             )
             lower_ranked = eval_slice[eval_slice["is_valid"]].reset_index(drop=True)
         else:
