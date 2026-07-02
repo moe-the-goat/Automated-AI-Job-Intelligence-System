@@ -486,6 +486,56 @@ def test_min_match_empty_frame_is_safe():
 
 
 # ---------------------------------------------------------------------------
+# _apply_similarity_floor — drop global jobs too dissimilar to the CV pre-eval
+# ---------------------------------------------------------------------------
+
+def _sim_df(rows):
+    import pandas as pd
+    return pd.DataFrame(rows)
+
+
+def test_similarity_floor_drops_low_global_keeps_high():
+    df = _sim_df([
+        {"job_url": "u1", "origin": "global", "similarity": 0.10, "title": "low"},
+        {"job_url": "u2", "origin": "global", "similarity": 0.80, "title": "high"},
+    ])
+    embeds = {"u1": [1.0], "u2": [1.0]}
+    out = mur._apply_similarity_floor(df, embeds, 0.30)
+    assert list(out["title"]) == ["high"]
+
+
+def test_similarity_floor_keeps_unembedded_rows():
+    # A job whose embedding FAILED (url absent from job_embeddings) is never
+    # dropped on uncertainty, even at zero similarity.
+    df = _sim_df([{"job_url": "u1", "origin": "global", "similarity": 0.0, "title": "failed-embed"}])
+    out = mur._apply_similarity_floor(df, {"other": [1.0]}, 0.30)
+    assert list(out["title"]) == ["failed-embed"]
+
+
+def test_similarity_floor_exempts_local_jobs():
+    df = _sim_df([
+        {"job_url": "u1", "origin": "local", "similarity": 0.05, "title": "local-low"},
+        {"job_url": "u2", "origin": "global", "similarity": 0.05, "title": "global-low"},
+    ])
+    embeds = {"u1": [1.0], "u2": [1.0]}
+    out = mur._apply_similarity_floor(df, embeds, 0.30)
+    assert list(out["title"]) == ["local-low"]  # global dropped, curated local kept
+
+
+def test_similarity_floor_noop_when_no_embeddings():
+    # Embedding outage → empty dict → floor must be a no-op (never empty the run).
+    df = _sim_df([{"job_url": "u1", "origin": "global", "similarity": 0.0, "title": "keep"}])
+    out = mur._apply_similarity_floor(df, {}, 0.30)
+    assert list(out["title"]) == ["keep"]
+
+
+def test_similarity_floor_zero_disables():
+    df = _sim_df([{"job_url": "u1", "origin": "global", "similarity": 0.0, "title": "keep"}])
+    embeds = {"u1": [1.0]}
+    assert list(mur._apply_similarity_floor(df, embeds, 0.0)["title"]) == ["keep"]
+
+
+# ---------------------------------------------------------------------------
 # _wrap_preferences_with_note — user steering note folds into scoring context
 # ---------------------------------------------------------------------------
 
