@@ -124,6 +124,18 @@ def test_rejects_principal_engineer_in_description():
     assert ok is False
 
 
+# --- Per-user experience level gates the senior-experience skip (Tier 4) ---
+
+def test_senior_user_keeps_5_plus_years_role():
+    """A mid/senior user targets senior roles — the 5+yr skip must NOT fire; the
+    AI judges fit instead. Entry-level (default) still skips it."""
+    row = {"title": "Backend Engineer",
+           "description": "We require 7 years of experience in production backend systems. " * 4}
+    assert quick_viability_check(row, experience_level="entry")[0] is False
+    assert quick_viability_check(row, experience_level="mid")[0] is True
+    assert quick_viability_check(row, experience_level="senior")[0] is True
+
+
 def test_skipped_result_matches_schema():
     """skipped_result must return the canonical schema so callers can blindly use it."""
     r = skipped_result("test reason")
@@ -237,3 +249,16 @@ def test_hard_disqualifier_runs_after_senior_check():
     ok, reason = quick_viability_check(row)
     assert ok is False
     assert "senior" in reason or "hard disqualifier" in reason
+
+
+# --- Verdict prompt surfaces the candidate's target seniority (Tier 4) ---
+
+def test_prompt_includes_target_seniority():
+    from pipeline.core_ai import _build_verdict_prompt
+    row = {"title": "Backend Engineer", "company": "Acme"}
+    entry = _build_verdict_prompt(row, "cv text", "desc", experience_level="entry")
+    senior = _build_verdict_prompt(row, "cv text", "desc", experience_level="senior")
+    assert "TARGET SENIORITY" in entry and "ENTRY-LEVEL" in entry
+    assert "SENIOR" in senior
+    # An unknown/blank level falls back to entry rather than crashing.
+    assert "ENTRY-LEVEL" in _build_verdict_prompt(row, "cv", "desc", experience_level="banana")

@@ -504,11 +504,21 @@ _LOCATION_COUNTRY_PAREN_REMOTE_RE = re.compile(
 _MIN_DESCRIPTION_CHARS = 150
 
 
-def quick_viability_check(row):
+def _targets_senior_roles(experience_level):
+    """User targets mid/senior roles → relax the entry-level senior-experience
+    pre-screen so those postings reach the AI (which scores fit against the CV)."""
+    return str(experience_level or "").strip().lower() in ("mid", "senior")
+
+
+def quick_viability_check(row, experience_level="entry"):
     """Cheap heuristic that decides whether to spend a Gemini call on this job (A2).
 
     Runs AFTER apply_pipeline_filters (so seniority titles, non-tech keywords,
     non-English titles, etc. are already gone) but BEFORE the expensive AI eval.
+
+    `experience_level` ('entry' | 'mid' | 'senior', default 'entry') gates the
+    senior-experience-requirement skip: entry-level users skip 5+yr roles here;
+    mid/senior users let them through for the AI to judge.
 
     Returns (is_viable: bool, reason: str). reason is a short tag suitable for log lines.
     """
@@ -551,10 +561,12 @@ def quick_viability_check(row):
         if len(description_clean) < _MIN_DESCRIPTION_CHARS:
             return False, f"description too short ({len(description_clean)} chars)"
 
-    # 4. Explicit senior-experience requirement that we have no chance of meeting.
-    for pat in _SENIOR_REGEX_PATTERNS:
-        if re.search(pat, description):
-            return False, "senior experience requirement in description"
+    # 4. Explicit senior-experience requirement. Skipped for mid/senior users —
+    # a 5+yr role is a legitimate target for them, so let the AI judge the fit.
+    if not _targets_senior_roles(experience_level):
+        for pat in _SENIOR_REGEX_PATTERNS:
+            if re.search(pat, description):
+                return False, "senior experience requirement in description"
 
     # 5. Hard work-auth / clearance disqualifiers. Candidate is in Palestine —
     # US-citizen / US-resident / clearance-required roles are non-starters and
@@ -616,18 +628,39 @@ def _maybe_get_full_description(row):
     return description
 
 
-def _build_verdict_prompt(row, cv_text, description, web_search_context="", learned_preferences=""):
+_TARGET_SENIORITY_GUIDANCE = {
+    "entry": "ENTRY-LEVEL — internships and junior/new-grad roles. Roles requiring 3+ "
+             "years or carrying a senior title are ABOVE target; score EXPERIENCE_FIT accordingly.",
+    "mid": "MID-LEVEL — roughly 2-5 years. Judge EXPERIENCE_FIT against the CV; do NOT "
+           "auto-reject a 'senior'-sounding title, but a genuine 8+ year / staff+ "
+           "requirement is still a stretch.",
+    "senior": "SENIOR — do NOT penalize a role merely for being senior. Judge EXPERIENCE_FIT "
+              "on whether the CV shows senior-level experience. Internship / junior-only roles are BELOW target.",
+}
+
+
+def _build_verdict_prompt(row, cv_text, description, web_search_context="", learned_preferences="",
+                          experience_level="entry"):
     """Construct the canonical recruiter-screen prompt shared by Cerebras+Groq and Gemini paths.
 
     `learned_preferences` is the AI-summarized profile derived from the user's
     historical feedback (Applied / Bookmarked / Not relevant / etc.). When
     non-empty it appears as its own section and is treated as candidate
     context, not as a job-specific instruction.
+
+    `experience_level` ('entry' | 'mid' | 'senior') is the candidate's own stated
+    target seniority; it's surfaced so the AI scores EXPERIENCE_FIT against what
+    they're actually aiming for instead of assuming a junior default.
     """
     title = str(row.get("title", ""))
     company = str(row.get("company", ""))
     job_type = str(row.get("job_type", "")).lower()
     is_internship = 'intern' in title.lower() or 'internship' in job_type
+
+    level = str(experience_level or "entry").strip().lower()
+    if level not in _TARGET_SENIORITY_GUIDANCE:
+        level = "entry"
+    target_block = f"\nCANDIDATE TARGET SENIORITY: {_TARGET_SENIORITY_GUIDANCE[level]}\n"
 
     preferences_block = ""
     if learned_preferences and learned_preferences.strip():
@@ -657,7 +690,7 @@ HOW TO READ THE CV (derive these from the CV above before scoring — do NOT inv
 - STRONGEST ASSETS: identify the candidate's actual strongest skills, tools, and
   projects FROM THE CV (languages, frameworks, domains, named projects). Use
   THESE — not any assumed stack — when judging TECH_FIT and when naming matches.
-{preferences_block}
+{target_block}{preferences_block}
 JOB:
 - Title: {title}
 - Company: {company}
@@ -834,7 +867,8 @@ def _apply_india_scam_check(result, row, company):
     return result
 
 
-def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferences=""):
+def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferences="",
+                         experience_level="entry"):
     """
     Evaluate a single job posting against the candidate's CV using qwen-3-235b
     via Cerebras (primary) with llama-3.3-70b on Groq as fallback.
@@ -848,6 +882,9 @@ def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferenc
     `learned_preferences` is an optional AI-summarized profile from prior user
     feedback; when present it gets injected into the prompt's candidate
     context and steers scoring toward (or away from) historical patterns.
+
+    `experience_level` is the candidate's stated target seniority, surfaced in the
+    prompt so EXPERIENCE_FIT is scored against what they're aiming for.
 
     Fallback behavior lives in pipeline.core_llm.call_llm_with_fallback:
     Cerebras -> Groq -> Cerebras -> Groq (min 4 attempts on transient errors).
@@ -865,6 +902,7 @@ def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferenc
         row, cv_text, description,
         web_search_context=web_search_context,
         learned_preferences=learned_preferences,
+        experience_level=experience_level,
     )
 
     # Pacing is handled per-account at the call site (core_llm._throttle), which
@@ -898,7 +936,8 @@ def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferenc
         return _error_result(f"AI Error: {error_msg[:100]}..."), False
 
 
-def evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences=""):
+def evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences="",
+                             experience_level="entry"):
     """Cheap second-pass verdict for lower-ranked jobs via Gemini 3.1 Flash Lite.
 
     Same prompt and post-processing as evaluate_job_with_ai, with two cost-saving
@@ -911,6 +950,8 @@ def evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences=""):
 
     `learned_preferences` is passed through to the prompt builder so the
     lower-ranked path also benefits from the user's historical signals.
+    `experience_level` is likewise surfaced so EXPERIENCE_FIT is scored against
+    the candidate's stated target seniority.
 
     Returns the same (result, evaluated_bool) shape so callers can treat both
     paths uniformly. Pacing is handled per-account in core_llm._throttle (15 RPM
@@ -927,6 +968,7 @@ def evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences=""):
         row, cv_text, description,
         web_search_context="",
         learned_preferences=learned_preferences,
+        experience_level=experience_level,
     )
 
     # Pacing handled per-account at the call site (core_llm._throttle, 15 RPM for

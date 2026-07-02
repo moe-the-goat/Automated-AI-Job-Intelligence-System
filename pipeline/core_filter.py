@@ -203,13 +203,25 @@ def filter_api_jobs(df, hours_old):
         
     return df
 
-def apply_pipeline_filters(combined_jobs, tracker=None, local=False):
+def _wants_senior_roles(experience_level):
+    """True when the user targets mid/senior roles, so the entry-level seniority
+    drop is RELAXED and senior postings reach the AI (which judges fit against
+    the CV + stated level). Anything else — incl. the default 'entry' — keeps the
+    aggressive junior-focused filter, so behavior is unchanged until a user opts up."""
+    return str(experience_level or "").strip().lower() in ("mid", "senior")
+
+
+def apply_pipeline_filters(combined_jobs, tracker=None, local=False, experience_level="entry"):
     """
     The main gauntlet. Runs all the Tier 2 and Tier 3 deterministic filters
     to protect the AI from evaluating garbage data.
 
     If a JobTracker is passed in, previously-evaluated URLs are dropped first
     so we don't burn API quota re-evaluating them.
+
+    `experience_level` ('entry' | 'mid' | 'senior', default 'entry') gates the
+    seniority filter: an entry-level user keeps the aggressive senior-role drop;
+    a mid/senior user lets senior postings through for the AI to judge.
 
     `local=True` switches to the lighter filter set used by local_companies.py.
     The global firehose needs aggressive role/seniority/location filtering to
@@ -306,7 +318,9 @@ def apply_pipeline_filters(combined_jobs, tracker=None, local=False):
         r'\bsde\s*[2-9]\b', r'\bsde-?[2-9]\b',   # SDE II / SDE-3 (Amazon)
         r'\bswe\s*[2-9]\b', r'\bswe-?[2-9]\b',   # SWE II / SWE-3
     ]
-    if "title" in combined_jobs.columns:
+    # Skipped when the user targets mid/senior roles — then senior titles are
+    # exactly what they want, and the AI judges experience fit against their CV.
+    if "title" in combined_jobs.columns and not _wants_senior_roles(experience_level):
         word_pattern = '|'.join([rf'\b{w}\b' for w in exclude_words])
         level_pattern = '|'.join(exclude_level_codes)
         combined_pattern = f'{word_pattern}|{level_pattern}'

@@ -158,6 +158,27 @@ def test_filter_drops_architect_title():
 
 
 # ---------------------------------------------------------------------------
+# Per-user experience level (Tier 4) — mid/senior users keep senior titles.
+# ---------------------------------------------------------------------------
+
+def test_experience_level_gates_seniority_filter():
+    """Entry-level (default) drops senior titles; a mid/senior user keeps them so
+    the AI can judge fit against their CV."""
+    df = _single_row_df("Senior Backend Engineer")
+    assert len(apply_pipeline_filters(df, experience_level="entry")) == 0
+    assert len(apply_pipeline_filters(df)) == 0   # default is entry
+    assert len(apply_pipeline_filters(df, experience_level="mid")) == 1
+    assert len(apply_pipeline_filters(df, experience_level="senior")) == 1
+
+
+def test_experience_level_senior_keeps_level_codes():
+    """FAANG level codes (L5+) are also relaxed for senior users."""
+    df = _single_row_df("Software Engineer (L5)")
+    assert len(apply_pipeline_filters(df, experience_level="entry")) == 0
+    assert len(apply_pipeline_filters(df, experience_level="senior")) == 1
+
+
+# ---------------------------------------------------------------------------
 # Description language filter (Fix #6) — should drop foreign-language bodies
 # ---------------------------------------------------------------------------
 
