@@ -57,6 +57,14 @@ def test_jordan_is_highly_preferred():
     assert infer_region(row) == "highly_preferred"
 
 
+def test_palestine_home_market_is_highly_preferred():
+    """The candidate's home market — local on-site roles must get the top tier,
+    not the neutral 1.00 that let global-remote/EU jobs out-rank them."""
+    for loc in ("Ramallah", "Nablus, Palestine", "Gaza", "Hebron", "West Bank", "Bethlehem"):
+        row = {"location": loc, "title": "Backend Developer", "description": ""}
+        assert infer_region(row) == "highly_preferred", loc
+
+
 def test_kenya_is_highly_preferred():
     row = {"location": "Nairobi, Kenya", "title": "Engineer", "description": ""}
     assert infer_region(row) == "highly_preferred"

@@ -45,6 +45,13 @@ _HIGHLY_PREFERRED_PATTERNS = (
     r"\bworldwide\b", r"\banywhere\b", r"\bglobal(?:ly)?\b",
     r"\bfully\s+remote\b", r"\b100%\s+remote\b",
     r"\bremote[\s\-]*first\b",
+    # Palestine — the candidate's HOME market. On-site local roles (Ramallah,
+    # Nablus, Gaza, …) are maximally relevant but were previously unweighted
+    # (neutral 1.00), so global remote/EU jobs out-ranked them. Give them the top tier.
+    r"\bpalestin(?:e|ian)\b", r"\bwest\s+bank\b", r"\bgaza\b",
+    r"\bramallah\b", r"\bnablus\b", r"\bhebron\b", r"\bal[\-\s]?khalil\b",
+    r"\bbethlehem\b", r"\bjenin\b", r"\btulkar(?:e)?m\b", r"\bqalqilya\b",
+    r"\bjericho\b", r"\bbir\s*zeit\b", r"\bbirzeit\b",
     # Middle East: time-zone friendly, sometimes Palestine-hiring directly
     r"\buae\b", r"\bu\.a\.e\b", r"\bdubai\b", r"\babu\s*dhabi\b",
     r"\bjordan\b", r"\bamman\b",
