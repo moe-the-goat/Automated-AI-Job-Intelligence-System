@@ -144,3 +144,28 @@ def test_only_user_id_filters_to_one():
 def test_empty_preferences_returns_empty():
     client = _Client({"preferences": [], "search_queries": []})
     assert mur._load_due_users(client, skip_due_check=True) == []
+
+
+# --- Optional public-GitHub signal enriches the CV (Tier 6a) ---
+
+def test_github_summary_enriches_cv_text():
+    client = _Client({
+        "preferences": [_pref("u1", cv="base cv")],
+        "search_queries": [_search("u1")],
+        "profiles": [{"user_id": "u1", "github_summary": "Languages: Python."}],
+    })
+    users = mur._load_due_users(client, skip_due_check=True)
+    cv = users[0]["cv_text"]
+    assert cv.startswith("base cv")
+    assert "PUBLIC GITHUB PROJECTS" in cv
+    assert "Languages: Python." in cv
+
+
+def test_github_summary_absent_leaves_cv_unchanged():
+    client = _Client({
+        "preferences": [_pref("u1", cv="base cv")],
+        "search_queries": [_search("u1")],
+        # no profiles github row for u1 → CV stays exactly as-is
+    })
+    users = mur._load_due_users(client, skip_due_check=True)
+    assert users[0]["cv_text"] == "base cv"
