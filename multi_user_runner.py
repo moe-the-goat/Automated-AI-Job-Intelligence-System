@@ -371,13 +371,15 @@ def _shard_slice(csv: str, shard_index: int, shard_count: int) -> str:
 
 def _run_ai_loop(df, cv_text, tracker, *,
                  provider, cerebras_key=None, groq_key=None,
-                 gemini_key=None, preferences_for=None, experience_level="entry"):
+                 gemini_key=None, preferences_for=None, experience_level="entry",
+                 target_paths=""):
     """Same shape as scraper._run_ai_loop, copied (not imported) so we don't
     introduce an entry-point-to-entry-point dependency. See scraper.py for
     the full design notes — the contract is identical.
 
     `experience_level` is the user's target seniority; it gates the pre-screen's
-    senior-experience skip and is surfaced in the verdict prompt.
+    senior-experience skip and is surfaced in the verdict prompt. `target_paths`
+    is the user's chosen career tracks as a readable string, surfaced in the prompt.
     """
     if df is None or df.empty:
         return df
@@ -400,12 +402,12 @@ def _run_ai_loop(df, cv_text, tracker, *,
             if provider == "gemini":
                 result, evaluated = evaluate_job_with_gemini(
                     row, cv_text, gemini_key, learned_preferences=prefs,
-                    experience_level=experience_level,
+                    experience_level=experience_level, target_paths=target_paths,
                 )
             else:
                 result, evaluated = evaluate_job_with_ai(
                     row, cv_text, cerebras_key, groq_key, learned_preferences=prefs,
-                    experience_level=experience_level,
+                    experience_level=experience_level, target_paths=target_paths,
                 )
 
         verdicts.append(result["verdict"])
@@ -578,10 +580,10 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
         "notification_email, ai_eval_top_n, api_hours_old, "
         "profiles!inner(cv_text, is_whitelisted)"
     )
-    # Optional newer columns (migrations 0021/0022/0023). If the live schema
+    # Optional newer columns (migrations 0021/0022/0023/0025). If the live schema
     # predates any, the SELECT errors → fall back to the base columns and treat
-    # the missing prefs as their defaults (threshold 0, no note, entry-level).
-    _ext_cols = _base_cols + ", min_match_percentage, preference_note, experience_level"
+    # the missing prefs as their defaults (threshold 0, no note, entry-level, no paths).
+    _ext_cols = _base_cols + ", min_match_percentage, preference_note, experience_level, paths"
 
     def _run_pref_query(cols):
         q = client.table("preferences").select(cols).eq("is_active", True)
@@ -595,9 +597,9 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
         resp = _run_pref_query(_ext_cols)
     except Exception as e:
         if ("min_match_percentage" in str(e) or "preference_note" in str(e)
-                or "experience_level" in str(e)):
+                or "experience_level" in str(e) or "paths" in str(e)):
             logger.warning(
-                "preferences SELECT rejected a newer column (migration 0021/0022/0023 "
+                "preferences SELECT rejected a newer column (migration 0021/0022/0023/0025 "
                 "not applied?) — retrying with base columns (defaults applied)."
             )
             try:
@@ -669,6 +671,9 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
             # Target seniority (entry|mid|senior; default entry) — relaxes the
             # entry-level senior-role filters and steers EXPERIENCE_FIT scoring.
             "experience_level": (row.get("experience_level") or "entry"),
+            # Chosen career paths (slugs, may be empty) — per-user role-weighting
+            # in ranking + surfaced in the verdict prompt. Empty → legacy behavior.
+            "paths": (row.get("paths") if isinstance(row.get("paths"), list) else []),
             "search_queries": searches,
             # The scheduled time that made this user due — used as the ANCHOR for
             # the next run so a late fire doesn't drift the schedule (see
@@ -1113,6 +1118,12 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
     # The user's target seniority (default 'entry'): relaxes the entry-level
     # senior-role filters for mid/senior users and is surfaced in the AI prompt.
     experience_level = (user.get("experience_level") or "entry")
+    # The user's chosen career paths (slugs, may be empty). Drives per-user role
+    # weighting in ranking and is surfaced (as readable labels) in the AI prompt.
+    # Empty → legacy behavior (hardcoded role tiers, no target-paths prompt line).
+    from pipeline.region_weighting import format_paths
+    paths = user.get("paths") or []
+    target_paths = format_paths(paths)
 
     # Daily-budget gate. Counts BOTH scheduled and manual runs since local
     # midnight Jerusalem; at/over the cap we skip WITHOUT creating a run row
@@ -1263,7 +1274,7 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
 
         combined, job_embeddings = attach_similarity(
             combined, user["cv_text"], gemini_embed_key,
-            job_embed_cache=job_embed_cache,
+            job_embed_cache=job_embed_cache, paths=paths,
         )
 
         # 4b. Semantic dedup — drop "same job reposted at a new URL" against this
@@ -1314,7 +1325,7 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
             provider="cerebras_groq",
             cerebras_key=cerebras_key, groq_key=groq_key,
             preferences_for=preferences_for,
-            experience_level=experience_level,
+            experience_level=experience_level, target_paths=target_paths,
         )
         valid_top = ai_set[ai_set["is_valid"]].reset_index(drop=True)
         stats["approved"] = int(len(valid_top))
@@ -1327,7 +1338,7 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
                 provider="gemini",
                 gemini_key=gemini_key,
                 preferences_for=preferences_for,
-                experience_level=experience_level,
+                experience_level=experience_level, target_paths=target_paths,
             )
             lower_ranked = eval_slice[eval_slice["is_valid"]].reset_index(drop=True)
         else:

@@ -360,6 +360,47 @@ def test_combined_weight_now_includes_role():
     assert abs(ratio - ROLE_WEIGHTS["ai"] / ROLE_WEIGHTS["other"]) < 1e-9
 
 
+# --- Per-user path weighting (Tier 5b) ---
+
+def test_path_weight_boosts_on_path_title_and_neutral_off_path():
+    from pipeline.region_weighting import PATH_MATCH_WEIGHT
+    assert compute_role_weight({"title": "Backend Engineer"}, ["backend"]) == PATH_MATCH_WEIGHT
+    assert compute_role_weight({"title": "DevOps Engineer"}, ["devops"]) == PATH_MATCH_WEIGHT
+    assert compute_role_weight({"title": "Backend Engineer"}, ["frontend"]) == 1.00
+
+
+def test_path_weight_empty_falls_back_to_legacy_tiers():
+    """No paths → the legacy ai>swe>other behavior, unchanged for existing users."""
+    assert compute_role_weight({"title": "AI Engineer"}, []) == ROLE_WEIGHTS["ai"]
+    assert compute_role_weight({"title": "AI Engineer"}, None) == ROLE_WEIGHTS["ai"]
+    assert compute_role_weight({"title": "Software Engineer"}, []) == ROLE_WEIGHTS["swe"]
+
+
+def test_path_weight_lifts_devops_off_the_other_floor():
+    """The point of the feature: a DevOps user's DevOps role is boosted, where the
+    hardcoded tiers left every DevOps role at 'other' (1.00)."""
+    from pipeline.region_weighting import PATH_MATCH_WEIGHT
+    legacy = compute_role_weight({"title": "DevOps Engineer"})            # no paths -> other
+    per_user = compute_role_weight({"title": "DevOps Engineer"}, ["devops"])
+    assert legacy == ROLE_WEIGHTS["other"]
+    assert per_user == PATH_MATCH_WEIGHT > legacy
+
+
+def test_combined_weight_threads_paths():
+    from pipeline.region_weighting import PATH_MATCH_WEIGHT
+    row = {"location": "Berlin", "title": "DevOps Engineer"}
+    ratio = compute_combined_weight(row, ["devops"]) / compute_combined_weight(row)
+    assert abs(ratio - PATH_MATCH_WEIGHT / ROLE_WEIGHTS["other"]) < 1e-9
+
+
+def test_format_paths_labels():
+    from pipeline.region_weighting import format_paths
+    assert format_paths(["backend", "ai_ml"]) == "Backend, AI/ML"
+    assert format_paths([]) == ""
+    assert format_paths(None) == ""
+    assert format_paths(["something_new"]) == "Something New"  # unknown slug title-cased
+
+
 def test_ai_role_beats_swe_role_at_equal_geography_and_trust():
     """The whole point of role-tier weighting: AI roles outrank SWE roles
     at otherwise-identical regional and trust weighting."""

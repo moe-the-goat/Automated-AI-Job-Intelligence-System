@@ -262,3 +262,16 @@ def test_prompt_includes_target_seniority():
     assert "SENIOR" in senior
     # An unknown/blank level falls back to entry rather than crashing.
     assert "ENTRY-LEVEL" in _build_verdict_prompt(row, "cv", "desc", experience_level="banana")
+
+
+# --- Verdict prompt surfaces the candidate's target paths (Tier 5b) ---
+
+def test_prompt_includes_target_paths_when_set():
+    from pipeline.core_ai import _build_verdict_prompt
+    row = {"title": "Backend Engineer", "company": "Acme"}
+    with_paths = _build_verdict_prompt(row, "cv", "desc", target_paths="Backend, DevOps/SRE")
+    assert "TARGET PATHS" in with_paths
+    assert "Backend, DevOps/SRE" in with_paths
+    # Empty target_paths omits the block entirely (no dangling label).
+    without = _build_verdict_prompt(row, "cv", "desc", target_paths="")
+    assert "TARGET PATHS" not in without
