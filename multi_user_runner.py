@@ -680,6 +680,35 @@ def _load_due_users(client, *, only_user_id: Optional[str] = None, skip_due_chec
             # _compute_next_run_anchored). May be None for a manual/--skip-due run.
             "next_run_at": row.get("next_run_at"),
         })
+
+    # Optional public-GitHub signal (Tier 6a): the web app stores a short digest
+    # of each user's public repos on profiles.github_summary. Append it to the CV
+    # so it flows into BOTH the embedding rank and the verdict prompt. Separate
+    # query (not in the profiles embed) so a pre-migration-0027 schema degrades to
+    # a no-op instead of failing the whole due-users load.
+    if users:
+        try:
+            gh_resp = (
+                client.table("profiles")
+                .select("user_id, github_summary")
+                .in_("user_id", [u["user_id"] for u in users])
+                .execute()
+            )
+            gh_by_user = {
+                r["user_id"]: (r.get("github_summary") or "").strip()
+                for r in (gh_resp.data or [])
+            }
+            enriched = 0
+            for u in users:
+                summary = gh_by_user.get(u["user_id"], "")
+                if summary:
+                    u["cv_text"] = f"{u['cv_text']}\n\n=== PUBLIC GITHUB PROJECTS ===\n{summary}"
+                    enriched += 1
+            if enriched:
+                logger.info("GitHub signal: enriched %d user CV(s) with public-repo digest.", enriched)
+        except Exception as e:
+            logger.info("GitHub signal enrich skipped (migration 0027 not applied?): %s", str(e)[:120])
+
     return users
 
 
