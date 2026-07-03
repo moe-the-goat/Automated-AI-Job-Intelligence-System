@@ -640,7 +640,7 @@ _TARGET_SENIORITY_GUIDANCE = {
 
 
 def _build_verdict_prompt(row, cv_text, description, web_search_context="", learned_preferences="",
-                          experience_level="entry"):
+                          experience_level="entry", target_paths=""):
     """Construct the canonical recruiter-screen prompt shared by Cerebras+Groq and Gemini paths.
 
     `learned_preferences` is the AI-summarized profile derived from the user's
@@ -651,6 +651,10 @@ def _build_verdict_prompt(row, cv_text, description, web_search_context="", lear
     `experience_level` ('entry' | 'mid' | 'senior') is the candidate's own stated
     target seniority; it's surfaced so the AI scores EXPERIENCE_FIT against what
     they're actually aiming for instead of assuming a junior default.
+
+    `target_paths` is the candidate's chosen career tracks as a readable string
+    (e.g. "Backend, DevOps"); when set it tells the AI which role families the
+    candidate is aiming for so off-track roles are scored as a weaker fit.
     """
     title = str(row.get("title", ""))
     company = str(row.get("company", ""))
@@ -661,6 +665,14 @@ def _build_verdict_prompt(row, cv_text, description, web_search_context="", lear
     if level not in _TARGET_SENIORITY_GUIDANCE:
         level = "entry"
     target_block = f"\nCANDIDATE TARGET SENIORITY: {_TARGET_SENIORITY_GUIDANCE[level]}\n"
+
+    paths_block = ""
+    if target_paths and target_paths.strip():
+        paths_block = (
+            f"\nCANDIDATE TARGET PATHS: {target_paths.strip()}. These are the role "
+            "families they want — a role squarely on one of these paths is a stronger "
+            "fit; a role well outside all of them is a weaker fit even if the stack overlaps.\n"
+        )
 
     preferences_block = ""
     if learned_preferences and learned_preferences.strip():
@@ -690,7 +702,7 @@ HOW TO READ THE CV (derive these from the CV above before scoring — do NOT inv
 - STRONGEST ASSETS: identify the candidate's actual strongest skills, tools, and
   projects FROM THE CV (languages, frameworks, domains, named projects). Use
   THESE — not any assumed stack — when judging TECH_FIT and when naming matches.
-{target_block}{preferences_block}
+{target_block}{paths_block}{preferences_block}
 JOB:
 - Title: {title}
 - Company: {company}
@@ -868,7 +880,7 @@ def _apply_india_scam_check(result, row, company):
 
 
 def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferences="",
-                         experience_level="entry"):
+                         experience_level="entry", target_paths=""):
     """
     Evaluate a single job posting against the candidate's CV using qwen-3-235b
     via Cerebras (primary) with llama-3.3-70b on Groq as fallback.
@@ -903,6 +915,7 @@ def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferenc
         web_search_context=web_search_context,
         learned_preferences=learned_preferences,
         experience_level=experience_level,
+        target_paths=target_paths,
     )
 
     # Pacing is handled per-account at the call site (core_llm._throttle), which
@@ -937,7 +950,7 @@ def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferenc
 
 
 def evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences="",
-                             experience_level="entry"):
+                             experience_level="entry", target_paths=""):
     """Cheap second-pass verdict for lower-ranked jobs via Gemini 3.1 Flash Lite.
 
     Same prompt and post-processing as evaluate_job_with_ai, with two cost-saving
@@ -969,6 +982,7 @@ def evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences="",
         web_search_context="",
         learned_preferences=learned_preferences,
         experience_level=experience_level,
+        target_paths=target_paths,
     )
 
     # Pacing handled per-account at the call site (core_llm._throttle, 15 RPM for

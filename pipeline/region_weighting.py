@@ -268,8 +268,90 @@ def infer_role_tier(row):
     return "other"
 
 
-def compute_role_weight(row):
-    """Multiplier for role tier, applied alongside region and trust weights."""
+# ---------------------------------------------------------------------------
+# Per-user path weighting (Tier 5b) — when a user has chosen career paths, the
+# role boost follows THEIR paths instead of the hardcoded ai>swe>other tiers
+# (which were tuned to the admin's AI-centric CV). A title matching any chosen
+# path gets the boost; no match is neutral. With NO paths set we fall back to
+# the legacy tiers, so existing users are unaffected. Slugs mirror the web
+# catalog (job-alerts-app constants.ts CAREER_PATHS) — keep the two in sync.
+# ---------------------------------------------------------------------------
+PATH_MATCH_WEIGHT = 1.20
+
+PATH_ROLE_PATTERNS = {
+    "backend": (r"\bback[\s\-]?end\b", r"\bserver[\s\-]?side\b", r"\bapis?\b",
+                r"\bmicroservices?\b", r"\bnode(?:\.js)?\b", r"\bdjango\b",
+                r"\bfastapi\b", r"\bspring\b"),
+    "frontend": (r"\bfront[\s\-]?end\b", r"\breact\b", r"\bvue\b", r"\bangular\b",
+                 r"\bnext\.?js\b", r"\bui\s+(?:developer|engineer)\b",
+                 r"\bweb\s+(?:developer|engineer)\b"),
+    "fullstack": (r"\bfull[\s\-]?stack\b",),
+    "mobile": (r"\bmobile\b", r"\bios\b", r"\bandroid\b", r"\bflutter\b",
+               r"\breact\s+native\b", r"\bswift\b", r"\bkotlin\b"),
+    "ai_ml": _AI_ROLE_PATTERNS,
+    "data_science": (r"\bdata\s+scien(?:tist|ce)\b", r"\bmachine\s+learning\b",
+                     r"\bstatistician\b"),
+    "data_analysis": (r"\bdata\s+analyst\b", r"\banalytics\b",
+                      r"\bbusiness\s+intelligence\b", r"\bbi\s+(?:analyst|developer)\b"),
+    "data_engineering": (r"\bdata\s+engineer\b", r"\betl\b", r"\bdata\s+pipelines?\b",
+                         r"\b(?:data\s+)?warehouse\b", r"\bspark\b"),
+    "devops": (r"\bdevops\b", r"\bsre\b", r"\bsite\s+reliability\b",
+               r"\bplatform\s+engineer\b", r"\bcloud\s+engineer\b",
+               r"\binfrastructure\s+engineer\b", r"\bkubernetes\b"),
+    "qa": (r"\bqa\b", r"\bquality\s+assurance\b", r"\btest\s+(?:engineer|automation)\b",
+           r"\bsdet\b", r"\bautomation\s+engineer\b"),
+    "security": (r"\bsecurity\s+(?:engineer|analyst)\b", r"\bappsec\b", r"\binfosec\b",
+                 r"\bpenetration\s+tester\b", r"\bcyber\s*security\b"),
+    "embedded": (r"\bembedded\b", r"\bfirmware\b", r"\brtos\b",
+                 r"\bhardware\s+engineer\b"),
+    "game": (r"\bgame\s+(?:developer|engineer|programmer)\b", r"\bunity\b",
+             r"\bunreal\b", r"\bgameplay\b"),
+}
+
+_PATH_ROLE_RES = {
+    slug: re.compile("|".join(pats), re.IGNORECASE)
+    for slug, pats in PATH_ROLE_PATTERNS.items()
+}
+
+PATH_LABELS = {
+    "backend": "Backend", "frontend": "Frontend", "fullstack": "Full-Stack",
+    "mobile": "Mobile", "ai_ml": "AI/ML", "data_science": "Data Science",
+    "data_analysis": "Data Analysis", "data_engineering": "Data Engineering",
+    "devops": "DevOps/SRE", "qa": "QA/Test", "security": "Security",
+    "embedded": "Embedded", "game": "Game Dev",
+}
+
+
+def format_paths(paths):
+    """Human-readable label list for the chosen path slugs (for the prompt).
+    Unknown slugs are title-cased as a fallback. Empty/None → ''."""
+    if not paths:
+        return ""
+    labels = [PATH_LABELS.get(str(s), str(s).replace("_", " ").title()) for s in paths]
+    return ", ".join(labels)
+
+
+def _title_matches_paths(title, paths):
+    """True if the title matches any of the user's chosen path patterns."""
+    if not title.strip():
+        return False
+    for slug in paths:
+        rx = _PATH_ROLE_RES.get(str(slug))
+        if rx and rx.search(title):
+            return True
+    return False
+
+
+def compute_role_weight(row, paths=None):
+    """Multiplier for role tier, applied alongside region and trust weights.
+
+    When the user has chosen career `paths`, the boost follows THOSE (a title
+    matching any chosen path gets PATH_MATCH_WEIGHT, else neutral). With no
+    paths set it falls back to the legacy ai>swe>other tiers, so existing users
+    are unaffected."""
+    if paths:
+        title = str(row.get("title", "") or "")
+        return PATH_MATCH_WEIGHT if _title_matches_paths(title, paths) else 1.00
     return ROLE_WEIGHTS[infer_role_tier(row)]
 
 
@@ -341,6 +423,12 @@ def compute_trust_weight(row):
     return NEUTRAL_TRUST_MULTIPLIER
 
 
-def compute_combined_weight(row):
-    """Final multiplier = region * trust * role. Used by the embedding ranker."""
-    return compute_region_weight(row) * compute_trust_weight(row) * compute_role_weight(row)
+def compute_combined_weight(row, paths=None):
+    """Final multiplier = region * trust * role. Used by the embedding ranker.
+    `paths` (the user's chosen career tracks) makes the role boost per-user;
+    None/empty keeps the legacy hardcoded role tiers."""
+    return (
+        compute_region_weight(row)
+        * compute_trust_weight(row)
+        * compute_role_weight(row, paths)
+    )

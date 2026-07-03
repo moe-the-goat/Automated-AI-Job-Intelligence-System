@@ -294,7 +294,7 @@ def rank_by_similarity(cv_vec, job_vecs):
 
 
 def attach_similarity(combined_jobs, cv_text, api_key, throttle_seconds=EMBED_THROTTLE_SECONDS,
-                      job_embed_cache=None):
+                      job_embed_cache=None, paths=None):
     """Add `similarity` + `weighted_score` columns; return (df, url->embedding dict).
 
     `similarity`     — raw cosine sim against the CV embedding (for debugging /
@@ -302,6 +302,10 @@ def attach_similarity(combined_jobs, cv_text, api_key, throttle_seconds=EMBED_TH
     `weighted_score` — similarity * region_weight * trust_weight * role_weight.
                        Used for the top-N cutoff that decides which jobs reach
                        the Cerebras+Groq verdict.
+
+    `paths` (the user's chosen career tracks) makes the role weight per-user —
+    titles matching a chosen path are boosted. None/empty keeps the legacy
+    hardcoded role tiers.
 
     `api_key` should be the embedding-dedicated key (GEMINI_EMBED_API_KEY in
     production) so the embedding burst (~100 RPM peak) doesn't poison the main
@@ -329,14 +333,14 @@ def attach_similarity(combined_jobs, cv_text, api_key, throttle_seconds=EMBED_TH
     if cv_vec is None:
         out = combined_jobs.copy()
         out["similarity"] = 0.0
-        weights = [compute_combined_weight(r) for r in out.to_dict("records")]
+        weights = [compute_combined_weight(r, paths) for r in out.to_dict("records")]
         out["weighted_score"] = [0.0 for _ in weights]
         return out, {}
 
     rows = combined_jobs.to_dict("records")
     job_vecs = embed_jobs(rows, api_key, throttle_seconds=throttle_seconds, cache=job_embed_cache)
     sims = rank_by_similarity(cv_vec, job_vecs)
-    weights = [compute_combined_weight(r) for r in rows]
+    weights = [compute_combined_weight(r, paths) for r in rows]
     weighted = [s * w for s, w in zip(sims, weights)]
 
     # Build url -> embedding mapping (skip rows whose embedding call failed).
