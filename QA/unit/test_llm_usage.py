@@ -42,10 +42,10 @@ def test_tracker_counts_requests_and_failures():
 
 def test_tracker_separates_models():
     t = _UsageTracker()
-    t.record("Groq", "llama-3.3-70b-versatile", ok=True)
+    t.record("Groq", "openai/gpt-oss-120b", ok=True)
     t.record("Gemini", "gemini-embedding-001", ok=True)
     rows = {r["model"]: r for r in t.snapshot_and_reset()}
-    assert set(rows) == {"llama-3.3-70b-versatile", "gemini-embedding-001"}
+    assert set(rows) == {"openai/gpt-oss-120b", "gemini-embedding-001"}
 
 
 def test_snapshot_resets_state():

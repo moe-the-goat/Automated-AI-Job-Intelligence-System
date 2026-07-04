@@ -2,7 +2,8 @@
 CORE LLM MODULE
 ---------------
 Cerebras (primary) + Groq (fallback) ping-pong client for the main job-verdict
-generation. Both providers run llama-3.3-70b for free.
+generation. Both providers now run gpt-oss-120b for free, so the fallback
+scores on the same scale as the primary.
 
 Fallback order on transient/retryable errors:
     Cerebras -> Groq -> Cerebras -> Groq (min 4 attempts before giving up)
@@ -60,18 +61,31 @@ def _record_usage(provider, model, response):
 # Override per-deployment with the CEREBRAS_MODEL env var (e.g. to try
 # zai-glm-4.7) without a code change.
 #
-# Groq free tier: llama-3.3-70b-versatile.
-#   * 30 RPM, 1K RPD, 12K TPM, 100K TPD. Standard non-reasoning instruct model,
-#     reliable clean JSON. Only fires on Cerebras failures, so its small TPD is
-#     fine as long as Cerebras carries the bulk.
+# Groq free tier: openai/gpt-oss-120b.
+#
+# 2026-07-03 update: Groq deprecated llama-3.3-70b-versatile (decommission
+# 2026-08-16). Their recommended replacement is gpt-oss-120b — which is also the
+# model our Cerebras primary runs, so primary and fallback now score on the SAME
+# scale (no mixed verdict behavior in one digest). Published org limits:
+#   * 30 RPM, 1K RPD, 8K TPM, 200K TPD — same RPM/RPD as the old llama, double
+#     the TPD; the smaller TPM is handled by the output budget below. Fallback-
+#     only traffic, so the ceilings are comfortable.
+# Override per-deployment with the GROQ_MODEL env var (e.g. qwen/qwen3.6-27b)
+# without a code change — same escape hatch as CEREBRAS_MODEL.
 import os
 
 _CEREBRAS_MODEL = os.environ.get("CEREBRAS_MODEL", "gpt-oss-120b")
-_GROQ_MODEL = "llama-3.3-70b-versatile"
+_GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # gpt-oss reasoning needs headroom beyond the ~500-token JSON answer, so the
-# Cerebras call gets a larger budget than the non-reasoning Groq/Gemini paths.
+# Cerebras call gets a larger budget than the non-reasoning Gemini path.
 _CEREBRAS_MAX_OUTPUT_TOKENS = 8192
+
+# Groq's gpt-oss-120b is the same reasoning model but its 8K TPM is the tightest
+# budget in the fleet: Groq pre-counts prompt + max output against TPM, and our
+# verdict prompt is ~3K tokens, so 4096 keeps a single call safely under the
+# per-minute ceiling while still fitting low-effort reasoning + the ~500-token JSON.
+_GROQ_MAX_OUTPUT_TOKENS = 4096
 
 # Gemini Flash Lite handles the cheaper second-pass verdict for "Also Found"
 # lower-ranked jobs. 15 RPM / 500 RPD free-tier budget — plenty for ~25 calls
@@ -192,12 +206,21 @@ def _call_groq(prompt, api_key):
     _throttle("Groq", api_key)
     from groq import Groq
     client = Groq(api_key=api_key)
-    response = client.chat.completions.create(
+    kwargs = dict(
         model=_GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
-        max_tokens=_MAX_OUTPUT_TOKENS,
+        max_tokens=_GROQ_MAX_OUTPUT_TOKENS,
     )
+    # gpt-oss is a reasoning model — keep hidden reasoning minimal so the budget
+    # goes to the JSON answer (same taming as the Cerebras path). Guarded: an
+    # older groq SDK (or a non-reasoning GROQ_MODEL override) that rejects the
+    # kwarg falls back to a plain call; core_ai._parse_ai_response still brace-
+    # extracts the JSON if a reasoning preamble sneaks through.
+    try:
+        response = client.chat.completions.create(reasoning_effort="low", **kwargs)
+    except TypeError:
+        response = client.chat.completions.create(**kwargs)
     _record_usage("Groq", _GROQ_MODEL, response)
     return response.choices[0].message.content
 
