@@ -882,8 +882,8 @@ def _apply_india_scam_check(result, row, company):
 def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferences="",
                          experience_level="entry", target_paths=""):
     """
-    Evaluate a single job posting against the candidate's CV using qwen-3-235b
-    via Cerebras (primary) with llama-3.3-70b on Groq as fallback.
+    Evaluate a single job posting against the candidate's CV using gpt-oss-120b
+    via Cerebras (primary) with Groq's gpt-oss-120b as fallback.
 
     Returns a 2-tuple: (result_dict, evaluated_bool).
     - result_dict follows DEFAULT_AI_RESULT schema.

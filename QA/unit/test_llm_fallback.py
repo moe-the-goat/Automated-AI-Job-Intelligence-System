@@ -189,3 +189,20 @@ def test_classifies_400_as_non_retryable():
 
 def test_classifies_401_auth_as_non_retryable():
     assert _is_retryable_error(Exception("401 Unauthorized")) is False
+
+
+# --- Groq model migration (llama-3.3-70b deprecated 2026-07, gone 2026-08-16) ---
+
+def test_groq_default_model_is_gpt_oss_120b():
+    """Locks the migration off llama-3.3-70b-versatile: after Groq's decommission
+    date that id stops being served, so a regression here means dead fallbacks.
+    The default must be Groq's recommended replacement (also our Cerebras primary,
+    keeping verdict scales consistent); GROQ_MODEL env still overrides at import."""
+    assert core_llm._GROQ_MODEL == "openai/gpt-oss-120b"
+
+
+def test_groq_output_budget_fits_8k_tpm():
+    """Groq pre-counts prompt + max output against its 8K TPM. With a ~3K-token
+    verdict prompt, the output budget must stay <= 4096 or single calls start
+    bouncing off the per-minute token ceiling."""
+    assert core_llm._GROQ_MAX_OUTPUT_TOKENS <= 4096
