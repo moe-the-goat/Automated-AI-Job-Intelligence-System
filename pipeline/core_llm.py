@@ -212,13 +212,20 @@ def _call_groq(prompt, api_key):
         temperature=0.3,
         max_tokens=_GROQ_MAX_OUTPUT_TOKENS,
     )
-    # gpt-oss is a reasoning model — keep hidden reasoning minimal so the budget
-    # goes to the JSON answer (same taming as the Cerebras path). Guarded: an
-    # older groq SDK (or a non-reasoning GROQ_MODEL override) that rejects the
-    # kwarg falls back to a plain call; core_ai._parse_ai_response still brace-
-    # extracts the JSON if a reasoning preamble sneaks through.
+    # gpt-oss is a reasoning model. By default Groq returns its chain-of-thought
+    # INSIDE message.content (wrapped in <think> tags), which pollutes the JSON
+    # answer with stray prose/braces and eats the token budget — the cause of
+    # the "truncated/emptied JSON" this model is known for. So:
+    #   * reasoning_effort="low"    — minimise the hidden reasoning.
+    #   * reasoning_format="hidden" — keep it OUT of content; content is only
+    #                                 the final answer (clean JSON).
+    # Guarded: an older groq SDK (or a non-reasoning GROQ_MODEL override) that
+    # rejects the kwargs falls back to a plain call; core_ai._parse_ai_response
+    # still brace-extracts the JSON if a reasoning preamble sneaks through.
     try:
-        response = client.chat.completions.create(reasoning_effort="low", **kwargs)
+        response = client.chat.completions.create(
+            reasoning_effort="low", reasoning_format="hidden", **kwargs
+        )
     except TypeError:
         response = client.chat.completions.create(**kwargs)
     _record_usage("Groq", _GROQ_MODEL, response)
