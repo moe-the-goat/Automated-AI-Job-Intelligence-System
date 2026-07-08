@@ -14,7 +14,40 @@ from pipeline.region_weighting import (
     REGION_WEIGHTS,
     ROLE_WEIGHTS,
     TRUST_BOOST_MULTIPLIER,
+    PATH_LABELS,
+    PATH_STARTER_PROFILES,
+    starter_profile_text,
 )
+
+
+# ---------------------------------------------------------------------------
+# starter_profile_text — the per-path cold-start scoring prior
+# ---------------------------------------------------------------------------
+
+def test_every_path_label_has_a_starter_profile():
+    # Sync guard: the starter map and the label map must not drift apart.
+    assert set(PATH_STARTER_PROFILES) == set(PATH_LABELS)
+
+
+def test_starter_profile_empty_for_no_paths():
+    assert starter_profile_text([]) == ""
+    assert starter_profile_text(None) == ""
+    assert starter_profile_text(["not_a_real_path"]) == ""
+
+
+def test_starter_profile_includes_each_chosen_path():
+    out = starter_profile_text(["ai_ml", "backend"])
+    assert "AI/ML" in out
+    assert "Backend" in out
+    # one line per path
+    assert out.count("\n") == 1
+
+
+def test_starter_profile_dedupes_and_caps():
+    dupes = starter_profile_text(["backend", "backend", "backend"])
+    assert dupes.count("Backend:") == 1
+    many = starter_profile_text(list(PATH_LABELS.keys()))
+    assert len([ln for ln in many.splitlines() if ln.strip()]) <= 5
 
 
 # ---------------------------------------------------------------------------

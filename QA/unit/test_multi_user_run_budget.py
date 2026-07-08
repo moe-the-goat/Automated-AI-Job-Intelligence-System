@@ -560,3 +560,42 @@ def test_wrap_preferences_handles_empty_base_context():
     base = lambda row: ""
     out = mur._wrap_preferences_with_note(base, "remote only")({"t": 1})
     assert "remote only" in out
+
+
+# ---------------------------------------------------------------------------
+# _wrap_preferences_with_starter — per-path cold-start default (subordinate)
+# ---------------------------------------------------------------------------
+
+def test_wrap_starter_no_paths_returns_base_unchanged():
+    base = lambda row: "ctx"
+    assert mur._wrap_preferences_with_starter(base, []) is base
+    assert mur._wrap_preferences_with_starter(base, None) is base
+    assert mur._wrap_preferences_with_starter(base, ["not_a_path"]) is base
+
+
+def test_wrap_starter_prepends_labeled_default_above_learned_context():
+    base = lambda row: "learned digest context"
+    wrapped = mur._wrap_preferences_with_starter(base, ["ai_ml"])
+    out = wrapped({"title": "x"})
+    assert "STARTER PROFILE" in out
+    assert "overrides it" in out  # labeled as subordinate
+    assert "learned digest context" in out
+    # The generic default comes BEFORE the real learned context.
+    assert out.index("STARTER PROFILE") < out.index("learned digest")
+
+
+def test_wrap_starter_fills_cold_start_when_base_is_empty():
+    base = lambda row: ""
+    out = mur._wrap_preferences_with_starter(base, ["backend"])({"t": 1})
+    assert "STARTER PROFILE" in out
+    assert "Backend" in out
+
+
+def test_starter_layers_below_the_user_note_general_to_specific():
+    # Full composition: starter (generic) → note (specific) → learned.
+    base = lambda row: "learned"
+    noted = mur._wrap_preferences_with_note(base, "no crypto")
+    full = mur._wrap_preferences_with_starter(noted, ["ai_ml"])
+    out = full({"title": "x"})
+    # order: STARTER PROFILE, then the note, then the learned context
+    assert out.index("STARTER PROFILE") < out.index("no crypto") < out.index("learned")

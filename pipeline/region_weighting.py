@@ -331,6 +331,51 @@ def format_paths(paths):
     return ", ".join(labels)
 
 
+# Curated STARTER PROFILE per path — a generic scoring PRIOR used to fill the
+# cold-start gap (a brand-new user has no feedback digest/RAG yet). Each line
+# describes what a STRONG MATCH looks like for that track — it steers the
+# scorer's priorities, it does NOT claim the candidate has any of it (the
+# "never invent experience" rule stays intact). Injected into the prompt at
+# runtime as a clearly-subordinate default; NEVER stored as feedback, so it
+# can't dilute RAG retrieval or inflate the RAG threshold. Keyed by the same
+# slugs as PATH_LABELS (a test asserts they stay in sync).
+PATH_STARTER_PROFILES = {
+    "backend": "server-side/API roles, databases, and system design; strong fit for backend or generalist software-engineering titles building services.",
+    "frontend": "web UI roles building with React/Vue and modern JS/TS; strong fit for frontend or web-developer titles, with an eye for UX and component work.",
+    "fullstack": "end-to-end web roles spanning frontend and backend; strong fit for full-stack or generalist software-engineering titles owning a feature top to bottom.",
+    "mobile": "native or cross-platform mobile roles (iOS/Android, React Native, Flutter); strong fit for mobile-developer titles shipping apps.",
+    "ai_ml": "hands-on machine-learning and LLM/GenAI roles — model building, deployment, and tooling (PyTorch, LangChain, RAG); strong fit for ML/AI engineer titles applying models over pure research.",
+    "data_science": "modeling and analytics roles turning data into insight and predictions; strong fit for data-scientist or applied-scientist titles with statistics and ML.",
+    "data_analysis": "business-intelligence and reporting roles (SQL, dashboards, analytics); strong fit for data- or business-analyst titles that inform decisions.",
+    "data_engineering": "pipeline and warehouse roles moving and shaping data at scale (ETL, orchestration); strong fit for data-engineer or analytics-engineer titles.",
+    "devops": "infrastructure, cloud, and reliability roles (CI/CD, containers, IaC); strong fit for DevOps, SRE, or platform-engineer titles.",
+    "qa": "quality and test-automation roles; strong fit for QA-engineer, SDET, or test-automation titles that build test suites and catch regressions.",
+    "security": "application and infrastructure security roles (AppSec, infosec, SOC); strong fit for security-engineer or cybersecurity-analyst titles.",
+    "embedded": "firmware and low-level systems roles close to hardware (C/C++, RTOS, IoT); strong fit for embedded or firmware-engineer titles.",
+    "game": "game-development roles (engines, gameplay, Unity/Unreal); strong fit for game-developer or gameplay-programmer titles.",
+}
+
+
+def starter_profile_text(paths):
+    """A generic starting scoring prior for the chosen path slugs — the cold-start
+    default folded into the verdict prompt. Concatenates the blurbs for the
+    chosen paths (deduped, order-preserving) and caps the count so a many-path
+    user doesn't balloon the prompt. Empty/None or all-unknown paths → ''."""
+    if not paths:
+        return ""
+    seen = set()
+    lines = []
+    for slug in paths:
+        key = str(slug)
+        blurb = PATH_STARTER_PROFILES.get(key)
+        if blurb and key not in seen:
+            seen.add(key)
+            lines.append(f"- {PATH_LABELS.get(key, key)}: {blurb}")
+        if len(lines) >= 5:  # cap — plenty of signal without bloating the prompt
+            break
+    return "\n".join(lines)
+
+
 def _title_matches_paths(title, paths):
     """True if the title matches any of the user's chosen path patterns."""
     if not title.strip():
