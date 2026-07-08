@@ -1079,6 +1079,32 @@ def _wrap_preferences_with_note(base_provider, note):
     return provider
 
 
+def _wrap_preferences_with_starter(base_provider, paths):
+    """Prepend a generic per-path STARTER PROFILE as a clearly-subordinate default,
+    so a brand-new user (no feedback digest/RAG, no steering note) still gets
+    scoring guidance from day one. It's always present but explicitly labeled as a
+    generic default that the real signals below override — so it never dilutes a
+    well-fed user's actual note/feedback. No matching paths → provider unchanged.
+    This is a prompt-time prior only; it is never written to the feedback store."""
+    from pipeline.region_weighting import starter_profile_text
+    starter = starter_profile_text(paths)
+    if not starter:
+        return base_provider
+
+    def provider(row):
+        ctx = base_provider(row) or ""
+        header = (
+            "STARTER PROFILE — a generic default for the candidate's chosen "
+            "career track(s). Use it only as a baseline expectation of what a "
+            "strong match looks like; anything stated below about the candidate's "
+            "own preferences or past reactions overrides it:\n"
+            f"{starter}"
+        )
+        return f"{header}\n\n{ctx}".strip()
+
+    return provider
+
+
 def _filter_by_min_match(df, min_match: int):
     """Rows with match_percentage >= min_match. A 0/negative floor returns the
     frame unchanged (the default — no filtering). Rows with a missing/NA match
@@ -1227,6 +1253,10 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
         preferences_for = _wrap_preferences_with_note(
             base_preferences_for, user.get("preference_note"),
         )
+        # Outermost layer: a generic per-path starter profile as a subordinate
+        # default, so cold-start users (no feedback, no note) still get guidance.
+        # Reads general → specific: starter default → steering note → learned.
+        preferences_for = _wrap_preferences_with_starter(preferences_for, paths)
 
         # 2. Scrape — global (per-user searches + public APIs) and shared local.
         # Tag provenance HERE, before the merge, so the origin survives the
