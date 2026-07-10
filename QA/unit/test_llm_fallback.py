@@ -9,7 +9,12 @@ test functions directly rather than via pytest, so fixtures aren't injected.)
 from unittest.mock import patch
 
 from pipeline import core_llm
-from pipeline.core_llm import call_llm_with_fallback, _is_retryable_error
+from pipeline.core_llm import (
+    call_llm_with_fallback,
+    _is_retryable_error,
+    _is_request_too_large,
+    _GROQ_MAX_OUTPUT_TOKENS,
+)
 
 
 def test_raises_when_no_keys_provided():
@@ -38,6 +43,51 @@ def test_uses_cerebras_on_first_attempt_when_both_keys_present():
 
     assert result == '{"verdict": "ok"}'
     assert calls == [("cerebras", "csk-xxx")]
+
+
+def test_groq_output_budget_fits_under_free_tier_tpm():
+    """Groq pre-counts (prompt + max_tokens) against its 8K free-tier TPM and 413s
+    if the sum exceeds it. The output budget must leave room for a realistic
+    ~4-5K-token verdict prompt, so it stays well under 8K (this pins the value so
+    a future bump back to 4096 — the size that caused the 413s — fails CI)."""
+    assert _GROQ_MAX_OUTPUT_TOKENS <= 2048
+
+
+def test_is_request_too_large_recognizes_413_but_not_plain_429():
+    assert _is_request_too_large(Exception("Error code: 413 - request too large"))
+    assert _is_request_too_large(Exception("rate_limit_exceeded on tokens per minute (TPM): Limit 8000"))
+    # A plain 429 rate limit is transient, NOT a structural too-large — it should
+    # stay retryable and not trigger the skip-Groq path.
+    assert not _is_request_too_large(Exception("429 Too Many Requests"))
+
+
+def test_groq_413_skips_further_groq_and_lets_cerebras_take_it():
+    """A Groq 413 (request too large) must not be retried on Groq — the same
+    prompt would 413 again. Cerebras (larger TPM) should score the job, and Groq
+    should be hit at most once."""
+    calls = []
+
+    def fake_cerebras(prompt, key):
+        calls.append(("cerebras", key))
+        # Fail the first Cerebras attempt so the sequence reaches Groq, then
+        # succeed on the later Cerebras attempt.
+        if len([c for c in calls if c[0] == "cerebras"]) == 1:
+            raise Exception("503 Service Unavailable")
+        return '{"verdict": "cerebras-rescued"}'
+
+    def fake_groq(prompt, key):
+        calls.append(("groq", key))
+        raise Exception("Error code: 413 - request too large for model on tokens per minute (TPM)")
+
+    with patch.object(core_llm, "_call_cerebras", fake_cerebras), \
+         patch.object(core_llm, "_call_groq", fake_groq), \
+         patch.object(core_llm, "_INTER_ATTEMPT_BACKOFF_SECONDS", 0):
+        result = call_llm_with_fallback("p", cerebras_key="csk", groq_key="gsk", max_attempts=4)
+
+    assert result == '{"verdict": "cerebras-rescued"}'
+    # Sequence is Cerebras, Groq, Cerebras, Groq — Groq 413s once on attempt 2,
+    # then the 4th (Groq) attempt is skipped, so Groq is called exactly once.
+    assert [c[0] for c in calls].count("groq") == 1
 
 
 def test_falls_back_to_groq_when_cerebras_5xx():
