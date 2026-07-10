@@ -81,11 +81,18 @@ _GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 # Cerebras call gets a larger budget than the non-reasoning Gemini path.
 _CEREBRAS_MAX_OUTPUT_TOKENS = 8192
 
-# Groq's gpt-oss-120b is the same reasoning model but its 8K TPM is the tightest
-# budget in the fleet: Groq pre-counts prompt + max output against TPM, and our
-# verdict prompt is ~3K tokens, so 4096 keeps a single call safely under the
-# per-minute ceiling while still fitting low-effort reasoning + the ~500-token JSON.
-_GROQ_MAX_OUTPUT_TOKENS = 4096
+# Groq's gpt-oss-120b shares the 8K TPM free-tier ceiling — the tightest budget in
+# the fleet — and Groq PRE-COUNTS (prompt + max_tokens) against it, rejecting the
+# request with an HTTP 413 "rate_limit_exceeded" BEFORE running (0 tokens billed)
+# if the sum exceeds 8K. The verdict prompt is ~2.9K tokens of fixed structure
+# (CV capped at 3K chars + description at 5K chars + the instructions) PLUS a
+# VARIABLE learned-preferences block: for a heavy-feedback user the RAG/digest
+# profile can add another 1-3K tokens. So a 4096 output budget pushed real
+# requests past 8K and 413'd. 2000 keeps (prompt + output) under the ceiling for
+# realistic prompts while still fitting low-effort hidden reasoning + the
+# ~500-token JSON verdict; a prompt still too big falls through to Cerebras (which
+# has a far larger TPM), handled in the fallback loop below.
+_GROQ_MAX_OUTPUT_TOKENS = 2000
 
 # Gemini Flash Lite handles the cheaper second-pass verdict for "Also Found"
 # lower-ranked jobs. 15 RPM / 500 RPD free-tier budget — plenty for ~25 calls
@@ -120,6 +127,22 @@ def _is_retryable_error(exc):
     """
     msg = str(exc)
     return any(marker in msg for marker in _RETRYABLE_MARKERS)
+
+
+def _is_request_too_large(exc):
+    """A Groq HTTP 413 (labeled `rate_limit_exceeded`) means the single request's
+    (prompt + max_tokens) exceeds the per-minute TPM ceiling — a STRUCTURAL limit,
+    not a transient one. Retrying the same request always 413s again, so the
+    fallback stops trying that provider for this job and lets the other provider
+    (with a far larger TPM) take it. Distinct from a plain 429, which does clear
+    with time and stays retryable."""
+    msg = str(exc).lower()
+    return (
+        "413" in msg
+        or "request too large" in msg
+        or "tokens per minute" in msg
+        or "reduce your message" in msg
+    )
 
 
 # Output budget: 2048 tokens. The actual JSON verdict is ~500 tokens (200-token
@@ -384,7 +407,12 @@ def call_llm_with_fallback(prompt, cerebras_key, groq_key, max_attempts=4, label
             providers.append(("Groq", _call_groq, key))
 
     last_exc = None
+    groq_too_large = False  # a Groq 413 means this prompt structurally can't fit
     for idx, (name, fn, key) in enumerate(providers):
+        # A prior Groq attempt already 413'd on request size — retrying Groq with
+        # the SAME prompt will 413 again, so skip it and let Cerebras take the job.
+        if name == "Groq" and groq_too_large:
+            continue
         try:
             if idx > 0:
                 logger.warning(
@@ -403,7 +431,15 @@ def call_llm_with_fallback(prompt, cerebras_key, groq_key, max_attempts=4, label
             except Exception:
                 pass
             err_str = str(e)[:200]
-            if _is_retryable_error(e):
+            if name == "Groq" and _is_request_too_large(e):
+                # Structural, not transient — stop trying Groq for this job.
+                groq_too_large = True
+                logger.warning(
+                    "[LLM Groq] request too large for the free-tier TPM (413) — "
+                    "skipping Groq for this job; Cerebras will handle it: %s",
+                    err_str,
+                )
+            elif _is_retryable_error(e):
                 logger.warning("[LLM %s] retryable error attempt %d: %s", name, idx + 1, err_str)
             else:
                 logger.warning(
