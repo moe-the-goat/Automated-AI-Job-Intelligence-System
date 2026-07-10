@@ -36,10 +36,16 @@ from pipeline.core_feedback_supabase import (
     count_feedback_entries,
     format_entry_text,
 )
-# Shared prompt (lives in core_feedback) so the multi-user digest stays
+# Shared prompts (live in core_feedback) so the multi-user digest stays
 # semantically aligned with the single-user one — same instruction → comparable
-# preference profiles.
-from pipeline.core_feedback import SUMMARY_PROMPT
+# preference profiles. SUMMARY_PROMPT is the legacy single-pass (kept as the
+# graceful fallback); PREFERENCE_PROFILE_PROMPT + PROFILE_CRITIQUE_PROMPT are the
+# Tier 8 two-pass (structured extraction → self-critique).
+from pipeline.core_feedback import (
+    SUMMARY_PROMPT,
+    PREFERENCE_PROFILE_PROMPT,
+    PROFILE_CRITIQUE_PROMPT,
+)
 
 logger = get_logger(__name__)
 
@@ -92,26 +98,83 @@ def _fetch_user_feedback(client, user_id: str) -> list[dict]:
     return resp.data or []
 
 
-def _summarize(entries: list[dict], *, cerebras_key: str, groq_key: str) -> Optional[str]:
-    """Call Cerebras with Groq fallback. Returns None on empty/failed output."""
-    formatted = "\n".join(format_entry_text(e) for e in entries)
-    prompt = SUMMARY_PROMPT.format(entries=formatted)
-
+def _call_digest_llm(prompt: str, *, cerebras_key: str, groq_key: str, label: str) -> Optional[str]:
+    """One Cerebras-with-Groq-fallback call. Returns None on empty/failed output."""
     from pipeline.core_llm import call_llm_with_fallback  # lazy
 
     try:
-        summary = call_llm_with_fallback(
+        out = call_llm_with_fallback(
             prompt,
             cerebras_key=cerebras_key,
             groq_key=groq_key,
             max_attempts=4,
-            label="feedback-digest-multiuser",
+            label=label,
         )
     except Exception as e:
-        logger.error("Digest LLM call failed: %s", e)
+        logger.error("Digest LLM call (%s) failed: %s", label, e)
         return None
-    summary = (summary or "").strip()
-    return summary or None
+    out = (out or "").strip()
+    return out or None
+
+
+def _summarize(entries: list[dict], *, cerebras_key: str, groq_key: str) -> Optional[str]:
+    """Legacy single-pass summary (SUMMARY_PROMPT). Kept as the graceful fallback
+    for the Tier 8 two-pass so the digest can never regress below today."""
+    formatted = "\n".join(format_entry_text(e) for e in entries)
+    return _call_digest_llm(
+        SUMMARY_PROMPT.format(entries=formatted),
+        cerebras_key=cerebras_key, groq_key=groq_key, label="feedback-digest-multiuser",
+    )
+
+
+def _build_profile(
+    entries: list[dict], *, count: int, note: str,
+    cerebras_key: str, groq_key: str,
+) -> Optional[str]:
+    """Tier 8 two-pass preference profile: structured extraction → self-critique.
+
+    Pass 1 draws a draft profile calibrated to the reaction count (no over-
+    generalizing from sparse feedback); pass 2 critiques it against the count and
+    the user's steering note (which wins on contradiction). Degrades gracefully:
+    if extraction fails we fall back to the legacy single-pass summary; if only
+    the critique fails we keep the draft — so the result is never worse than today.
+    """
+    formatted = "\n".join(format_entry_text(e) for e in entries)
+
+    draft = _call_digest_llm(
+        PREFERENCE_PROFILE_PROMPT.format(entries=formatted, count=count),
+        cerebras_key=cerebras_key, groq_key=groq_key, label="feedback-profile-extract",
+    )
+    if not draft:
+        logger.warning("Digest: extraction pass empty — falling back to single-pass summary.")
+        return _summarize(entries, cerebras_key=cerebras_key, groq_key=groq_key)
+
+    refined = _call_digest_llm(
+        PROFILE_CRITIQUE_PROMPT.format(draft=draft, count=count, note=(note or "(none)")),
+        cerebras_key=cerebras_key, groq_key=groq_key, label="feedback-profile-critique",
+    )
+    if not refined:
+        logger.info("Digest: critique pass empty — keeping the extracted draft.")
+        return draft
+    return refined
+
+
+def _load_steering_note(client, user_id: str) -> str:
+    """The user's own steering note (preferences.preference_note), fed to the
+    self-critique pass so the derived profile never contradicts it. '' on miss."""
+    try:
+        resp = (
+            client.table("preferences")
+            .select("preference_note")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        return (rows[0].get("preference_note") or "").strip() if rows else ""
+    except Exception as e:
+        logger.warning("Digest: steering-note fetch failed for %s: %s", user_id, e)
+        return ""
 
 
 def _persist_summary(client, user_id: str, summary: str) -> bool:
@@ -166,7 +229,11 @@ def run_for_user(client, user_id: str, *, cerebras_key: str, groq_key: str) -> b
         )
         return True
 
-    summary = _summarize(entries, cerebras_key=cerebras_key, groq_key=groq_key)
+    note = _load_steering_note(client, user_id)
+    summary = _build_profile(
+        entries, count=total, note=note,
+        cerebras_key=cerebras_key, groq_key=groq_key,
+    )
     if not summary:
         logger.error("Digest: empty/failed summary for %s — preferences NOT updated.", user_id)
         return False

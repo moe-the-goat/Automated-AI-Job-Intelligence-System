@@ -93,6 +93,68 @@ no bullet lists, no markdown headers.
 """
 
 
+# Tier 8 — a richer, structured extraction pass (first of two). Produces a DRAFT
+# profile organized by preference dimension, calibrated to how many reactions
+# exist so it doesn't over-generalize from sparse feedback. The critique pass
+# below then refines it. Falls back to SUMMARY_PROMPT if this pass fails.
+PREFERENCE_PROFILE_PROMPT = """You are analyzing a candidate's job-search feedback to build a structured
+preference profile. It will be injected into a recruiter-screen prompt that scores
+future job listings against the candidate's CV.
+
+Each entry records the candidate's reaction to one job the pipeline surfaced:
+  applied        — submitted an application; strong positive
+  bookmarked     — interested, not yet applied; mild positive
+  not_relevant   — irrelevant to the search; strong negative
+  block_company  — never show this company again
+  wrong_location — geographically incompatible (look for location patterns)
+  other          — read the note; free-form explanation
+
+FEEDBACK HISTORY (chronological, most recent last) — {count} reaction(s) total:
+{entries}
+
+Write a DRAFT preference profile covering these dimensions, and ONLY where the
+entries actually support them (skip any dimension with no signal):
+  - Roles / role categories the candidate engages with vs rejects.
+  - Tech-stack and seniority patterns.
+  - Location and remote-vs-onsite patterns.
+  - Companies, industries, or company-size patterns favored or blocked.
+  - Explicit dealbreakers stated in the notes.
+
+CALIBRATION: base every claim on the {count} reaction(s) above. With few reactions,
+state preferences tentatively ("leans toward…") rather than as firm rules, and never
+turn a single reaction into a blanket rule. Do not invent anything not in the entries.
+Output prose only — no JSON, no bullet lists, no markdown headers.
+"""
+
+
+# Tier 8 — the self-critique pass (second of two). Refines the draft so it never
+# misleads the scorer: proportionate to the evidence, and consistent with the
+# candidate's own stated steering note (which wins on any contradiction).
+PROFILE_CRITIQUE_PROMPT = """You are a careful reviewer refining a candidate preference profile before it is
+used to score jobs. Correct it so it never misleads the scorer.
+
+DRAFT PROFILE:
+{draft}
+
+CONTEXT:
+- This profile is derived from {count} feedback reaction(s). Fewer reactions means
+  less certainty: soften or drop any claim that over-generalizes from too little
+  evidence.
+- The candidate's own stated preferences (may be "(none)"): {note}
+  If the draft contradicts these stated preferences, the stated preferences WIN —
+  correct the draft to match them.
+
+Rewrite the profile so that:
+  1. Every claim is proportionate to the evidence ({count} reaction(s)); overreaching
+     rules become tentative leanings or are removed.
+  2. It does not contradict the candidate's stated preferences above.
+  3. It stays concrete (name roles, technologies, locations) while being honest about
+     uncertainty.
+Output the REFINED profile as prose only — no JSON, no headers, and no meta-commentary
+about the review itself.
+"""
+
+
 class LogsRepoAuthError(RuntimeError):
     """Raised when the LOGS_REPO_TOKEN is rejected (401/403) by the GitHub Contents API.
 
