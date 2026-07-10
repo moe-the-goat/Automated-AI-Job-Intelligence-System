@@ -34,7 +34,8 @@ def _install(monkey, recorder, *, count, entries, summary):
     originals = {
         "count_feedback_entries": fdm.count_feedback_entries,
         "_fetch_user_feedback": fdm._fetch_user_feedback,
-        "_summarize": fdm._summarize,
+        "_build_profile": fdm._build_profile,
+        "_load_steering_note": fdm._load_steering_note,
         "_persist_summary": fdm._persist_summary,
         "_bump_digest_timestamp_only": fdm._bump_digest_timestamp_only,
     }
@@ -46,9 +47,12 @@ def _install(monkey, recorder, *, count, entries, summary):
         recorder.fetched = True
         return entries
 
-    def fake_summarize(entries_arg, *, cerebras_key, groq_key):
+    def fake_build(entries_arg, *, count, note, cerebras_key, groq_key):
         recorder.summarized = True
         return summary
+
+    def fake_note(client, user_id):
+        return ""
 
     def fake_persist(client, user_id, text):
         recorder.persisted = text
@@ -59,7 +63,8 @@ def _install(monkey, recorder, *, count, entries, summary):
 
     fdm.count_feedback_entries = fake_count
     fdm._fetch_user_feedback = fake_fetch
-    fdm._summarize = fake_summarize
+    fdm._build_profile = fake_build
+    fdm._load_steering_note = fake_note
     fdm._persist_summary = fake_persist
     fdm._bump_digest_timestamp_only = fake_bump
 
@@ -123,3 +128,66 @@ def test_counter_table_drift_is_tolerated():
     assert ok is True
     assert rec.summarized is False
     assert rec.persisted is None
+
+
+# ---------------------------------------------------------------------------
+# _build_profile — Tier 8 two-pass (structured extraction → self-critique)
+# ---------------------------------------------------------------------------
+
+def _install_llm(monkey_calls, *, extract, critique):
+    """Stub the single LLM helper both passes route through. `monkey_calls` is a
+    list the stub appends each label to, so tests can assert the call sequence."""
+    original = fdm._call_digest_llm
+
+    def fake_call(prompt, *, cerebras_key, groq_key, label):
+        monkey_calls.append(label)
+        if label == "feedback-profile-extract":
+            return extract
+        if label == "feedback-profile-critique":
+            return critique
+        if label == "feedback-digest-multiuser":
+            return "LEGACY SINGLE-PASS"
+        return None
+
+    fdm._call_digest_llm = fake_call
+    return lambda: setattr(fdm, "_call_digest_llm", original)
+
+
+def test_build_profile_two_pass_returns_critiqued_output():
+    calls = []
+    restore = _install_llm(calls, extract="DRAFT", critique="REFINED")
+    try:
+        out = fdm._build_profile(
+            [{"feedback_type": "applied", "title": "Eng", "company": "Acme"}],
+            count=8, note="remote only", cerebras_key="ck", groq_key="gk",
+        )
+    finally:
+        restore()
+    assert out == "REFINED"
+    # extraction runs first, then critique
+    assert calls == ["feedback-profile-extract", "feedback-profile-critique"]
+
+
+def test_build_profile_keeps_draft_when_critique_fails():
+    calls = []
+    restore = _install_llm(calls, extract="DRAFT", critique=None)
+    try:
+        out = fdm._build_profile([{"feedback_type": "applied"}], count=3, note="",
+                                 cerebras_key="ck", groq_key="gk")
+    finally:
+        restore()
+    assert out == "DRAFT", "a failed critique must fall back to the extracted draft"
+
+
+def test_build_profile_falls_back_to_single_pass_when_extraction_fails():
+    calls = []
+    restore = _install_llm(calls, extract=None, critique="unused")
+    try:
+        out = fdm._build_profile([{"feedback_type": "applied"}], count=5, note="",
+                                 cerebras_key="ck", groq_key="gk")
+    finally:
+        restore()
+    # extraction empty ⇒ legacy single-pass summary (never worse than today)
+    assert out == "LEGACY SINGLE-PASS"
+    assert "feedback-digest-multiuser" in calls
+    assert "feedback-profile-critique" not in calls
