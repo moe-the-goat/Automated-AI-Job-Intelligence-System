@@ -510,6 +510,11 @@ def _build_preferences_provider(user_id: str, feedback_embed_key: str):
     if entry_count >= RAG_FEEDBACK_THRESHOLD:
         embeddings = load_feedback_embeddings(user_id)
         loaded = len(embeddings.get("entries", []))
+        # Tier 8: the standing structured preference profile (the digest keeps it
+        # fresh even past the RAG threshold now). In RAG mode we PREPEND it to the
+        # per-job retrieved reactions, so the scorer gets both the candidate's
+        # overall preferences AND the few most-similar past reactions.
+        profile = (load_candidate_preferences(user_id) or "").strip()
         if loaded == 0:
             # entry_count says the corpus is past the RAG threshold, but the
             # embedding join returned nothing. That's not "no feedback" — it's a
@@ -526,12 +531,22 @@ def _build_preferences_provider(user_id: str, feedback_embed_key: str):
             )
         else:
             logger.info(
-                "User %s: RAG mode (%d feedback entries, %d embedded).",
-                user_id, entry_count, loaded,
+                "User %s: RAG mode (%d feedback entries, %d embedded, profile %s).",
+                user_id, entry_count, loaded, "present" if profile else "empty",
             )
 
         def preferences_for(row):
-            return retrieve_relevant_feedback(row, embeddings, feedback_embed_key, top_k=RAG_TOP_K)
+            retrieved = (retrieve_relevant_feedback(
+                row, embeddings, feedback_embed_key, top_k=RAG_TOP_K,
+            ) or "").strip()
+            if not profile:
+                return retrieved
+            parts = [f"OVERALL PREFERENCE PROFILE (from all your feedback):\n{profile}"]
+            if retrieved:
+                parts.append(
+                    "MOST RELEVANT PAST REACTIONS to jobs like this one:\n" + retrieved
+                )
+            return "\n\n".join(parts).strip()
 
         return preferences_for, "rag"
 

@@ -37,12 +37,55 @@ def test_rag_mode_with_loaded_embeddings():
             {"text": "applied: Backend dev", "embedding": [0.1, 0.2]},
         ]},
         retrieve_relevant_feedback=lambda row, emb, key, top_k=0: "CONTEXT",
+        load_candidate_preferences=lambda uid: "",  # no standing profile yet
     )
     try:
         provider, mode = mur._build_preferences_provider("u1", "key")
         assert mode == "rag"
-        # The provider must actually route through retrieval.
+        # With no profile, the provider is just the per-job retrieval.
         assert provider({"title": "x"}) == "CONTEXT"
+    finally:
+        restore()
+
+
+def test_rag_mode_prepends_standing_profile_above_retrieval():
+    # Tier 8: in RAG mode the standing structured profile is prepended to the
+    # per-job retrieved reactions (overall preferences, then most-relevant ones).
+    restore = _swap(
+        ensure_feedback_embeddings=lambda uid, key: mur.RAG_FEEDBACK_THRESHOLD + 25,
+        load_feedback_embeddings=lambda uid: {"entries": [
+            {"text": "applied: Backend dev", "embedding": [0.1, 0.2]},
+        ]},
+        retrieve_relevant_feedback=lambda row, emb, key, top_k=0: "RETRIEVED REACTIONS",
+        load_candidate_preferences=lambda uid: "MY OVERALL PROFILE",
+    )
+    try:
+        provider, mode = mur._build_preferences_provider("u1", "key")
+        assert mode == "rag"
+        out = provider({"title": "x"})
+        assert "MY OVERALL PROFILE" in out
+        assert "RETRIEVED REACTIONS" in out
+        # profile (general) comes before the retrieved (specific) reactions
+        assert out.index("MY OVERALL PROFILE") < out.index("RETRIEVED REACTIONS")
+    finally:
+        restore()
+
+
+def test_rag_mode_profile_only_when_retrieval_empty():
+    # A stable profile still reaches the scorer even when this job matches no
+    # past reaction (empty retrieval).
+    restore = _swap(
+        ensure_feedback_embeddings=lambda uid, key: mur.RAG_FEEDBACK_THRESHOLD + 25,
+        load_feedback_embeddings=lambda uid: {"entries": [
+            {"text": "x", "embedding": [0.1, 0.2]},
+        ]},
+        retrieve_relevant_feedback=lambda row, emb, key, top_k=0: "",
+        load_candidate_preferences=lambda uid: "MY OVERALL PROFILE",
+    )
+    try:
+        provider, _ = mur._build_preferences_provider("u1", "key")
+        out = provider({"title": "x"})
+        assert "MY OVERALL PROFILE" in out
     finally:
         restore()
 
@@ -53,6 +96,7 @@ def test_rag_mode_empty_corpus_logs_error(caplog=None):
         ensure_feedback_embeddings=lambda uid, key: mur.RAG_FEEDBACK_THRESHOLD + 25,
         load_feedback_embeddings=lambda uid: {"entries": []},   # load failure / FK missing
         retrieve_relevant_feedback=lambda row, emb, key, top_k=0: "",
+        load_candidate_preferences=lambda uid: "",
     )
 
     # Capture logs from the runner without relying on the caplog fixture.
