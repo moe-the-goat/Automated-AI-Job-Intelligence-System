@@ -2,19 +2,18 @@
 FEEDBACK DIGEST (multi-user) — B7c
 ----------------------------------
 Per-user analog of `feedback_digest.py`. Runs on its own cron tick (every
-5 days). For each user whose digest is stale AND whose feedback count is
-still under the RAG threshold, summarizes their feedback log into a 5-8
-sentence candidate preference profile and writes it to
+5 days). For each active user with any feedback, it builds a structured,
+self-critiqued candidate preference profile (Tier 8) and writes it to
 `preferences.candidate_preferences`.
 
 A user is "due for a digest" when:
   * `preferences.is_active` is true, AND
-  * `preferences.last_digest_at` is null OR older than DIGEST_INTERVAL_DAYS, AND
-  * the user's feedback count is below RAG_FEEDBACK_THRESHOLD.
+  * `preferences.last_digest_at` is null OR older than DIGEST_INTERVAL_DAYS.
 
-Users at/above the threshold are skipped automatically — the runner switches
-them to per-job retrieval, so a refreshed global summary would never be read.
-This mirrors the early-exit in the single-user `feedback_digest.py`.
+Users AT/ABOVE the RAG threshold get their profile regenerated too: since Tier 8,
+the runner prepends this profile to the per-job retrieved reactions in RAG mode,
+so keeping it fresh is worthwhile (it used to be skipped as dead weight). Only
+users with zero feedback are skipped.
 
 CLI:
     python feedback_digest_multi_user.py
@@ -32,7 +31,6 @@ from typing import Optional
 from pipeline.logging_setup import configure_logging, get_logger
 from pipeline.core_supabase import SupabaseConfigError, get_service_client
 from pipeline.core_feedback_supabase import (
-    RAG_FEEDBACK_THRESHOLD,
     count_feedback_entries,
     format_entry_text,
 )
@@ -211,14 +209,10 @@ def run_for_user(client, user_id: str, *, cerebras_key: str, groq_key: str) -> b
         logger.info("Digest: user %s has no feedback — skipping.", user_id)
         _bump_digest_timestamp_only(client, user_id)
         return True
-    if total >= RAG_FEEDBACK_THRESHOLD:
-        logger.info(
-            "Digest: user %s has %d entries >= RAG threshold %d. Skipping summary "
-            "(runner is using per-job retrieval).",
-            user_id, total, RAG_FEEDBACK_THRESHOLD,
-        )
-        _bump_digest_timestamp_only(client, user_id)
-        return True
+    # NOTE: we now regenerate the profile for users AT/ABOVE the RAG threshold too.
+    # It used to be skipped as dead weight (the runner used per-job retrieval and
+    # never read a global profile). Since Tier 8 the runner PREPENDS this profile
+    # to the retrieved reactions in RAG mode, so keeping it fresh is worthwhile.
 
     entries = _fetch_user_feedback(client, user_id)
     if not entries:

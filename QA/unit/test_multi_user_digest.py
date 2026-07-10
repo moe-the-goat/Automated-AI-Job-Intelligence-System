@@ -93,13 +93,17 @@ def test_zero_entries_skips_without_llm():
     assert rec.timestamp_bumped is True
 
 
-def test_at_or_above_threshold_skips_without_llm():
+def test_at_or_above_threshold_still_regenerates_profile():
+    # Since Tier 8 the runner prepends this profile to the per-job retrieved
+    # reactions in RAG mode, so ≥ threshold users get it regenerated (it used to
+    # be skipped as dead weight).
     rec = _Recorder()
-    ok = _run(rec, count=RAG_FEEDBACK_THRESHOLD, entries=[{"x": 1}], summary="unused")
+    entries = [{"feedback_type": "applied", "title": "Eng", "company": "Acme"}]
+    ok = _run(rec, count=RAG_FEEDBACK_THRESHOLD + 30, entries=entries, summary="Fresh profile.")
     assert ok is True
-    assert rec.summarized is False, "past the RAG threshold the digest must NOT regenerate a profile"
-    assert rec.persisted is None
-    assert rec.timestamp_bumped is True
+    assert rec.summarized is True, "past the RAG threshold the profile is now kept fresh for RAG mode"
+    assert rec.persisted == "Fresh profile."
+    assert rec.timestamp_bumped is False
 
 
 def test_just_below_threshold_summarizes_and_persists():
