@@ -30,13 +30,13 @@ The last turn in the story is the one that splits this into two repositories. On
 
 ## Overview
 
-Once an hour, a GitHub Actions workflow runs [multi_user_runner.py](multi_user_runner.py). It looks up every active, approved user whose next run is due, and for each one it reads their CV text and search preferences from a Supabase database, runs the full pipeline against them, writes the run summary and every scored job back to the database, and emails them a short shortlist. Each user is processed independently, on their own cadence, with their own learned preferences. Nothing runs unless the test suite passes first.
+On a short recurring schedule (an external cron pings the workflow every half hour, with GitHub's own `schedule` cron as a free backup), a GitHub Actions run of [multi_user_runner.py](multi_user_runner.py) looks up every active, approved user whose next run is due, and for each one it reads their CV text and search preferences from a Supabase database, runs the full pipeline against them, writes the run summary and every scored job back to the database, and emails them a short shortlist. To scale past one machine, the workflow is split into stages — a cheap due-check gate, a single shared scrape of the local market, then a matrix of shards that process disjoint slices of users across separate API-key pools. Each user is processed independently, on their own cadence, with their own learned preferences. Nothing runs unless the test suite passes first.
 
 The pipeline talks to nine external job sources, six ATS platforms, three LLM providers (Cerebras and Groq for job verdicts, Gemini for the lower-ranked second pass and for embeddings), a search abstraction over Google Programmable Search and DuckDuckGo for occasional fact-checks, and Jina Reader as a fallback for careers pages no scraper can parse alone. It runs entirely on free tiers. The total monthly cost of operating it is zero.
 
 A feedback loop closes the system end to end, and this is where the two repositories meet. Every daily email links to a personal feedback page, and each user also has a full dashboard, both served by the companion web app. When a user reacts to a job (applied, bookmarked, not for me, block company, wrong location), that reaction lands in the same database this worker reads. The worker embeds each reaction into a per-user RAG corpus, and a separate digest workflow compresses that history into a short preference profile that the verdict LLM reads on the next run. So tomorrow's picks reflect what each person actually applied to yesterday.
 
-Inside this repo there are seventeen modules under [pipeline/](pipeline/), three thin orchestrators at the repo root, a curated reputation list, **724 tests across 52 files**, and four GitHub Actions workflows that wire the whole thing into a self-managing loop. The rest of this document is a tour of why each piece is shaped the way it is.
+Inside this repo there are nineteen modules under [pipeline/](pipeline/), three thin orchestrators at the repo root, a curated reputation list, **833 tests across 53 files**, and four GitHub Actions workflows that wire the whole thing into a self-managing loop. The rest of this document is a tour of why each piece is shaped the way it is.
 
 ---
 
@@ -63,12 +63,12 @@ At the highest level, the pipeline is a six-stage funnel that closes back on its
     on description AND location fields)
           |
           v
-   embedding pre-rank with region, trust, and role-tier weighting
-   (per-user: ranked against THAT user's CV)
+   embedding pre-rank with region, trust, and per-user path/role weighting
+   (per-user: ranked against THAT user's CV and chosen career tracks)
           |
           v
-   top-section AI evaluation (Cerebras + Groq, top 55 + 5 wildcards)
-   with the user's learned preferences injected into the prompt
+   top-section AI evaluation (Cerebras + Groq gpt-oss-120b, top 55 + 5 wildcards)
+   with the user's paths, target seniority, and learned preferences in the prompt
           |
           v
    lower-ranked AI evaluation (Gemini Flash Lite, next ~25 jobs)
@@ -86,7 +86,7 @@ Each stage exists for a reason and was added in response to a specific failure m
 
 **Stage 2 — Filter gauntlet.** Eight deterministic checks: seen-jobs cache, reputation prefilter, dedup, language detection, location prefilter, seniority filter (including FAANG-style level codes), tech-keyword whitelist, and a non-tech intern blocker. A typical run filters hundreds of raw jobs down to a few dozen survivors before any AI is involved.
 
-**Stage 3 — Embedding pre-rank.** Survivors are embedded against the user's CV, then sorted by `weighted_score = cosine_similarity * region_weight * trust_weight`. The weights inject the inductive bias the embedding model lacks: fully-remote and Middle East roles get 1.30x, EU and Americas roles get 1.15x, India gets 0.70x, sanctioned regions get 0.50x. Trusted companies stack a 1.25x multiplier. Because the CV differs per user, the ranking differs per user.
+**Stage 3 — Embedding pre-rank.** Survivors are embedded against the user's CV, then sorted by `weighted_score = cosine_similarity * region_weight * trust_weight * role_weight`. The weights inject the inductive bias the embedding model lacks: fully-remote, Middle East, and Palestinian home-market roles get 1.30x, EU and Americas roles get 1.15x, India gets 0.70x, sanctioned regions get 0.50x. Trusted companies stack a 1.25x multiplier. The role weight is now per-user: when a user has chosen career tracks (paths), a title matching one of their tracks gets a 1.20x boost; with no paths set it falls back to the legacy AI > SWE > other tiers. Because both the CV and the chosen tracks differ per user, the ranking differs per user.
 
 **Stage 4 — Top-section AI evaluation.** Top 55 plus 5 wildcards reach a heuristic pre-screen, then the verdict LLM. Cerebras is the primary and Groq is the ping-pong fallback. The model returns a structured verdict with sub-scores, an opinionated recruiter-voice text verdict, and a `suspicious` flag. Each user's learned preference profile (built from their own feedback) is injected into the prompt so the model scores with their history in mind. Deterministic caps post-process the result before it reaches the user.
 
@@ -166,11 +166,11 @@ Top 55 jobs by weighted score plus 5 deterministically-sampled wildcards reach t
 <details>
 <summary><strong>AI — the verdict LLM (Cerebras + Groq)</strong></summary>
 
-Job verdicts are generated by **Cerebras** (primary) with **Groq `llama-3.3-70b-versatile`** as a hot fallback, both free-tier instruction-tuned models that produce clean JSON without burning tokens on internal reasoning. The fallback logic in [pipeline/core_llm.py](pipeline/core_llm.py) alternates providers in a ping-pong pattern (Cerebras, Groq, Cerebras, Groq) with at least four attempts and a short inter-attempt pause before giving up on a job. Transient 5xx / rate-limit / timeout errors are retried; 4xx auth errors still trigger a provider switch in case the failure is model-specific rather than credential-specific.
+Job verdicts are generated by **Cerebras** (primary) with **Groq** as a hot fallback, both now running the same strong open-weight model — **`gpt-oss-120b`** — on their free tiers. (Groq previously ran `llama-3.3-70b-versatile`; when that model was scheduled for decommission, both providers were consolidated onto gpt-oss-120b, the recommended replacement and the strongest free option.) The fallback logic in [pipeline/core_llm.py](pipeline/core_llm.py) alternates providers in a ping-pong pattern (Cerebras, Groq, Cerebras, Groq) with at least four attempts and a short inter-attempt pause before giving up on a job. It also runs a per-account adaptive rate limiter and round-robins across multiple keys per provider, so the free-tier per-minute limits are respected without a fixed sleep. Transient 5xx / rate-limit / timeout errors are retried; 4xx auth errors still trigger a provider switch in case the failure is model-specific rather than credential-specific.
 
-Why not Gemini for verdicts? Gemini's free tier caps at 500 requests per day. After the embedding pre-rank also uses Gemini, dedicating the remaining quota to embeddings and the lower-ranked second pass rather than top-section verdicts produces better signal for zero additional cost.
+Why not Gemini for verdicts? Gemini's free tier caps requests per day. After the embedding pre-rank also uses Gemini, dedicating the remaining quota to embeddings and the lower-ranked second pass rather than top-section verdicts produces better signal for zero additional cost.
 
-A critical lesson from the provider search: **avoid reasoning models**. The "thinking" variants consume the entire completion-token budget on hidden internal chain-of-thought before emitting visible text, leaving the actual JSON empty or truncated. The `instruct` suffix in a model name is the reliable indicator of a non-thinking variant.
+A lesson about reasoning models, and how it evolved. gpt-oss is a *reasoning* model, and an early version of this project avoided reasoning models entirely: their "thinking" variants consume the completion-token budget on hidden internal chain-of-thought before emitting visible text, leaving the actual JSON empty or truncated. What let the pipeline adopt the strongest free model anyway is two parameters set on every call: `reasoning_effort="low"` to keep the hidden thinking minimal, and `reasoning_format="hidden"` so the provider keeps the chain-of-thought *out* of the returned content entirely, leaving `message.content` as clean JSON. Without the second parameter, the reasoning leaks into the response (stray prose and braces) and breaks the JSON parse — the failure mode the old "avoid reasoning models" rule was really guarding against.
 
 The prompt is engineered to make the model think like a senior recruiter, not a friendly career-coach AI. It is forbidden from using the word "strong" or any generic praise. Every match claim must cite a specific CV asset by name, and every gap claim must name the missing requirement specifically. The verdict structure is anchored: `MATCH:`, optionally `SECOND MATCH/GAP:`, then `GAP:`, optionally `CLOSING REASON:` when the model decides to disqualify outright. It also demands explicit math: `match_percentage = 0.5 * tech_fit + 0.3 * experience_fit + 0.2 * logistics_fit`, capped when suspicious. That makes the verdict auditable. When the math does not add up, I know the model lied about its sub-scores.
 
@@ -194,7 +194,20 @@ The system used to be one-directional: the pipeline guessed at what a good job l
 
 When a user reacts to a job, the reaction is written to the shared Supabase database by the web app. This worker reads it. Hard signals apply immediately (a `block_company` reaction caps that company's future scores). Every reaction is embedded into a per-user RAG corpus via [pipeline/core_feedback_supabase.py](pipeline/core_feedback_supabase.py), which stores Gemini embedding vectors in a pgvector table for per-user similarity search.
 
-Soft signals feed the prompt rather than acting immediately. A separate workflow, [.github/workflows/multi_user_digest.yml](.github/workflows/multi_user_digest.yml), runs [feedback_digest_multi_user.py](feedback_digest_multi_user.py) on its own cron. For each user it compresses their reaction history into a short preference profile (using the same Cerebras-with-Groq-fallback summarizer, with the shared prompt living in [pipeline/core_feedback.py](pipeline/core_feedback.py)) and stores it. Every pipeline run loads that profile and injects it into the verdict prompt as a learned-preferences block alongside the CV facts, so the AI scores future jobs with each person's actual history in mind.
+Soft signals feed the prompt rather than acting immediately, and how they are compressed depends on how much feedback a user has:
+
+- **Below the RAG threshold (digest mode).** A separate workflow, [.github/workflows/multi_user_digest.yml](.github/workflows/multi_user_digest.yml), runs [feedback_digest_multi_user.py](feedback_digest_multi_user.py) on its own cron. For each user it builds a **structured, self-critiqued preference profile** in two passes: the first extracts a draft profile organized by dimension (roles, tech, seniority, location/remote, companies, dealbreakers), calibrated to how many reactions exist so it never over-generalizes from a handful; the second is a self-critique pass that softens claims the evidence does not support and reconciles them with the user's own steering note (which wins on any contradiction). If either pass fails it falls back to the original single-pass summary, so the profile is never worse than before. The shared prompts live in [pipeline/core_feedback.py](pipeline/core_feedback.py).
+- **At or above the RAG threshold.** The profile is not dead weight anymore: each verdict prepends the standing structured profile (the user's overall preferences) to the few most-relevant past reactions retrieved per job, so the model sees both the general picture and the specific precedents.
+- **Brand-new users (no feedback yet).** A curated per-path **starter profile** stands in as a clearly-subordinate default, so a user whose chosen tracks are known but who has not reacted to anything still gets sensible scoring guidance from day one. It is a prompt-time prior only — never stored as feedback, so it can't dilute the real signal.
+
+Every pipeline run loads whichever of these applies and injects it into the verdict prompt as a learned-preferences block alongside the CV facts, so the AI scores future jobs with each person's actual history in mind.
+
+</details>
+
+<details>
+<summary><strong>Per-user profile — career tracks and target seniority</strong></summary>
+
+The pipeline no longer assumes a single candidate persona. Each user carries a set of **career paths** (multi-select tracks like Backend, AI/ML, Data Engineering) and a **target seniority** (entry / mid / senior), both read from the database alongside the CV. The paths drive three things: the embedding ranker's role weight (a title matching a chosen track is boosted), the scrape targeting (each path seeds a curated set of search terms, round-robined so every chosen track is covered), and the verdict prompt (the model is told which tracks the candidate is aiming for). The target seniority relaxes or tightens the seniority filters — a mid/senior user keeps roles an entry-level user would have filtered out — and is surfaced in the prompt too. With no paths set the system falls back to its original behavior, so nothing regresses for a user who never picks tracks.
 
 </details>
 
@@ -281,7 +294,7 @@ The worker authenticates to the database with a service-role key held only as a 
 
 Everything above describes what the system does. This section describes how I made sure it keeps working, and is the part of the project I would point a hiring manager toward first.
 
-**724 tests across three tiers.** The suite in [QA/](QA/) follows the testing pyramid. Most tests are unit tests in `QA/unit/` (pure functions, deterministic, sub-millisecond). Some are integration tests in `QA/integration/` (multi-module flows with external services mocked). The rest are regression tests in `QA/regression/`. The test runner at [QA/run_all.py](QA/run_all.py) is pure stdlib, so no pytest dependency is required to run it, though every test is pytest-compatible too. The whole suite executes in roughly twenty-four seconds locally.
+**833 tests across three tiers.** The suite in [QA/](QA/) follows the testing pyramid. Most tests are unit tests in `QA/unit/` (pure functions, deterministic, sub-millisecond). Some are integration tests in `QA/integration/` (multi-module flows with external services mocked). The rest are regression tests in `QA/regression/`. The test runner at [QA/run_all.py](QA/run_all.py) is pure stdlib, so no pytest dependency is required to run it, though every test is pytest-compatible too. The whole suite executes in roughly twenty-four seconds locally.
 
 **Regression tests named for production bugs.** Each file in `QA/regression/` freezes a specific failure that once made it into a real email. The millisecond date-decoder bug, the logs-repo URL normalization, the short-description bypass, the zero-similarity render. When something breaks in production, the fix is not complete until there is a regression test pinning it. This is the discipline that turns code into something you can maintain rather than something you have to babysit, and building solo, it is the closest thing I had to a second pair of eyes.
 
@@ -315,22 +328,25 @@ The two READMEs are written to complete each other. This one is the engine; that
 |-- pipeline/                         core modules, each a single responsibility
 |   |-- core_search.py                fetchers for the global external sources
 |   |-- core_local_sources.py         Palestinian local market (ATS + search + Telegram + jobs.ps)
+|   |-- core_telegram.py              public Telegram job-channel collector (local market)
+|   |-- core_jobsps.py                jobs.ps board collector (local market)
 |   |-- core_ats.py                   six ATS integrations + tiered Jina fallback
 |   |-- core_websearch.py             Google Programmable Search + DuckDuckGo fallback
 |   |-- core_filter.py                deterministic filter gauntlet + JobTracker
-|   |-- core_embedding.py             CV-similarity pre-ranker (Gemini embeddings)
-|   |-- core_llm.py                   Cerebras + Groq ping-pong fallback verdict client
+|   |-- core_embedding.py             CV-similarity pre-ranker (Gemini embeddings, cached)
+|   |-- core_llm.py                   Cerebras + Groq gpt-oss-120b fallback client + rate limiter
+|   |-- core_llm_usage.py             in-memory LLM/embedding usage tracker (admin analytics)
 |   |-- core_ai.py                    verdict prompt, pre-screen, scam check, post-AI caps
-|   |-- core_feedback.py              feedback constants, RAG threshold, shared digest prompt
+|   |-- core_feedback.py              feedback constants, RAG threshold, digest + profile prompts
 |   |-- core_feedback_supabase.py     per-user feedback corpus + embeddings for RAG
 |   |-- core_supabase.py              service-role client + per-user job/run persistence
 |   |-- core_email_smtp.py            Gmail SMTP transport (sends to any recipient)
 |   |-- core_notify.py                email HTML rendering
-|   |-- region_weighting.py           geographic + trust + role-tier weighting for the ranker
+|   |-- region_weighting.py           geographic + trust + path/role weighting + starter profiles
 |   |-- url_validation.py             URL-pattern check + HEAD probe for ghost listings
 |   `-- logging_setup.py              configure_logging + get_logger helpers
 |
-|-- multi_user_runner.py              multi-tenant pipeline entry point (hourly cron, per-user due check)
+|-- multi_user_runner.py              multi-tenant pipeline entry point (~30-min cron, per-user due check, sharded)
 |-- feedback_digest_multi_user.py     per-user preference-profile summarizer
 |-- cleanup_retention.py              weekly retention cleanup of old rows + tokens
 |
@@ -353,7 +369,7 @@ The two READMEs are written to complete each other. This one is the engine; that
 |
 `-- .github/workflows/
     |-- qa.yml                        runs QA on every push/PR
-    |-- multi_user.yml                multi-user pipeline (hourly cron)
+    |-- multi_user.yml                multi-user pipeline (~30-min cron, gate + shared scrape + sharded matrix)
     |-- multi_user_digest.yml         per-user feedback summarization
     `-- cleanup_retention.yml         weekly retention cleanup
 ```
@@ -405,17 +421,18 @@ A snapshot of the current state:
 | Companies in the trust-boost list           | 84                                               |
 | Companies in the reputation blacklist       | 12                                               |
 | Geo-lock countries covered (pre-screen)     | 80+                                              |
-| Total tests in the QA suite                 | 724                                              |
-| Test files                                  | 52                                               |
+| Total tests in the QA suite                 | 833                                              |
+| Test files                                  | 53                                               |
 | QA suite runtime (local, sequential)        | ~24 seconds                                      |
-| Verdict LLM (primary, top section)          | Cerebras (free tier)                             |
-| Verdict LLM (fallback, top section)         | Groq llama-3.3-70b-versatile (free)              |
+| Verdict LLM (primary, top section)          | Cerebras gpt-oss-120b (free tier)                |
+| Verdict LLM (fallback, top section)         | Groq gpt-oss-120b (free tier)                    |
 | Verdict LLM (lower-ranked second pass)      | Gemini Flash Lite                                |
 | Embedding model                             | Gemini embeddings (dedicated key, free tier)     |
 | AI evaluation top-N                         | 55 + 5 wildcards                                 |
 | Lower-ranked second-pass cap                | 25 jobs                                          |
+| Per-user targeting                          | career paths + target seniority + learned prefs  |
 | Email transport                             | Gmail SMTP (any recipient, no domain)            |
-| Worker schedule                             | hourly cron, per-user due check                  |
+| Worker schedule                             | ~30-min external cron + GitHub backup, sharded   |
 | Monthly cost                                | $0                                               |
 
 ---
