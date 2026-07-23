@@ -355,14 +355,86 @@ _NON_TECH_TITLE_SIGNALS = (
     " operations ", "social media", "copywriter", "growth ",
     "business development",
 )
-_SENIOR_REGEX_PATTERNS = (
-    r"\b[5-9]\+?\s*years?\s+(?:of\s+)?(?:experience|exp)\b",
-    r"\b1[0-9]\+?\s*years?\s+(?:of\s+)?(?:experience|exp)\b",
-    r"\bminimum\s+(?:of\s+)?[5-9]\s*years?\b",
-    r"\bsenior-level\s+(?:engineer|developer|role)\b",
+# A "years" number in the SENIOR range: 5-99. Entry-reachable counts (2, 3, 4)
+# and their spelled-out forms are deliberately excluded so a "2-4 years" role
+# is never dropped for an entry user.
+_YEARS_NUM = r"(?:[5-9]|1[0-9]|[2-9]\d)"
+
+# Years-of-experience REQUIREMENT phrasings (>=5 years). Each is anchored to a
+# requirement context — a bare "5 years" with no experience/requirement cue does
+# NOT fire, which is what keeps "founded 5 years ago" style mentions out.
+_SENIOR_YEARS_PATTERNS = (
+    # N (+) [of] experience / exp  (also "5 years' experience" via the apostrophe)
+    rf"\b{_YEARS_NUM}\+?\s*years?['’\s]*(?:of\s+)?(?:experience|exp)\b",
+    # minimum / at least / no less than N years
+    rf"\b(?:minimum|min\.?|at\s+least|at\s+minimum|no\s+less\s+than)\s+(?:of\s+)?{_YEARS_NUM}\+?\s*years?\b",
+    # requires / require / must have / needs N years
+    rf"\b(?:requires?|require|must\s+have|needs?)\s+(?:a\s+minimum\s+of\s+)?{_YEARS_NUM}\+?\s*years?\b",
+    # explicit "N+ years" — the plus sign itself signals a floor / requirement
+    rf"\b{_YEARS_NUM}\+\s*years?\b",
+    # N years of professional / relevant / industry / hands-on / commercial ...
+    rf"\b{_YEARS_NUM}\+?\s*years?\s+(?:of\s+)?(?:professional|relevant|industry|hands[- ]on|commercial|proven|solid)\b",
+    # N years in / with / using / building / developing <a skill or domain>
+    rf"\b{_YEARS_NUM}\+?\s*years?\s+(?:of\s+(?:experience\s+)?)?(?:in|with|using|building|developing|working|programming|designing|architecting)\b",
+)
+
+# Senior TITLE words appearing in the description body (not the job title).
+_SENIOR_TITLE_PATTERNS = (
+    r"\bsenior-level\s+(?:engineer|developer|role|position)\b",
     r"\bstaff\s+engineer\b",
     r"\bprincipal\s+engineer\b",
 )
+
+# Kept as a module constant (name preserved) so tests/imports still resolve it.
+_SENIOR_REGEX_PATTERNS = _SENIOR_YEARS_PATTERNS + _SENIOR_TITLE_PATTERNS
+
+# Ranges like "5-8 years" / "5 to 10 years": fire only when the LOWER bound is
+# >=5, so entry-reachable ranges ("2-5", "3-5 years") are kept, not dropped.
+_YEARS_RANGE_RE = re.compile(r"\b(\d{1,2})\s*(?:-|–|—|to)\s*\d{1,2}\+?\s*years?\b")
+
+# Non-requirement mentions of years to ignore (tenure / history / team totals),
+# so they don't masquerade as a seniority requirement.
+_YEARS_NEGATIVE_RE = re.compile(
+    rf"\b{_YEARS_NUM}\+?\s*years?\s+(?:ago|in\s+a\s+row)\b"
+    rf"|\bcombined\s+(?:experience\s+of\s+)?{_YEARS_NUM}"
+    rf"|\b{_YEARS_NUM}\+?\s*years?\s+of\s+combined\b"
+    rf"|\bfor\s+(?:the\s+)?(?:past|last)\s+{_YEARS_NUM}\+?\s*years?\b"
+    rf"|\bover\s+the\s+(?:past|last)\s+{_YEARS_NUM}"
+    rf"|\b{_YEARS_NUM}\+?\s*years?\s+with\s+(?:us|our|the\s+company|the\s+team|this\s+company)\b"
+)
+
+_SENIOR_YEARS_COMPILED = tuple(re.compile(p) for p in _SENIOR_YEARS_PATTERNS)
+_SENIOR_TITLE_COMPILED = tuple(re.compile(p) for p in _SENIOR_TITLE_PATTERNS)
+
+
+def _senior_experience_reason(text):
+    """Return the matched phrase if `text` states a senior requirement — >=5
+    years of experience in a requirement context, an entry-unreachable range, or
+    a staff/principal/senior-level title in the body — else None.
+
+    Requirement-anchored (won't trip on "founded 5 years ago" / "combined 5
+    years") and range-aware (keeps "2-5"/"3-5 years"). Callers gate it to
+    entry-level users; mid/senior users want these roles.
+    """
+    if not text:
+        return None
+    t = str(text).lower()
+
+    def _negative(m):
+        return bool(_YEARS_NEGATIVE_RE.search(t[max(0, m.start() - 14): m.end() + 12]))
+
+    for m in _YEARS_RANGE_RE.finditer(t):
+        if int(m.group(1)) >= 5 and not _negative(m):
+            return m.group(0).strip()
+    for rx in _SENIOR_YEARS_COMPILED:
+        m = rx.search(t)
+        if m and not _negative(m):
+            return m.group(0).strip()
+    for rx in _SENIOR_TITLE_COMPILED:
+        m = rx.search(t)
+        if m:
+            return m.group(0).strip()
+    return None
 
 # Hard work-auth / clearance disqualifiers for a Palestine-based candidate.
 # Match conservatively — we want zero false positives, since these rules drop
@@ -564,9 +636,9 @@ def quick_viability_check(row, experience_level="entry"):
     # 4. Explicit senior-experience requirement. Skipped for mid/senior users —
     # a 5+yr role is a legitimate target for them, so let the AI judge the fit.
     if not _targets_senior_roles(experience_level):
-        for pat in _SENIOR_REGEX_PATTERNS:
-            if re.search(pat, description):
-                return False, "senior experience requirement in description"
+        phrase = _senior_experience_reason(description)
+        if phrase:
+            return False, f"senior experience requirement in description ({phrase})"
 
     # 5. Hard work-auth / clearance disqualifiers. Candidate is in Palestine —
     # US-citizen / US-resident / clearance-required roles are non-starters and
@@ -879,6 +951,26 @@ def _apply_india_scam_check(result, row, company):
     return result
 
 
+def _senior_requirement_skip(description, experience_level, title=""):
+    """Post-fetch guard for entry-level users. The cheap pre-screen only sees the
+    excerpt a source shipped; the full body is fetched here (URL-fetch fallback),
+    and it often carries the '5+ years' requirement the excerpt lacked. Re-run
+    the same detector on the full text so that requirement is DROPPED instead of
+    softly down-scored (and shown on the dashboard anyway). Returns
+    (skipped_result, True) for the caller to return directly, or None to proceed.
+    """
+    if _targets_senior_roles(experience_level):
+        return None
+    phrase = _senior_experience_reason(description)
+    if not phrase:
+        return None
+    logger.info(
+        "[SKIP] %-55s -> senior experience requirement in full description (%s)",
+        str(title)[:55], phrase,
+    )
+    return skipped_result(f"senior experience requirement in full description ({phrase})"), True
+
+
 def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferences="",
                          experience_level="entry", target_paths=""):
     """
@@ -909,6 +1001,9 @@ def evaluate_job_with_ai(row, cv_text, cerebras_key, groq_key, learned_preferenc
     title = str(row.get("title", ""))
     company = str(row.get("company", ""))
     description = _maybe_get_full_description(row)
+    _skip = _senior_requirement_skip(description, experience_level, title)
+    if _skip is not None:
+        return _skip
     web_search_context = _maybe_web_search_context(company, title, description)
     prompt = _build_verdict_prompt(
         row, cv_text, description,
@@ -977,6 +1072,9 @@ def evaluate_job_with_gemini(row, cv_text, gemini_key, learned_preferences="",
 
     title = str(row.get("title", ""))
     description = _maybe_get_full_description(row)
+    _skip = _senior_requirement_skip(description, experience_level, title)
+    if _skip is not None:
+        return _skip
     prompt = _build_verdict_prompt(
         row, cv_text, description,
         web_search_context="",
