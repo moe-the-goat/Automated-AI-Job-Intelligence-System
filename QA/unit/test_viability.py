@@ -4,7 +4,13 @@ deserves a full Gemini call.
 Bugs here cost real money: too strict and we skip legitimate jobs without
 any verdict; too lax and we burn Gemini quota on garbage.
 """
-from pipeline.core_ai import quick_viability_check, skipped_result, DEFAULT_AI_RESULT
+from pipeline.core_ai import (
+    quick_viability_check,
+    skipped_result,
+    DEFAULT_AI_RESULT,
+    _senior_experience_reason,
+    _senior_requirement_skip,
+)
 
 
 GOOD_DESCRIPTION = (
@@ -275,3 +281,91 @@ def test_prompt_includes_target_paths_when_set():
     # Empty target_paths omits the block entirely (no dangling label).
     without = _build_verdict_prompt(row, "cv", "desc", target_paths="")
     assert "TARGET PATHS" not in without
+
+
+# ---------------------------------------------------------------------------
+# Broadened senior-experience detection (requirement-anchored, range-aware)
+# ---------------------------------------------------------------------------
+# The old detector only caught "N years experience" / "minimum N years" and
+# leaked the many other ways a 5+ year requirement is written. These lock the
+# broader catches AND the false-positive guards that keep it from over-filtering
+# an entry user's already-thin market.
+
+def test_senior_reason_catches_varied_phrasings():
+    positives = [
+        "5 years in backend development",
+        "5+ years working with distributed systems",
+        "at least 5 years building web apps",
+        "requires 5 years of production ability",
+        "minimum 6 years of relevant experience",
+        "7+ years java and spring",
+        "5 years' experience shipping software",   # apostrophe form
+        "5-8 years of experience",                 # range, lower bound >= 5
+        "8 years of professional software engineering",
+        "you will act as a staff engineer on the team",
+    ]
+    for text in positives:
+        assert _senior_experience_reason(text) is not None, f"missed: {text!r}"
+
+
+def test_senior_reason_keeps_entry_reachable_and_non_requirements():
+    negatives = [
+        "2-4 years of experience preferred",
+        "3-5 years is a plus",                     # range lower bound < 5
+        "our company was founded 5 years ago",
+        "a team with a combined 12 years of experience",
+        "profitable for the past 6 years",
+        "after 5 years with the company you fully vest",
+        "2 years of experience required",
+        "great role for a junior developer",
+        "",
+        None,
+    ]
+    for text in negatives:
+        assert _senior_experience_reason(text) is None, f"false positive: {text!r}"
+
+
+def test_rejects_5_years_in_domain_entry_only():
+    """'5 years in backend' — the phrasing the old regex leaked — is dropped for
+    an entry user but kept for a senior user."""
+    row = {"title": "Backend Developer",
+           "description": "Join our team building APIs. "
+                          + ("We want 5 years in backend development. " * 5)}
+    assert quick_viability_check(row, experience_level="entry")[0] is False
+    assert quick_viability_check(row, experience_level="senior")[0] is True
+
+
+def test_keeps_entry_reachable_range():
+    row = {"title": "Backend Developer",
+           "description": "Join our growing team. "
+                          + ("We want 2-4 years of experience with Python and APIs. " * 4)}
+    ok, reason = quick_viability_check(row, experience_level="entry")
+    assert ok is True, reason
+
+
+def test_keeps_founded_years_ago_false_positive():
+    row = {"title": "Software Engineer",
+           "description": "Our startup was founded 5 years ago and builds ML tools. "
+                          + ("We value clean code and thorough testing. " * 5)}
+    ok, reason = quick_viability_check(row, experience_level="entry")
+    assert ok is True, reason
+
+
+def test_drop_reason_includes_matched_phrase():
+    row = {"title": "AI Intern",
+           "description": "Great ML role for the right person. "
+                          + ("Requires 6+ years of experience in production. " * 5)}
+    ok, reason = quick_viability_check(row, experience_level="entry")
+    assert ok is False
+    assert "senior experience" in reason
+    assert "6+ years" in reason  # the matched phrase is surfaced for auditing
+
+
+def test_post_fetch_guard_drops_entry_senior_role():
+    """The full-body re-check drops a 5+yr role that only the fetched body
+    revealed, for entry users, and no-ops for mid/senior or entry-safe bodies."""
+    desc = "You will build backend services. Requires 6+ years of experience."
+    skip = _senior_requirement_skip(desc, "entry", "Backend Engineer")
+    assert skip is not None and skip[0]["is_valid"] is False and skip[1] is True
+    assert _senior_requirement_skip(desc, "senior", "Backend Engineer") is None
+    assert _senior_requirement_skip("Junior-friendly role, 1 year is fine.", "entry") is None
