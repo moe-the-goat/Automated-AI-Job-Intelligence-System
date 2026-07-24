@@ -24,3 +24,4 @@ cv_text.txt
 
 # pytest cache — local artifact, regenerated each run.
 .pytest_cache/
+feedback_log.json
