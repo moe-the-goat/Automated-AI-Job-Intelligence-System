@@ -824,7 +824,11 @@ def _gemini_structure_jobs(text_content, careers_url, company_name, gemini_api_k
     )
     try:
         from google import genai                   # lazy — keeps QA imports cheap
+        from pipeline.core_llm import throttle_gemini  # share the Gemini 15-RPM budget
         client = genai.Client(api_key=gemini_api_key)
+        # Pace this on the SAME per-account bucket as the verdict path, so the
+        # two Flash Lite paths never burst the shared per-minute limit between them.
+        throttle_gemini(gemini_api_key)
         response = client.models.generate_content(model=model, contents=prompt)
         text = getattr(response, "text", "") or ""
         # Tally this call into the usage tracker. These careers-page extraction

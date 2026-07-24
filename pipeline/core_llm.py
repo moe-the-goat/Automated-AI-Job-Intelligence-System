@@ -168,15 +168,26 @@ _MAX_OUTPUT_TOKENS = 2048
 import threading
 
 _RPM_PER_ACCOUNT = {"Cerebras": 5, "Groq": 30, "Gemini": 15}
-_RATE_SAFETY = 1.10  # 10% headroom under the published per-account RPM
+# Per-provider headroom UNDER the published per-account RPM. Gemini Flash Lite's
+# 15 RPM is by far the tightest tier we hit (its RPD 500 and TPM 250K are roomy),
+# AND two separate paths share that one per-minute budget — the second-pass
+# verdict (core_llm) and the careers-page structuring (core_ats). So Gemini gets
+# extra margin: pacing it more conservatively has no daily-budget cost, and RPM
+# is the only wall it ever hits.
+_RATE_SAFETY = {"Cerebras": 1.10, "Groq": 1.10, "Gemini": 1.30}
+_DEFAULT_RATE_SAFETY = 1.10
 _RATE_STATE = {}     # (provider, api_key) -> next-allowed monotonic timestamp
 _RATE_LOCK = threading.Lock()
 
 
 def _min_interval(provider):
-    """Minimum seconds between calls on ONE account for this provider."""
+    """Minimum seconds between calls on ONE account for this provider. The
+    interval is 60/RPM widened by the provider's safety factor, so the effective
+    rate stays strictly under the published per-account RPM even in the worst
+    60-second sliding window."""
     rpm = _RPM_PER_ACCOUNT.get(provider, 5)
-    return (60.0 / rpm) * _RATE_SAFETY
+    safety = _RATE_SAFETY.get(provider, _DEFAULT_RATE_SAFETY)
+    return (60.0 / rpm) * safety
 
 
 def _reserve(now, next_allowed, interval):
@@ -200,6 +211,14 @@ def _throttle(provider, api_key, *, sleeper=time.sleep, clock=time.monotonic):
         _RATE_STATE[key] = new_next
     if wait > 0:
         sleeper(wait)
+
+
+def throttle_gemini(api_key, **kw):
+    """Public pacing entry for Flash Lite calls made OUTSIDE this module — namely
+    the careers-page structuring in core_ats. Routing those through the SAME
+    per-account bucket as the verdict calls is what stops the two paths from
+    each independently filling the shared 15-RPM budget and bursting past it."""
+    _throttle("Gemini", api_key, **kw)
 
 
 def _call_cerebras(prompt, api_key):

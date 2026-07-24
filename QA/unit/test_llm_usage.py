@@ -10,6 +10,10 @@ Locks:
     call duration
 """
 
+import math
+import sys
+import types
+
 from pipeline.core_llm_usage import _UsageTracker, extract_tokens
 from pipeline.core_llm import (
     _parse_keys,
@@ -21,6 +25,7 @@ from pipeline.core_llm import (
     _throttle,
     _min_interval,
     _RATE_STATE,
+    throttle_gemini,
 )
 
 
@@ -205,6 +210,76 @@ def test_throttle_noop_without_key():
     slept = []
     _throttle("Cerebras", "", sleeper=lambda s: slept.append(s), clock=lambda: 0.0)
     assert slept == []
+
+
+# --- Gemini Flash Lite RPM: the tightest tier, shared by two paths ----------
+
+def test_gemini_pacing_stays_strictly_under_free_tier_rpm():
+    # Gemini's 15 RPM is the tightest wall we hit. The interval must guarantee
+    # that even a worst-case 60s sliding window holds FEWER than 15 calls — and
+    # with real headroom, not one call short of the cap.
+    interval = _min_interval("Gemini")
+    max_in_window = math.floor(60.0 / interval) + 1
+    assert max_in_window < 15                 # can never reach the 15/min cap
+    assert max_in_window <= 12                # comfortable headroom, not barely
+
+
+def test_throttle_gemini_paces_on_the_shared_gemini_bucket():
+    # The public helper other modules call must pace on the SAME (provider,
+    # account) bucket as the verdict path — otherwise careers-page structuring
+    # and verdicts each fill the 15-RPM budget independently and burst it.
+    _RATE_STATE.clear()
+    slept = []
+    clk = lambda: 3000.0
+    slp = lambda s: slept.append(s)
+    throttle_gemini("gk", sleeper=slp, clock=clk)   # first call: no wait
+    throttle_gemini("gk", sleeper=slp, clock=clk)   # second: waits one Gemini interval
+    assert len(slept) == 1
+    assert abs(slept[0] - _min_interval("Gemini")) < 0.01
+    assert ("Gemini", "gk") in _RATE_STATE          # same key the verdict path uses
+
+
+def test_careers_structuring_routes_through_gemini_throttle():
+    # The careers-page Flash Lite call (core_ats) must go through the shared
+    # limiter before hitting the API. Patch the throttle to a spy and fake the
+    # google genai client so no network call happens.
+    import pipeline.core_ats as core_ats
+    import pipeline.core_llm as core_llm
+
+    spy = {"n": 0}
+    orig = core_llm.throttle_gemini
+    core_llm.throttle_gemini = lambda k, **kw: spy.__setitem__("n", spy["n"] + 1)
+
+    class _Resp:
+        text = "[]"
+
+    class _Models:
+        def generate_content(self, model, contents):
+            return _Resp()
+
+    class _Client:
+        def __init__(self, api_key=None):
+            self.models = _Models()
+
+    fake_genai = types.SimpleNamespace(Client=_Client)
+    fake_google = types.ModuleType("google")
+    fake_google.genai = fake_genai
+    saved = {k: sys.modules.get(k) for k in ("google", "google.genai")}
+    sys.modules["google"] = fake_google
+    sys.modules["google.genai"] = fake_genai
+    try:
+        core_ats._gemini_structure_jobs(
+            "A careers page with plenty of descriptive text to structure.",
+            "https://acme.example/careers", "Acme", "gkey", "TEST",
+        )
+        assert spy["n"] == 1  # paced exactly once, before the API call
+    finally:
+        core_llm.throttle_gemini = orig
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
 
 
 # --- Gemini multi-account rotation (lower-ranked verdicts) ------------------
