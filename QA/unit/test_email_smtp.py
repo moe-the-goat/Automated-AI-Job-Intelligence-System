@@ -287,3 +287,62 @@ def test_redact_preserves_domain_and_hides_local():
     assert _redact("ab@x.com") == "a***@x.com"
     assert _redact("") == "<invalid>"
     assert _redact("noatsign") == "<invalid>"
+
+
+# ---------------------------------------------------------------------------
+# Deliverability headers + MIME shape (anti-spam)
+# ---------------------------------------------------------------------------
+# These emails were landing in Gmail's spam folder. The fixes below are the
+# free, code-side half of that: a well-formed multipart message with the
+# headers bulk filters look for. Locked here so they can't silently regress.
+
+def _send_and_capture(**kwargs):
+    """Run one happy-path send and hand back the MIME message that went out."""
+    restore_creds = _set_creds()
+    restore_smtp = _patch_smtp(lambda *a, **k: _FakeSMTP(*a, **k))
+    try:
+        send_email("user@example.com", "subj", "<p>html</p>", **kwargs)
+    finally:
+        restore_smtp()
+        restore_creds()
+    return _FakeSMTP.last_instance.sent[0][0]
+
+
+def test_never_sends_html_only_even_without_text_arg():
+    """HTML-only mail trips MIME_HTML_ONLY in mainstream filters. A caller that
+    forgets text= must still produce a text/plain alternative."""
+    msg = _send_and_capture()
+    subtypes = [p.get_content_subtype() for p in msg.get_payload()]
+    assert "plain" in subtypes and "html" in subtypes
+
+
+def test_from_carries_a_display_name_and_reply_to():
+    msg = _send_and_capture(text="plain")
+    assert "Job Alerts" in msg["From"]
+    assert "sender@gmail.com" in msg["From"]
+    assert msg["Reply-To"] == "sender@gmail.com"
+
+
+def test_sets_required_rfc5322_headers():
+    msg = _send_and_capture(text="plain")
+    assert msg["Date"]
+    assert msg["Message-ID"] and msg["Message-ID"].startswith("<")
+    assert msg["Auto-Submitted"] == "auto-generated"
+
+
+def test_advertises_a_working_unsubscribe_path():
+    """A usable unsubscribe is one of the strongest legitimacy signals for
+    recurring mail. mailto: always works and needs no endpoint."""
+    msg = _send_and_capture(text="plain")
+    assert "mailto:sender@gmail.com" in msg["List-Unsubscribe"]
+    # We must NOT claim one-click POST support without an endpoint for it.
+    assert msg["List-Unsubscribe-Post"] is None
+
+
+def test_html_to_text_fallback_keeps_words_and_links():
+    from pipeline.core_email_smtp import _html_to_text
+    out = _html_to_text('<h2>Hi</h2><p>See <a href="https://x.co/j">this job</a></p>')
+    assert "Hi" in out
+    assert "this job" in out
+    assert "https://x.co/j" in out
+    assert "<" not in out and ">" not in out

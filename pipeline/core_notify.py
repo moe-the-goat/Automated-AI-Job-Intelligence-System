@@ -472,7 +472,148 @@ def format_email_html(internships_df, jobs_df, stats, lower_ranked_df=None,
             "(one tap per job &mdash; steers tomorrow&rsquo;s scoring)</span></p>"
         )
 
-    return html
+    return _wrap_email_document(html, shown_approved)
+
+
+# --- Deliverability helpers -------------------------------------------------
+# Mail filters treat a bare HTML fragment (no doctype/head/body) as a spam
+# signal, and an HTML-only message even more so. So every digest ships as a
+# well-formed document AND as a plain-text alternative (see format_email_text).
+
+def _wrap_email_document(body_html, shown_approved=0):
+    """Wrap the digest body in a valid, mobile-friendly HTML document.
+
+    Includes a hidden preheader — the grey preview line mail clients show next
+    to the subject. Without one they scrape the first visible text, which here
+    was the pipeline-stats line (noise).
+    """
+    preheader = (
+        f"{shown_approved} match{'' if shown_approved == 1 else 'es'} scored against your CV today."
+        if shown_approved
+        else "Today's scan found no strong matches."
+    )
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en"><head>'
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<meta name="color-scheme" content="light dark">'
+        "<title>Your job matches</title>"
+        "</head>"
+        '<body style="margin:0;padding:16px;background:#f6f7f9;'
+        'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif;'
+        'color:#131c2a;line-height:1.5;">'
+        '<div style="display:none;max-height:0;overflow:hidden;opacity:0;">'
+        f"{preheader}</div>"
+        f'<div style="max-width:900px;margin:0 auto;">{body_html}</div>'
+        "</body></html>"
+    )
+
+
+def count_displayed_matches(internships_df, jobs_df, min_match=0):
+    """How many jobs the digest will actually list, using the same floor the
+    renderers use — so the subject line can never over-promise."""
+    floor = min_match if (min_match and min_match > 0) else MATCH_DISPLAY_THRESHOLD
+    total = 0
+    for df in (internships_df, jobs_df):
+        if df is not None and not df.empty:
+            total += len(filter_by_match_threshold(df.copy(), floor))
+    return total
+
+
+def build_email_subject(match_count, today=None):
+    """Subject for the daily digest.
+
+    Deliberately varies by day and by count. The old subject was the literal
+    string "Your Daily Job Alerts" on every single send — an identical
+    subject repeating daily to the same recipient is a textbook bulk-mail
+    pattern, and it also tells the reader nothing about whether it's worth
+    opening.
+    """
+    stamp = (today or datetime.now().date()).strftime("%b %d")
+    if match_count <= 0:
+        return f"No strong matches today ({stamp})"
+    if match_count == 1:
+        return f"1 job matches your CV ({stamp})"
+    return f"{match_count} jobs match your CV ({stamp})"
+
+
+def _plain_match(row):
+    """Match figure for the text digest: the AI composite when the row was
+    AI-evaluated, otherwise the weighted similarity used by 'Also Found'."""
+    pct = row.get("match_percentage")
+    if pct is not None and str(pct).strip() not in ("", "N/A", "nan"):
+        try:
+            return f"{int(round(float(pct)))}%"
+        except (TypeError, ValueError):
+            pass
+    return _format_score_pct(row)
+
+
+def _plain_rows(df):
+    """One readable text block per job — no markdown pipes, no HTML."""
+    out = ""
+    for _, row in df.iterrows():
+        title = _suspicious_title(
+            row.get("title", "N/A"),
+            bool(row.get("suspicious", False)),
+            bool(row.get("pre_flagged_low_quality", False)),
+            bool(row.get("scam", False)),
+        )
+        company = row.get("company", "N/A")
+        location = row.get("location", "Remote/Unspecified")
+        pct = _plain_match(row)
+        comp = row.get("compensation", "Not stated")
+        verdict = str(row.get("ai_verdict", "") or "").strip()
+        url = row.get("job_url", "")
+        out += f"* {title} — {company} ({location})\n"
+        out += f"  Match {pct} · Pay: {comp}\n"
+        if verdict:
+            out += f"  {verdict}\n"
+        if url:
+            out += f"  {url}\n"
+        out += "\n"
+    return out
+
+
+def format_email_text(internships_df, jobs_df, stats, lower_ranked_df=None,
+                      feedback_url=None, min_match=0):
+    """Plain-text twin of format_email_html.
+
+    Every multipart message should carry a text/plain alternative: HTML-only
+    mail is a well-known spam signal, and this is what plain-text clients,
+    screen readers, and watches actually render.
+    """
+    internships_df = sort_by_match_percentage(
+        internships_df.copy() if not internships_df.empty else pd.DataFrame())
+    jobs_df = sort_by_match_percentage(
+        jobs_df.copy() if not jobs_df.empty else pd.DataFrame())
+    display_floor = min_match if (min_match and min_match > 0) else MATCH_DISPLAY_THRESHOLD
+    internships_df = filter_by_match_threshold(internships_df, display_floor)
+    jobs_df = filter_by_match_threshold(jobs_df, display_floor)
+    shown_approved = len(internships_df) + len(jobs_df)
+
+    text = "AUTOMATED AI JOB ALERTS\n=======================\n\n"
+    text += (f"Scraped {stats['scraped']}, filtered to {stats['filtered']}, "
+             f"{shown_approved} match{'' if shown_approved == 1 else 'es'} for you.\n\n")
+    if feedback_url:
+        text += f"Rate today's matches (steers tomorrow's scoring):\n{feedback_url}\n\n"
+
+    text += "INTERNSHIPS (AI & SWE)\n----------------------\n"
+    text += _plain_rows(internships_df) if not internships_df.empty else "No relevant internships found today.\n\n"
+
+    text += "JUNIOR & ENTRY-LEVEL JOBS (CV-MATCHED)\n--------------------------------------\n"
+    text += _plain_rows(jobs_df) if not jobs_df.empty else "No relevant full-time jobs found today.\n\n"
+
+    if lower_ranked_df is not None and not lower_ranked_df.empty:
+        prepared = _prepare_lower_ranked(lower_ranked_df)
+        if prepared is not None and not prepared.empty:
+            text += f"ALSO FOUND ({len(prepared)} jobs)\n----------\n"
+            text += _plain_rows(prepared)
+
+    text += "--\nYou receive this because you signed up for Job Alerts.\n"
+    text += "Manage delivery or pause these emails in your preferences.\n"
+    return text
 
 def send_email(subject, html_content, email_settings):
     """Dispatches the HTML email via Gmail SMTP."""

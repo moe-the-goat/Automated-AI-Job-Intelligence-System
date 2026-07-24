@@ -329,3 +329,55 @@ def test_markdown_renders_legend_with_all_three_badges():
     assert "🚨" in md
     assert "🚫" in md
     assert "⚠️" in md
+
+
+# ---------------------------------------------------------------------------
+# Deliverability: valid HTML document + plain-text twin + varying subject
+# ---------------------------------------------------------------------------
+
+def test_html_is_a_complete_document_not_a_fragment():
+    """A bare fragment (no doctype/head/body) reads as malformed to filters."""
+    html = format_email_html(pd.DataFrame([baseline_job_row()]), pd.DataFrame(), _stats(1))
+    low = html.lower()
+    assert low.startswith("<!doctype html>")
+    assert "<html" in low and "</html>" in low
+    assert 'meta charset' in low
+    assert "viewport" in low            # renders properly on phones
+
+
+def test_text_digest_lists_jobs_without_any_markup():
+    from pipeline.core_notify import format_email_text
+    row = baseline_job_row()
+    row["title"] = "Backend Engineer"
+    row["job_url"] = "https://example.com/job/1"
+    text = format_email_text(pd.DataFrame([row]), pd.DataFrame(), _stats(1))
+    assert "Backend Engineer" in text
+    assert "https://example.com/job/1" in text     # links must survive
+    assert "<" not in text and ">" not in text     # no leaked HTML
+    assert "unsubscribe" in text.lower() or "pause" in text.lower()
+
+
+def test_text_digest_handles_an_empty_day():
+    from pipeline.core_notify import format_email_text
+    text = format_email_text(pd.DataFrame(), pd.DataFrame(), _stats(0))
+    assert "No relevant internships" in text
+    assert "No relevant full-time jobs" in text
+
+
+def test_subject_varies_with_match_count():
+    from pipeline.core_notify import build_email_subject, count_displayed_matches
+    import datetime
+    day = datetime.date(2026, 7, 24)
+    none_ = build_email_subject(0, today=day)
+    one = build_email_subject(1, today=day)
+    many = build_email_subject(6, today=day)
+    assert none_ != one != many and none_ != many   # never one fixed string
+    assert "Jul 24" in many                          # dated, so days differ
+    assert "6" in many
+    assert "1 job matches" in one                    # singular reads correctly
+
+    # The count must match what the digest actually lists, so the subject can
+    # never over-promise: a row under the display floor isn't counted.
+    weak = baseline_job_row()
+    weak["match_percentage"] = 10
+    assert count_displayed_matches(pd.DataFrame([weak]), pd.DataFrame()) == 0

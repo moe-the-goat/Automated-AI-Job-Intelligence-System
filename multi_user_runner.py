@@ -73,7 +73,12 @@ from pipeline.core_embedding import (
     load_job_embedding_cache,
     save_job_embedding_cache,
 )
-from pipeline.core_notify import format_email_html
+from pipeline.core_notify import (
+    build_email_subject,
+    count_displayed_matches,
+    format_email_html,
+    format_email_text,
+)
 # Transport: Gmail SMTP (sends to any recipient, no domain needed). Replaced
 # Resend, which required a verified custom domain to reach arbitrary addresses.
 from pipeline.core_email_smtp import send_email as send_email_transport
@@ -1468,10 +1473,24 @@ def _run_for_user(user: dict, client, api_cache: _ApiCache, *, dry_run: bool,
                 # sub-55 preference (e.g. 50) isn't silently clamped by the 55 default.
                 min_match=min_match,
             )
+            # Ship a text/plain twin alongside the HTML: HTML-only mail is a
+            # standard spam signal, and the subject now varies by day + match
+            # count instead of being the same string on every single send.
+            text = format_email_text(
+                internships_df, jobs_df,
+                {"scraped": stats["scraped"], "filtered": stats["filtered"], "approved": stats["approved"]},
+                lower_ranked_df=email_lower,
+                feedback_url=feedback_url,
+                min_match=min_match,
+            )
+            subject = build_email_subject(
+                count_displayed_matches(internships_df, jobs_df, min_match)
+            )
             ok, _info = send_email_transport(
                 user["notification_email"],
-                "Your Daily Job Alerts",
+                subject,
                 html,
+                text=text,
             )
             # Record delivery outcome (Tier D) so the admin can see send failures —
             # a run can "succeed" while its email silently fails (e.g. SMTP auth).

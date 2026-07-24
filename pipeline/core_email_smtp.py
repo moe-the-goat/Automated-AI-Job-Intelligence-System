@@ -31,6 +31,7 @@ import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, formatdate, make_msgid
 from typing import Optional, Tuple
 
 from pipeline.logging_setup import get_logger
@@ -41,6 +42,11 @@ logger = get_logger(__name__)
 DEFAULT_SMTP_SERVER = "smtp.gmail.com"
 DEFAULT_SMTP_PORT = 465
 SMTP_TIMEOUT_SECONDS = 30
+
+# The friendly name shown instead of a bare address. A recognizable sender is
+# one of the cheapest deliverability wins there is — filters and humans both
+# treat "Job Alerts <...>" better than a raw gmail address.
+SENDER_DISPLAY_NAME = "Job Alerts"
 
 
 class SmtpEmailError(RuntimeError):
@@ -94,12 +100,36 @@ def send_email(
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = from_address or sender_email
+    # Display name + Reply-To: a bare address reads as machine-generated bulk.
+    msg["From"] = from_address or formataddr((SENDER_DISPLAY_NAME, sender_email))
     msg["To"] = to
+    msg["Reply-To"] = sender_email
+    # Date and Message-ID are REQUIRED by RFC 5322. Gmail backfills them, but a
+    # message that arrives without them is scored as malformed by some filters,
+    # so we set them ourselves rather than relying on the relay.
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=sender_email.rpartition("@")[2] or None)
+    # Marks the mail as machine-generated so recipients' auto-responders don't
+    # reply to it (a reply loop looks like spam traffic from our address).
+    msg["Auto-Submitted"] = "auto-generated"
+    # A working unsubscribe path is one of the strongest "this is legitimate
+    # bulk mail" signals to Gmail. mailto: needs no endpoint and always works;
+    # the app link lets people pause delivery themselves. Deliberately NOT
+    # advertising List-Unsubscribe-Post — that promises a one-click POST
+    # endpoint, and claiming it without one is worse than omitting it.
+    unsub = [f"<mailto:{sender_email}?subject=unsubscribe>"]
+    app_base = os.environ.get("APP_BASE_URL", "").strip().rstrip("/")
+    if app_base.startswith("http"):
+        unsub.append(f"<{app_base}/preferences>")
+    msg["List-Unsubscribe"] = ", ".join(unsub)
+
     # A plain-text part first, HTML second: clients render the last (richest)
     # part, but a text alternative improves deliverability and accessibility.
-    if text:
-        msg.attach(MIMEText(text, "plain"))
+    # HTML-only mail trips MIME_HTML_ONLY in every mainstream filter, so fall
+    # back to a stripped rendering of the HTML rather than sending none.
+    # Charset is left to MIMEText: it picks us-ascii (readable, 7bit) when the
+    # body allows and utf-8 only when it must — Arabic local listings included.
+    msg.attach(MIMEText(text or _html_to_text(html), "plain"))
     msg.attach(MIMEText(html, "html"))
 
     try:
@@ -117,6 +147,35 @@ def send_email(
 
     logger.info("SMTP OK -> %s", _redact(to))
     return True, ""
+
+
+def _html_to_text(html: str) -> str:
+    """Last-resort text/plain rendering of an HTML body.
+
+    Callers should pass a purpose-written `text=`; this only exists so a caller
+    that forgets one still produces a multipart/alternative message instead of
+    an HTML-only one. Keeps link targets, since a text part whose links are
+    invisible is useless to whoever is reading it.
+    """
+    import re
+    from html import unescape
+
+    if not html:
+        return ""
+    out = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", " ", html)
+    # Surface hrefs as "label (url)" before the tags are stripped away.
+    out = re.sub(
+        r'(?is)<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+        lambda m: f"{re.sub(r'(?s)<[^>]+>', '', m.group(2)).strip()} ({m.group(1)})",
+        out,
+    )
+    out = re.sub(r"(?i)<br\s*/?>", "\n", out)
+    out = re.sub(r"(?i)</(p|div|tr|h[1-6]|li)>", "\n", out)
+    out = re.sub(r"(?s)<[^>]+>", " ", out)
+    out = unescape(out)
+    out = re.sub(r"[ \t ]+", " ", out)
+    out = re.sub(r"\n\s*\n\s*\n+", "\n\n", out)
+    return "\n".join(line.strip() for line in out.splitlines()).strip()
 
 
 def _redact(email: str) -> str:
